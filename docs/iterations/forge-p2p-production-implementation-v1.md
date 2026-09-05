@@ -17,9 +17,22 @@ which every advertised protocol is either:
 
 Production means more than a compatible codec. The node must own bounded
 state, activation, maintenance, resource reservations, persistence,
-diagnostics and deterministic shutdown. The machine-readable inventory in
-`tests/libp2p_interop/p2p_feature_inventory.json` is the support-claim source of
-truth during this program.
+diagnostics and deterministic shutdown. Scope and implementation evidence have
+different machine-readable owners:
+
+- `tests/libp2p_interop/p2p_donor_capabilities.json` is the donor-first scope
+  manifest. It classifies capabilities from the pinned specs, Go and Rust
+  donors as required, optional, deferred or deliberately excluded;
+- `tests/libp2p_interop/p2p_feature_inventory.json` records only Forge surfaces
+  that exist in the current tree and their actual evidence state.
+
+A roadmap entry is not an implementation claim. The inventory checker derives
+its expected Forge feature IDs from the donor-first manifest rather than from
+a local hardcoded allowlist. Each profile also carries an explicit capability
+scope lock, checked against the classified entries, so accidental removal or
+unassigned addition fails the gate. Semantic completeness still requires the
+recorded donor audit and independent review; a source checker cannot infer
+arbitrary protocol meaning from Go, Rust and specification text.
 
 ## 2. Invariants
 
@@ -55,10 +68,26 @@ release, diagnostics and applicable evidence are explicit. `mapped` in the
 donor matrix means that a donor case has a Forge test; it does not mean that the
 feature is activated or production-ready.
 
+Production readiness is profile-specific. Stage 8 may promote the native
+TCP/QUIC profile and the private-network profile only after all of their
+required manifest entries pass. Browser transports do not silently gate or
+inherit that claim: WebSocket is Stage 9, while WebTransport and WebRTC remain
+explicit future-profile decisions.
+
+`required` and `optional` describe runtime profile policy: optional mechanisms
+such as mDNS and UPnP are implemented but need not be enabled by every
+deployment. `delivery` is independent: every `stage_6` entry, including an
+optional runtime mechanism, must leave that state before Stage 6 closes.
+
 ## 4. Stage 1: Support Claims And Inventory
 
 ### Scope
 
+- audit and enumerate the protocol, transport, discovery, security, resource
+  and host capabilities exposed by the pinned libp2p specs, Go and Rust donors;
+- assign every donor capability to a production profile and an explicit
+  delivery or rejection disposition, including capabilities not implemented by
+  Forge yet;
 - enumerate every built-in and transport-upgrade protocol ID, capability bit
   and public nested operational component;
 - classify every public P2P declaration through its exact owning module or
@@ -78,6 +107,13 @@ feature is activated or production-ready.
 ### Exit gate
 
 - source-only inventory check passes;
+- every donor capability belongs to a named profile, references pinned donor
+  sources and has an explicit requirement and delivery disposition;
+- every profile scope lock exactly matches its classified capabilities, so
+  removing or adding an entry requires an explicit baseline update;
+- the donor capability manifest, donor fixture matrix and implementation
+  inventory reference each other, and every existing Forge feature is owned by
+  exactly one donor-capability entry;
 - every built-in/negotiated protocol, capability and tracked public nested
   component is covered exactly once;
 - every public P2P module belongs to exactly one canonical target and its
@@ -307,26 +343,67 @@ hints remain untrusted until authenticated connect and Identify. Stage 4 owns
 Kademlia bucket refresh, so Stage 5 consumes its results without duplicating
 that maintenance loop.
 
-### Stage 6: Reachability and path management
+### Stage 6: Donor parity, reachability and path management
 
-Maintain AutoNAT observations, effective reachability, AutoRelay candidates and
-reservations, and one per-peer DCUtR attempt state machine. Preserve relay
-fallback and prove reservation loss/renewal behavior.
+Stage 6 closes every required native/private-host gap discovered by the
+donor-first manifest except WebSocket. It is delivered as focused PRs rather
+than one transport monolith:
 
-### Stage 7: GossipSub and plugin surface
+1. `forge-p2p-reachability-v1`: observed-address confidence and expiry,
+   separate AutoNAT v1/v2 client gates, opt-in bounded service roles, effective
+   reachability, periodic Ping liveness and typed host-state events;
+2. `forge-p2p-private-network-v1`: standard `/pnet` PSK protection and the
+   private-network profile;
+3. `forge-p2p-mdns-v1`: optional zero-configuration LAN discovery, including
+   the fingerprinted private-network service namespace;
+4. `forge-p2p-address-resolution-v1`: `/dnsaddr`, bounded recursive resolution,
+   Happy Eyeballs and adaptive UDP/IPv6 black-hole suppression;
+5. `forge-p2p-nat-mapping-v1`: optional UPnP mapping ownership, renewal, loss
+   and confirmed external-address publication;
+6. `forge-p2p-autorelay-v1`: verified relay candidates, bounded reservations,
+   renewal/replacement and Identify Push of circuit addresses; the public relay
+   service remains a separately configured, bounded role;
+7. `forge-p2p-path-management-v1`: one per-peer DCUtR/simultaneous-open state,
+   direct upgrade, backoff, cancellation and relay fallback;
+8. `forge-p2p-host-protection-v1`: staged connection gater plus memory, file
+   descriptor, transient and service resource scopes;
+9. `forge-p2p-gossipsub-production-v1`: donor-consistent scoring, mesh repair,
+   v1.0 fallback proof, v1.2 `IDONTWANT`, v1.3 extension negotiation and an
+   explicit negotiated decision for Partial Messages.
 
-Complete donor-consistent scoring, decay, thresholds, mesh selection,
-opportunistic grafting and score retention. The pubsub plugin remains a narrow
-facade over node-owned GossipSub and topology. GossipSub v1.0 fallback needs a
-fixture that forces v1.0 negotiation; successful v1.1 interop is not evidence
-for the fallback protocol.
+The existing DHT, topology and transport services are reused. mDNS, DNSAddr,
+AutoNAT, AutoRelay and path upgrades feed the same topology manager; they do
+not create parallel discovery or dialing loops. Typed events report state
+changes without turning diagnostics into a control API.
+
+Stage 6 is complete only when the manifest has no `stage_6` entry,
+each delivered capability has an implementation feature/evidence mapping, and
+live Go/Rust tests cover every standard protocol or negotiation behavior that
+the profile advertises.
+
+### Stage 7: Official plugin and operational surface
+
+Expose the complete validated Stage 6 configuration, host/protocol metrics and read-only diagnostics
+through the official plugins. Plugins remain dependency/configuration adapters:
+they may not own mDNS, NAT, relay, dialing, GossipSub or resource-maintenance
+loops. Programmatic nodes and plugin-created nodes must have lifecycle parity.
 
 ### Stage 8: Production proof
 
 Run restart, churn, scale, hostile-peer, bounded-memory and long-duration tests
 through both the raw node and official plugins, followed by live Go and Rust
-interop. Only then may inventory entries be promoted to `live` and Content
-Swarm resume on the hardened substrate.
+interop. Only then may native and private-network inventory entries be promoted
+to `live` and Content Swarm resume on the hardened substrate. This promotion
+does not claim browser transport support.
+
+### Stage 9: P2P WebSocket and browser transport profile
+
+Implement donor-compatible `/ws` and `/wss` dial/listen behavior, secure upgrade,
+resource accounting, proxy/backpressure handling, explicit WSS certificate
+ownership/AutoTLS policy and Go/Rust interoperability.
+Only then may Forge advertise the WebSocket browser-transport profile.
+WebTransport and WebRTC remain separately classified future capabilities and
+cannot be inferred from WebSocket support.
 
 ## 9. Delivery Discipline
 

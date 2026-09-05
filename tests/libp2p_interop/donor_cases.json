@@ -3,6 +3,7 @@
   "status_scope": "donor_case_coverage_only",
   "execution_scope": "registered_optional_tests_not_current_results",
   "production_inventory": "p2p_feature_inventory.json",
+  "capability_inventory": "p2p_donor_capabilities.json",
   "donor_revisions": {
     "libp2p-specs": "6b6203ee6f62938ce67efdb33498173f475851c0",
     "multiaddr": "8f9c2eeff8a50276660c0d93fe5939540ee52110",

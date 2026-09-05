@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "claim_scope": "source_structure_and_declared_evidence_only",
+  "donor_capabilities": "p2p_donor_capabilities.json",
   "allowed_states": [ "live", "manual-only", "partial", "stub", "orphan", "unverified" ],
   "owners": {
     "net.p2p.node": {
@@ -188,58 +189,62 @@
     },
     "plugin.p2p.node": {
       "owner": "plugin.p2p.node",
-      "module_count": 4,
+      "module_count": 5,
       "modules": [
-        "forge.plugins.p2p.node.api", "forge.plugins.p2p.node.exceptions", "forge.plugins.p2p.node.plugin",
-        "forge.plugins.p2p.node.types"
+        "forge.plugins.p2p.node.api", "forge.plugins.p2p.node.descriptor",
+        "forge.plugins.p2p.node.exceptions", "forge.plugins.p2p.node.plugin", "forge.plugins.p2p.node.types"
       ],
       "headers": [],
       "module_features": {
         "forge.plugins.p2p.node.api": [ "plugin.node" ],
+        "forge.plugins.p2p.node.descriptor": [ "plugin.node" ],
         "forge.plugins.p2p.node.exceptions": [ "plugin.node" ],
         "forge.plugins.p2p.node.plugin": [ "plugin.node" ],
         "forge.plugins.p2p.node.types": [ "plugin.node" ]
       },
       "header_features": {},
-      "sha256": "863551d545acc451deab967c8bdf9c0da9495b21bf7106937ba41705196713dc",
+      "sha256": "62fae922193a4f6cdcf2fa6b16a12bd65a7be897fe739f2c6d52d883574a09b3",
       "feature_ids": [ "plugin.node" ]
     },
     "plugin.p2p.resolver": {
       "owner": "plugin.p2p.resolver",
-      "module_count": 5,
+      "module_count": 6,
       "modules": [
-        "forge.plugins.p2p.resolver.api", "forge.plugins.p2p.resolver.exceptions",
+        "forge.plugins.p2p.resolver.api", "forge.plugins.p2p.resolver.descriptor",
+        "forge.plugins.p2p.resolver.exceptions",
         "forge.plugins.p2p.resolver.managed_api", "forge.plugins.p2p.resolver.plugin",
         "forge.plugins.p2p.resolver.types"
       ],
       "headers": [],
       "module_features": {
         "forge.plugins.p2p.resolver.api": [ "plugin.resolver" ],
+        "forge.plugins.p2p.resolver.descriptor": [ "plugin.resolver" ],
         "forge.plugins.p2p.resolver.exceptions": [ "plugin.resolver" ],
         "forge.plugins.p2p.resolver.managed_api": [ "plugin.resolver" ],
         "forge.plugins.p2p.resolver.plugin": [ "plugin.resolver" ],
         "forge.plugins.p2p.resolver.types": [ "plugin.resolver" ]
       },
       "header_features": {},
-      "sha256": "b34848088f1db4f0cd8a76fd8e4b0d283d0609dd34d981a2b78f6b0bea187f4d",
+      "sha256": "9f8a28b5915845450d6ef9da0da12782265f05e581f4dc9b60ffded27b4b14f3",
       "feature_ids": [ "plugin.resolver" ]
     },
     "plugin.p2p.pubsub": {
       "owner": "plugin.p2p.pubsub",
-      "module_count": 4,
+      "module_count": 5,
       "modules": [
-        "forge.plugins.p2p.pubsub.api", "forge.plugins.p2p.pubsub.exceptions", "forge.plugins.p2p.pubsub.plugin",
-        "forge.plugins.p2p.pubsub.types"
+        "forge.plugins.p2p.pubsub.api", "forge.plugins.p2p.pubsub.descriptor",
+        "forge.plugins.p2p.pubsub.exceptions", "forge.plugins.p2p.pubsub.plugin", "forge.plugins.p2p.pubsub.types"
       ],
       "headers": [],
       "module_features": {
         "forge.plugins.p2p.pubsub.api": [ "plugin.pubsub" ],
+        "forge.plugins.p2p.pubsub.descriptor": [ "plugin.pubsub" ],
         "forge.plugins.p2p.pubsub.exceptions": [ "plugin.pubsub" ],
         "forge.plugins.p2p.pubsub.plugin": [ "plugin.pubsub" ],
         "forge.plugins.p2p.pubsub.types": [ "plugin.pubsub" ]
       },
       "header_features": {},
-      "sha256": "3a2691286c41a3781d99ed89e7184d5561c11c7d02a2954411962837cae78fe1",
+      "sha256": "749ead0ef8434d8245c8e45162de5f287f550c4bf8ca16701c6ec87180328921",
       "feature_ids": [ "plugin.pubsub" ]
     },
     "plugin.p2p.diagnostics": {

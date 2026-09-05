@@ -33,37 +33,6 @@ EVIDENCE_LAYERS = {
     "donor_interop",
 }
 
-REQUIRED_FEATURE_IDS = {
-    "transport.direct_quic",
-    "transport.tcp_yamux",
-    "protocol.multistream_select",
-    "identity.secure_transport_authentication",
-    "protocol.echo",
-    "protocol.ping",
-    "protocol.identify",
-    "protocol.peer_exchange",
-    "protocol.autonat",
-    "protocol.relay",
-    "protocol.dcutr",
-    "state.hole_punch_attempt",
-    "protocol.kademlia",
-    "protocol.rendezvous",
-    "protocol.gossipsub",
-    "state.peer_store",
-    "state.kademlia_routing_table",
-    "lifecycle.bootstrap",
-    "lifecycle.discovery",
-    "resource.sessions",
-    "resource.streams",
-    "resource.dials",
-    "resource.queued_bytes",
-    "topology.connection_manager",
-    "plugin.node",
-    "plugin.resolver",
-    "plugin.pubsub",
-    "plugin.diagnostics",
-}
-
 REQUIRED_OWNERS = {
     "net.p2p.node": {
         "kind": "library",
@@ -182,16 +151,19 @@ def public_surface_snapshot(
 
 
 def main() -> int:
-    if len(sys.argv) != 4:
+    if len(sys.argv) not in {5, 6}:
         print(
-            "usage: check_p2p_feature_inventory.py SOURCE_ROOT INVENTORY DONOR_CASES",
+            "usage: check_p2p_feature_inventory.py "
+            "SOURCE_ROOT INVENTORY DONOR_CAPABILITIES DONOR_CASES [DONORS_ROOT]",
             file=sys.stderr,
         )
         return 2
 
     root = Path(sys.argv[1]).resolve()
     inventory_path = Path(sys.argv[2]).resolve()
-    donor_path = Path(sys.argv[3]).resolve()
+    capability_path = Path(sys.argv[3]).resolve()
+    donor_path = Path(sys.argv[4]).resolve()
+    donors_root = Path(sys.argv[5]).resolve() if len(sys.argv) == 6 and sys.argv[5] else None
     errors: list[str] = []
     try:
         inventory = json.loads(inventory_path.read_text(), object_pairs_hook=reject_duplicate_keys)
@@ -203,17 +175,32 @@ def main() -> int:
     except (OSError, json.JSONDecodeError, ValueError) as error:
         print(f"ERROR: donor matrix: {error}", file=sys.stderr)
         return 1
+    try:
+        capability_inventory = json.loads(
+            capability_path.read_text(), object_pairs_hook=reject_duplicate_keys
+        )
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        print(f"ERROR: donor capability inventory: {error}", file=sys.stderr)
+        return 1
     if not isinstance(inventory, dict):
         print("ERROR: inventory: top-level value must be an object", file=sys.stderr)
         return 1
     if not isinstance(donor, dict):
         print("ERROR: donor matrix: top-level value must be an object", file=sys.stderr)
         return 1
+    if not isinstance(capability_inventory, dict):
+        print(
+            "ERROR: donor capability inventory: top-level value must be an object",
+            file=sys.stderr,
+        )
+        return 1
 
     if inventory.get("schema_version") != 1:
         errors.append("inventory: unsupported schema_version")
     if inventory.get("claim_scope") != "source_structure_and_declared_evidence_only":
         errors.append("inventory: claim_scope must not imply executed runtime evidence")
+    if inventory.get("donor_capabilities") != capability_path.name:
+        errors.append("inventory: donor_capabilities must reference the donor-first manifest")
 
     expected_states = {"live", "manual-only", "partial", "stub", "orphan", "unverified"}
     allowed_states_value = inventory.get("allowed_states", [])
@@ -316,6 +303,250 @@ def main() -> int:
         errors.append("donor matrix: execution_scope must not imply current interop results")
     if donor.get("production_inventory") != inventory_path.name:
         errors.append("donor matrix: production_inventory must reference the feature inventory")
+    if donor.get("capability_inventory") != capability_path.name:
+        errors.append("donor matrix: capability_inventory must reference the donor-first manifest")
+
+    if capability_inventory.get("schema_version") != 1:
+        errors.append("donor capabilities: unsupported schema_version")
+    if capability_inventory.get("claim_scope") != "donor_first_capability_classification_only":
+        errors.append("donor capabilities: claim_scope must not imply implementation support")
+    if capability_inventory.get("donor_matrix") != donor_path.name:
+        errors.append("donor capabilities: donor_matrix must reference the donor case matrix")
+
+    expected_requirements = {"required", "optional", "deferred", "excluded"}
+    requirement_values = capability_inventory.get("allowed_requirements", [])
+    if not isinstance(requirement_values, list) or any(
+        not isinstance(value, str) for value in requirement_values
+    ):
+        errors.append("donor capabilities: allowed_requirements must be an array of strings")
+        allowed_requirements: set[str] = set()
+    else:
+        allowed_requirements = set(requirement_values)
+    if allowed_requirements != expected_requirements:
+        errors.append("donor capabilities: allowed_requirements must match the accepted vocabulary")
+
+    expected_deliveries = {
+        "current",
+        "stage_6",
+        "stage_7",
+        "stage_9",
+        "future_profile",
+        "legacy_rejected",
+        "test_only",
+        "application_owned",
+        "external_component",
+    }
+    delivery_values = capability_inventory.get("allowed_deliveries", [])
+    if not isinstance(delivery_values, list) or any(
+        not isinstance(value, str) for value in delivery_values
+    ):
+        errors.append("donor capabilities: allowed_deliveries must be an array of strings")
+        allowed_deliveries: set[str] = set()
+    else:
+        allowed_deliveries = set(delivery_values)
+    if allowed_deliveries != expected_deliveries:
+        errors.append("donor capabilities: allowed_deliveries must match the accepted roadmap vocabulary")
+
+    profiles = capability_inventory.get("profiles", {})
+    if not isinstance(profiles, dict) or not profiles:
+        errors.append("donor capabilities: profiles must be a non-empty object")
+        profiles = {}
+    profile_capability_locks: dict[str, set[str]] = {}
+    for profile_id, profile in profiles.items():
+        if not isinstance(profile_id, str) or not profile_id:
+            errors.append("donor capabilities: profile ids must be non-empty strings")
+            continue
+        if not isinstance(profile, dict) or set(profile) != {
+            "description",
+            "release_gate",
+            "capability_ids",
+        }:
+            errors.append(f"donor capabilities: profile {profile_id!r} has invalid shape")
+            continue
+        if any(
+            not isinstance(profile[field], str) or not profile[field].strip()
+            for field in ("description", "release_gate")
+        ):
+            errors.append(f"donor capabilities: profile {profile_id!r} fields must be non-empty strings")
+        locked_ids = profile.get("capability_ids", [])
+        if not isinstance(locked_ids, list) or any(
+            not isinstance(capability_id, str) or not capability_id.strip()
+            for capability_id in locked_ids
+        ):
+            errors.append(
+                f"donor capabilities: profile {profile_id!r} capability_ids must be strings"
+            )
+            locked_ids = []
+        if len(set(locked_ids)) != len(locked_ids):
+            errors.append(
+                f"donor capabilities: profile {profile_id!r} capability_ids must be unique"
+            )
+        profile_capability_locks[profile_id] = set(locked_ids)
+
+    donor_revisions = donor.get("donor_revisions", {})
+    capability_revisions = capability_inventory.get("donor_revisions", {})
+    if not isinstance(capability_revisions, dict) or capability_revisions != donor_revisions:
+        errors.append("donor capabilities: donor_revisions must exactly match the donor case matrix")
+        capability_revisions = {}
+
+    required_capability_fields = {
+        "id",
+        "category",
+        "profiles",
+        "requirement",
+        "delivery",
+        "forge_feature_ids",
+        "donor_sources",
+        "rationale",
+    }
+    capability_ids: set[str] = set()
+    mapped_feature_coverage: Counter[str] = Counter()
+    profile_coverage: Counter[str] = Counter()
+    classified_profile_capabilities: dict[str, set[str]] = {
+        profile_id: set() for profile_id in profiles
+    }
+    capabilities = capability_inventory.get("capabilities", [])
+    if not isinstance(capabilities, list):
+        errors.append("donor capabilities: capabilities must be an array")
+        capabilities = []
+    for capability in capabilities:
+        if not isinstance(capability, dict):
+            errors.append("donor capabilities: every capability must be an object")
+            continue
+        capability_id = capability.get("id", "")
+        if not isinstance(capability_id, str) or not capability_id:
+            errors.append("donor capabilities: capability without id")
+            continue
+        if capability_id in capability_ids:
+            errors.append(f"donor capabilities: duplicate capability id {capability_id!r}")
+        capability_ids.add(capability_id)
+        missing = required_capability_fields - capability.keys()
+        if missing:
+            errors.append(f"donor capability {capability_id}: missing fields {sorted(missing)}")
+            continue
+
+        category = capability.get("category")
+        rationale = capability.get("rationale")
+        origin = capability.get("origin", "libp2p")
+        requirement = capability.get("requirement")
+        delivery = capability.get("delivery")
+        capability_profiles = capability.get("profiles", [])
+        feature_mappings = capability.get("forge_feature_ids", [])
+        donor_sources = capability.get("donor_sources", [])
+        if not isinstance(category, str) or not category.strip():
+            errors.append(f"donor capability {capability_id}: category must be a non-empty string")
+        if not isinstance(rationale, str) or not rationale.strip():
+            errors.append(f"donor capability {capability_id}: rationale must be a non-empty string")
+        if origin not in {"libp2p", "forge_extension"}:
+            errors.append(f"donor capability {capability_id}: unknown origin {origin!r}")
+        if requirement not in allowed_requirements:
+            errors.append(f"donor capability {capability_id}: unknown requirement {requirement!r}")
+        if delivery not in allowed_deliveries:
+            errors.append(f"donor capability {capability_id}: unknown delivery {delivery!r}")
+        if not isinstance(capability_profiles, list) or not capability_profiles or any(
+            not isinstance(profile, str) or profile not in profiles for profile in capability_profiles
+        ):
+            errors.append(f"donor capability {capability_id}: profiles must reference known profiles")
+            capability_profiles = []
+        if len(set(capability_profiles)) != len(capability_profiles):
+            errors.append(f"donor capability {capability_id}: profiles must be unique")
+        profile_coverage.update(capability_profiles)
+        for profile_id in capability_profiles:
+            classified_profile_capabilities[profile_id].add(capability_id)
+        if not isinstance(feature_mappings, list) or any(
+            not isinstance(feature_id, str) or not feature_id.strip()
+            for feature_id in feature_mappings
+        ):
+            errors.append(f"donor capability {capability_id}: forge_feature_ids must be strings")
+            feature_mappings = []
+        if len(set(feature_mappings)) != len(feature_mappings):
+            errors.append(f"donor capability {capability_id}: forge_feature_ids must be unique")
+        mapped_feature_coverage.update(feature_mappings)
+        if not isinstance(donor_sources, list) or any(
+            not isinstance(source, str) or not source.strip() for source in donor_sources
+        ):
+            errors.append(f"donor capability {capability_id}: donor_sources must be strings")
+            donor_sources = []
+        if origin == "libp2p" and not donor_sources:
+            errors.append(f"donor capability {capability_id}: libp2p origin needs donor_sources")
+        for source in donor_sources:
+            relative = Path(source)
+            if relative.is_absolute() or ".." in relative.parts:
+                errors.append(f"donor capability {capability_id}: invalid donor source {source!r}")
+            elif len(relative.parts) < 3 or relative.parts[0] != "donors":
+                errors.append(
+                    f"donor capability {capability_id}: donor source must start with donors/<repo>/"
+                )
+            elif relative.parts[1] not in capability_revisions:
+                errors.append(
+                    f"donor capability {capability_id}: donor repository is not pinned: {relative.parts[1]}"
+                )
+            elif donors_root is not None and not (
+                donors_root / Path(*relative.parts[1:])
+            ).is_file():
+                errors.append(
+                    f"donor capability {capability_id}: donor source does not exist: {source}"
+                )
+        forge_sources = capability.get("forge_sources", [])
+        if not isinstance(forge_sources, list) or any(
+            not isinstance(source, str) or not source.strip() for source in forge_sources
+        ):
+            errors.append(f"donor capability {capability_id}: forge_sources must be strings")
+            forge_sources = []
+        if origin == "forge_extension" and not forge_sources:
+            errors.append(f"donor capability {capability_id}: Forge extension needs forge_sources")
+        if origin == "libp2p" and forge_sources:
+            errors.append(f"donor capability {capability_id}: libp2p origin cannot use forge_sources")
+        for source in forge_sources:
+            relative = Path(source)
+            if relative.is_absolute() or ".." in relative.parts or not (root / relative).is_file():
+                errors.append(
+                    f"donor capability {capability_id}: Forge source does not exist: {source}"
+                )
+
+        if delivery == "current" and not feature_mappings:
+            errors.append(f"donor capability {capability_id}: current delivery needs a Forge feature mapping")
+        if delivery in {"stage_6", "stage_7", "stage_9"}:
+            branch = capability.get("planned_branch")
+            if not isinstance(branch, str) or not branch.startswith("forge-p2p-"):
+                errors.append(f"donor capability {capability_id}: planned delivery needs a P2P branch")
+        elif "planned_branch" in capability:
+            errors.append(f"donor capability {capability_id}: planned_branch is only valid for a staged delivery")
+        if requirement == "deferred" and delivery not in {"stage_9", "future_profile"}:
+            errors.append(f"donor capability {capability_id}: deferred requirement needs deferred delivery")
+        if requirement == "excluded" and delivery not in {
+            "legacy_rejected",
+            "test_only",
+            "application_owned",
+        }:
+            errors.append(f"donor capability {capability_id}: excluded requirement has active delivery")
+        if requirement in {"required", "optional"} and delivery in {
+            "legacy_rejected",
+            "test_only",
+            "application_owned",
+        }:
+            errors.append(f"donor capability {capability_id}: active requirement has excluded delivery")
+
+    missing_profiles = set(profiles) - set(profile_coverage)
+    if missing_profiles:
+        errors.append(f"donor capabilities: profiles without capabilities {sorted(missing_profiles)}")
+    for profile_id, locked_ids in profile_capability_locks.items():
+        classified_ids = classified_profile_capabilities.get(profile_id, set())
+        if locked_ids != classified_ids:
+            errors.append(
+                f"donor capabilities: profile {profile_id!r} scope lock differs; "
+                f"missing {sorted(locked_ids - classified_ids)}, "
+                f"unlocked {sorted(classified_ids - locked_ids)}"
+            )
+    duplicate_feature_mappings = sorted(
+        feature_id for feature_id, count in mapped_feature_coverage.items() if count != 1
+    )
+    if duplicate_feature_mappings:
+        errors.append(
+            "donor capabilities: Forge feature mappings must be owned exactly once "
+            f"{duplicate_feature_mappings}"
+        )
+    required_feature_ids = set(mapped_feature_coverage)
 
     feature_ids: set[str] = set()
     builtin_coverage: Counter[str] = Counter()
@@ -473,12 +704,12 @@ def main() -> int:
         negotiated_protocol_coverage.update(list_values["negotiated_protocol_ids"])
         public_component_coverage.update(list_values["public_components"])
 
-    missing_features = REQUIRED_FEATURE_IDS - feature_ids
-    unknown_features = feature_ids - REQUIRED_FEATURE_IDS
+    missing_features = required_feature_ids - feature_ids
+    unknown_features = feature_ids - required_feature_ids
     if missing_features:
         errors.append(f"inventory: missing required features {sorted(missing_features)}")
     if unknown_features:
-        errors.append(f"inventory: unknown features require checker ownership {sorted(unknown_features)}")
+        errors.append(f"inventory: features lack donor-capability ownership {sorted(unknown_features)}")
 
     expected_surface_features: dict[str, list[str]] = {owner: [] for owner in repository_owners}
     for feature in features:
@@ -616,7 +847,8 @@ def main() -> int:
 
     print(
         "P2P source inventory valid: "
-        f"{len(feature_ids)} features, "
+        f"{len(capability_ids)} classified capabilities, "
+        f"{len(feature_ids)} implementation features, "
         f"{len(declared_builtins)} built-in protocols, "
         f"{len(declared_capabilities)} capabilities, "
         f"{len(declared_negotiated_protocols)} negotiated protocols, "

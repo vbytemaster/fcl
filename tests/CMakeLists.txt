@@ -1090,7 +1090,9 @@ add_custom_target(
       ${FORGE_P2P_INVENTORY_CHECK}
       ${CMAKE_SOURCE_DIR}
       ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/p2p_feature_inventory.json
+      ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/p2p_donor_capabilities.json
       ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/donor_cases.json
+      ${FORGE_LIBP2P_DONORS_ROOT}
    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
    VERBATIM
 )
@@ -1100,7 +1102,9 @@ add_test(
       ${FORGE_P2P_INVENTORY_CHECK}
       ${CMAKE_SOURCE_DIR}
       ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/p2p_feature_inventory.json
+      ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/p2p_donor_capabilities.json
       ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/donor_cases.json
+      ${FORGE_LIBP2P_DONORS_ROOT}
    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 

@@ -101,6 +101,13 @@ def main() -> int:
     inventory = data.get("production_inventory", "")
     if not isinstance(inventory, str) or not inventory or not (path.parent / inventory).is_file():
         errors.append("production_inventory must reference the P2P feature inventory")
+    capability_inventory = data.get("capability_inventory", "")
+    if (
+        not isinstance(capability_inventory, str)
+        or not capability_inventory
+        or not (path.parent / capability_inventory).is_file()
+    ):
+        errors.append("capability_inventory must reference the donor-first capability manifest")
 
     donor_revisions = data.get("donor_revisions", {})
     if not isinstance(donor_revisions, dict) or not donor_revisions:

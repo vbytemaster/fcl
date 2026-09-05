@@ -34,18 +34,32 @@ The following surfaces are not production claims yet:
   topology manager. Donor/live evidence remains classified separately in the
   inventory and must not be inferred from lifecycle activation alone;
 - Ping sampling and AutoNAT are not yet inputs to the managed topology score;
+- observed-address confidence/expiry, mDNS, DNSAddr, private-network `/pnet`,
+  optional UPnP mapping, adaptive Happy Eyeballs and UDP/IPv6 black-hole
+  detection are Stage 6 work;
 - AutoRelay and DCUtR mechanics lack the complete verified discovery and
   reachability feed;
-- GossipSub donor-consistent scoring and autonomous mesh selection remain incomplete;
+- the resource model lacks staged connection gating and donor-style memory,
+  file descriptor, transient and service scopes;
+- GossipSub donor-consistent scoring, autonomous mesh selection and explicit
+  v1.2/v1.3/Partial Messages negotiation remain incomplete;
   transport topology is owned by the managed topology service above.
 
-The machine-readable support inventory is
+P2P WebSocket `/ws` and `/wss` multiaddrs remain parseable but unsupported for
+dial/listen until Stage 9. WebTransport and WebRTC are separately deferred
+browser-profile capabilities; native TCP/QUIC readiness does not imply them.
+
+The donor-first scope manifest is
+[`p2p_donor_capabilities.json`](../../../tests/libp2p_interop/p2p_donor_capabilities.json).
+It records what the pinned specs, Go and Rust donors provide and whether each
+capability is required, optional, deferred or deliberately excluded for each
+Forge production profile. The machine-readable implementation inventory is
 [`p2p_feature_inventory.json`](../../../tests/libp2p_interop/p2p_feature_inventory.json).
-It is the source inventory for the production-hardening program, not a record
-of currently executed optional interop tests or a release-readiness verdict. A
-`mapped` donor case names a compatibility fixture with declared Forge
-coverage; it does not prove normal lifecycle activation or a passing current
-donor run.
+It contains only current Forge surfaces and evidence. Neither manifest is a
+record of currently executed optional interop tests or a release-readiness
+verdict. A `mapped` donor case names a compatibility fixture with declared
+Forge coverage; it does not prove normal lifecycle activation or a passing
+current donor run.
 
 `discovery::policy` and `node::limits::discovery` remain Stable source
 compatibility surfaces. Node construction normalizes non-default legacy values
