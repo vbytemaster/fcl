@@ -361,9 +361,9 @@ own no capability entry.
 
 0. `forge-p2p-stage6-roadmap-v1`: freeze the four-field manifest, donor evidence,
    profile locks, exact PR ownership and acceptance matrix; no runtime code;
-1. `forge-chrono-v1`: add only reusable `forge_chrono` algorithms for
-   deadlines, expiry, backoff and jitter. It owns no clock, scheduler, thread or
-   P2P lifecycle;
+1. `forge-chrono-v1`: add only reusable `forge_chrono` formatting and parsing
+   for explicit `std::chrono` timestamps. It owns no clock, scheduler, thread,
+   deadline/backoff policy or P2P lifecycle;
 2. `forge-p2p-host-protection-v1`: staged connection gater plus memory, file
    descriptor, transient and service resource scopes;
 3. `forge-crypto-xsalsa20-v1`: add the crypto boundary required by private

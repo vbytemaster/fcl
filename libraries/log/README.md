@@ -43,7 +43,7 @@ Macro-only header:
 
 Target: `forge_log`.
 
-Dependencies: `forge_core`, `forge_reflect`, `forge_variant`, Boost headers,
+Dependencies: `forge_chrono`, `forge_core`, `forge_reflect`, `forge_variant`, Boost headers,
 private Boost.DLL and optional private Boost.Stacktrace fallback. Public API
 does not expose `std::stacktrace` or `boost::stacktrace`.
 

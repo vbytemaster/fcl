@@ -10,7 +10,7 @@ module;
 
 module forge.log.console_appender;
 
-import forge.core.chrono;
+import forge.chrono.iso8601;
 import forge.log.log_message;
 import forge.core.string;
 import forge.variant.exceptions;
@@ -123,7 +123,7 @@ void console_appender::log(const log_message& m) {
    append_fixed_size(line, 5, context.get_log_level().to_string());
    line += ' ';
    // use timestamp of when log message created, note this could cause times on log entries to not be consecutive
-   line += forge::chrono::to_iso_string(context.get_timestamp());
+   line += forge::chrono::iso8601::format(context.get_timestamp());
    line += ' ';
    append_fixed_size(line, 9, context.get_thread_name());
    line += ' ';

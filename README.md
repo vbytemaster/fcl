@@ -140,10 +140,11 @@ registry.register_plugin(forge::plugins::crypto::secrets::descriptor());
 
 | Библиотека | Target | Что Делает | Основные Зависимости |
 | --- | --- | --- | --- |
-| [core](libraries/core/README.md) | `forge_core` | Chrono helpers, strings, UTF-8, type names, `uint128`. | Boost headers/date_time/multiprecision as owned implementation detail. |
+| [core](libraries/core/README.md) | `forge_core` | Strings, UTF-8, type names and `uint128`. | Boost headers/multiprecision as owned implementation detail. |
+| [chrono](libraries/chrono/README.md) | `forge_chrono` | ISO-8601/RFC3339 and relative formatting for standard chrono values. | Boost.DateTime privately. |
 | [exceptions](libraries/exceptions/README.md) | `forge_exceptions` | Std-based context errors and capture/assert macros. | `forge_core`. |
 | [reflect](libraries/reflect/README.md) | `forge_reflect` | Thin Boost.Describe traversal helpers. | Boost.Describe via Boost headers. |
-| [variant](libraries/variant/README.md) | `forge_variant` | Dynamic value/object model and described conversions. | `forge_core`, `forge_reflect`, Boost.MultiIndex/multiprecision. |
+| [variant](libraries/variant/README.md) | `forge_variant` | Dynamic value/object model and described conversions. | `forge_chrono`, `forge_core`, `forge_reflect`, Boost.MultiIndex/multiprecision. |
 | [raw](libraries/raw/README.md) | `forge_raw` | Byte-compatible binary serialization. | `forge_core`, `forge_reflect`, `forge_variant`, `forge_exceptions`. |
 | [compression](libraries/compression/README.md) | `forge_compression` | Bounded zlib compression/decompression helpers. | Boost.Iostreams, ZLIB, `forge_exceptions`. |
 | [chain/core](libraries/chain/core/README.md) | `forge_chain_core` | Fundamental chain digest and Merkle primitives. | `forge_crypto_digest`, `forge_exceptions`, `forge_raw`. |
@@ -179,7 +180,7 @@ registry.register_plugin(forge::plugins::crypto::secrets::descriptor());
 | [crypto/math](libraries/crypto/math/README.md) | `forge_crypto_math` | Big integers and modular arithmetic. | `forge_crypto_core`, OpenSSL::Crypto, GMP. |
 | [crypto/bls](libraries/crypto/bls/README.md) | `forge_crypto_bls` | BLS values, signatures and contract primitives. | `forge_crypto_digest`, BLS12-381, OpenSSL::Crypto. |
 | [crypto/bn256](libraries/crypto/bn256/README.md) | `forge_crypto_bn256` | BN254 operations. | Internal BN256 backend. |
-| [log](libraries/log/README.md) | `forge_log` | Logging core, messages, console/appender boundary. | `forge_variant`, Boost.DLL privately. |
+| [log](libraries/log/README.md) | `forge_log` | Logging core, messages, console/appender boundary. | `forge_chrono`, `forge_variant`, Boost.DLL privately. |
 | [otlp](libraries/otlp/README.md) | `forge_otlp` | OTLP/HTTP JSON log export and crash-spool resend. | `forge_log`, `forge_net_http`, `forge_asio`. |
 | [asio](libraries/asio/README.md) | `forge_asio` | Asio runtime, priority task scheduler and bounded CPU compute pool. | Boost.Asio, threads. |
 | [app](libraries/app/README.md) | `forge_app` | Opinionated application shell, plugins, ports, config and diagnostics. | `forge_asio`, `forge_config_core`. |

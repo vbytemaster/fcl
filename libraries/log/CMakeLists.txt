@@ -11,13 +11,15 @@ forge_target_modules(forge_log log)
 
 target_include_directories(forge_log PUBLIC ${FORGE_PUBLIC_INCLUDE_DIRS})
 target_link_libraries(
-   forge_log PUBLIC
+   forge_log
+   PUBLIC
       forge_core
       forge_exceptions
       forge_reflect
       forge_variant
       Boost::headers
    PRIVATE
+      forge_chrono
       Boost::dll
 )
 if(FORGE_HAS_STD_STACKTRACE)

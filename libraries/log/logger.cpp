@@ -2,6 +2,7 @@ module;
 #include <memory>
 #include <iostream>
 #include <algorithm>
+#include <chrono>
 #include <mutex>
 #include <source_location>
 #include <string>
@@ -17,7 +18,6 @@ import forge.log.appender;
 import forge.log.record;
 import forge.log.logger_config;
 import forge.core.utility;
-import forge.core.chrono;
 
 namespace forge {
 
@@ -186,7 +186,7 @@ void logger::log(log_level level, std::string message, log_fields fields, std::s
        .level = level,
        .message = std::move(message),
        .fields = std::move(fields),
-       .timestamp = forge::chrono::now_us(),
+       .timestamp = std::chrono::time_point_cast<std::chrono::microseconds>(std::chrono::system_clock::now()),
        .thread_id = current_thread_id(),
        .thread_name = forge::get_thread_name(),
        .location = location,

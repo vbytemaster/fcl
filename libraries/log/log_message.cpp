@@ -22,7 +22,6 @@ import forge.variant.chrono;
 import forge.variant.multiprecision;
 import forge.variant.format;
 import forge.variant.described;
-import forge.core.chrono;
 
 namespace forge {
 static thread_local std::string thread_name;
@@ -80,7 +79,7 @@ log_context::log_context(log_level ll, const char* file, uint64_t line, const ch
    my->file = std::filesystem::path(file).filename().generic_string(); // TODO truncate filename
    my->line = line;
    my->method = method;
-   my->timestamp = forge::chrono::now_us();
+   my->timestamp = std::chrono::time_point_cast<std::chrono::microseconds>(std::chrono::system_clock::now());
    my->thread_name = forge::get_thread_name();
 }
 

@@ -18,7 +18,7 @@ module;
 
 module forge.log.record;
 
-import forge.core.chrono;
+import forge.chrono.iso8601;
 import forge.core.string;
 import forge.log.exceptions;
 import forge.log.log_message;
@@ -205,7 +205,7 @@ std::string format_stacktrace(const stacktrace_snapshot& stacktrace) {
 
 std::string format_text_log_record(const log_record& record) {
    auto out = std::ostringstream{};
-   out << '[' << forge::chrono::to_iso_string(record.timestamp) << "] ";
+   out << '[' << forge::chrono::iso8601::format(record.timestamp) << "] ";
    out << record.level.to_string() << ' ';
    if (!record.logger.empty()) {
       out << record.logger << ' ';
@@ -230,7 +230,7 @@ std::string format_json_log_record(const log_record& record) {
    auto out = std::ostringstream{};
    out << '{';
    out << "\"timestamp\":";
-   write_json_string(out, forge::chrono::to_iso_string(record.timestamp));
+   write_json_string(out, forge::chrono::iso8601::format(record.timestamp));
    out << ",\"level\":";
    write_json_string(out, record.level.to_string());
    out << ",\"logger\":";

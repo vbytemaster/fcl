@@ -618,7 +618,7 @@ implementation-library namespaces. For plugin family/role decisions, follow
 - Raw serialization belongs only to `libraries/raw`; do not define `namespace forge::raw` or raw overloads in `core`.
 - Filesystem/config/path-layout helpers are not part of the FORGE core foundation. Use `std::filesystem` directly or keep app-specific helpers in consuming projects.
 - Removed FC-like source APIs must not return as public FORGE APIs: `forge::array`, `forge::fwd`, `forge::safe`, `forge::filesystem`, flat/interprocess containers, mock time and compatibility mutexes.
-- Public time values use `std::chrono`. FORGE core may provide chrono formatting and old FC wire helpers, but old FC-style time source APIs must not return.
+- Public time values use `std::chrono`. `forge_chrono` may provide only formatting/parsing algorithms; it owns no clock or lifecycle. FC-compatible time conversion belongs to `forge_raw`, and old FC-style time source APIs must not return.
 - Deterministic tests must pass explicit chrono values instead of relying on a global mock clock.
 - Empty/self-export module files and aggregate-only module files are forbidden.
   Convenience aggregation belongs to CMake targets and package components, not

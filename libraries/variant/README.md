@@ -31,7 +31,7 @@ It is the bridge between typed C++ values and generic codec/config/log shapes.
 
 Target: `forge_variant`.
 
-Dependencies: `forge_core`, `forge_reflect`, `forge_schema`, Boost headers, Boost.MultiIndex and
+Dependencies: `forge_chrono`, `forge_core`, `forge_reflect`, `forge_schema`, Boost headers, Boost.MultiIndex and
 Boost.Multiprecision.
 
 ## Examples

@@ -3,24 +3,24 @@ module;
 
 module forge.variant.chrono;
 
-import forge.core.chrono;
+import forge.chrono.iso8601;
 import forge.variant.value;
 
 namespace forge {
 void to_variant(const std::chrono::sys_time<std::chrono::microseconds>& t, variant& v) {
-   v = forge::chrono::to_iso_string(t);
+   v = forge::chrono::iso8601::format(t);
 }
 
 void from_variant(const variant& v, std::chrono::sys_time<std::chrono::microseconds>& t) {
-   t = forge::chrono::from_iso_time_point(v.as_string());
+   t = forge::chrono::iso8601::parse_microseconds(v.as_string());
 }
 
 void to_variant(const std::chrono::sys_seconds& t, variant& v) {
-   v = forge::chrono::to_iso_string(t);
+   v = forge::chrono::iso8601::format(t);
 }
 
 void from_variant(const variant& v, std::chrono::sys_seconds& t) {
-   t = forge::chrono::from_iso_seconds(v.as_string());
+   t = forge::chrono::iso8601::parse_seconds(v.as_string());
 }
 
 void to_variant(const std::chrono::microseconds& input_microseconds, variant& output_variant) {
