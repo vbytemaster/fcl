@@ -7,7 +7,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from check_stage6_acceptance import EVIDENCE_CONTRACT_VALIDATORS
+from check_stage6_acceptance import EVIDENCE_CONTRACT_VALIDATORS, expected_launcher_transport
 
 
 REQUIRED_FIELDS = {
@@ -974,6 +974,7 @@ def main() -> int:
             "acceptance_scenario_id",
             "profile",
             "transport_stack",
+            "transport",
             "result",
             "listener_process",
             "effective_configuration",
@@ -1118,9 +1119,11 @@ def main() -> int:
                 or profile not in capability.get("profiles", [])
                 or stack not in allowed_profile_transport_stacks.get(profile, set())
                 or activation != "enabled"
+                or not isinstance(evidence_contract, str)
+                or expected_launcher_transport(profile, stack, evidence_contract) is None
             ):
                 errors.append(
-                    f"donor capability {capability_id}: acceptance profile, transport stack or activation is invalid"
+                    f"donor capability {capability_id}: acceptance profile, transport stack, contract or activation is invalid"
                 )
             if not isinstance(directions, list) or any(
                 not isinstance(direction, str) or direction not in {

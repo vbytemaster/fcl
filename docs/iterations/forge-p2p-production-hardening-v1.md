@@ -833,11 +833,34 @@ activation or capability label alone cannot establish PASS. Private consumers
 must name the PSK capability except the root PNET scenario; private AutoNAT
 also requires allow-dialback evidence plus an independently hashed deny-egress
 control proving rejection without an external dial.
+The acceptance checker derives `--transport` from the manifest contract rather
+than raw artifact metadata: native QUIC is `quic`, native TCP/Yamux is `tcp`
+except the exact TLS contract's `tcp-tls`, and private TCP/Yamux+pnet is
+`tcp-pnet` for both endpoints. The PNET root also requires indexed missing-key
+and mismatched-key controls that reject before Identify/application streams.
+Future contract schemas require correlated wire fields and separately indexed
+negative controls; they block promotion until the canonical runner and fixtures
+emit those execution controls. A manifest label, activation flag or source-only
+registration cannot establish behavior.
+The current native contracts use the same rule: launcher `--transport` is not
+endpoint proof. QUIC promotion requires an observed `/quic-v1` connection, its
+authenticated remote peer ID and Identify evidence. Current multistream, Noise
+and TLS promotion requires a result-owned ordered upgrade transcript and exact
+security/muxer selections. Rust's current public Swarm events expose peer and
+remote multiaddr but not the selected security/muxer phases, so that absence is
+promotion-blocking rather than a reason to copy requested CLI configuration into
+the result. Current Kademlia promotion requires a correlated Amino provider,
+independent querier, returned peer, address, stream and query proof; a provider
+count does not establish wire behavior.
 
 The manifest's inline-muxer evidence names Go TLS and Noise support plus the
 pinned Rust TLS fixed-ALPN and Noise extension/fallback paths. Its GossipSub
 v1.3 evidence names Go `extensions.go` first-RPC behavior and Rust
 `behaviour.rs` advertisement handling in addition to codec/spec sources.
+The coordinated port-reuse trace additionally pins Rust
+`swarm/src/dial_opts.rs` and `transports/tcp/src/lib.rs` alongside the existing
+connection-pool and Go direct-dial sources; it remains source-only until its
+concurrent fixture/control exists.
 
 Private-network and address-resolution depend on host protection; path
 management also depends on address resolution. Reachability has no direct

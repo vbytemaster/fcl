@@ -998,6 +998,7 @@ std::string run_scenario(forge::asio::runtime& runtime, forge::net::p2p::node& v
             throw std::runtime_error{"DHT provider proof requires an independent querier"};
          }
          const auto streams_before = querier.metrics().protocol_streams_opened;
+         const auto queries_before = querier.metrics().dht_queries;
          constexpr auto retry_interval = 50ms;
          const auto deadline = std::chrono::steady_clock::now() + 5s;
          auto provider_count = std::size_t{};
@@ -1026,8 +1027,12 @@ std::string run_scenario(forge::asio::runtime& runtime, forge::net::p2p::node& v
             std::this_thread::sleep_for(retry_interval);
          }
          const auto streams_after = querier.metrics().protocol_streams_opened;
+         const auto queries_after = querier.metrics().dht_queries;
          if (streams_after <= streams_before) {
             throw std::runtime_error{"FORGE DHT provider proof did not open a production provider stream"};
+         }
+         if (queries_after <= queries_before) {
+            throw std::runtime_error{"FORGE DHT provider proof did not issue a provider query"};
          }
          forge::asio::blocking::run(runtime, querier.async_stop());
          forge::asio::blocking::run(runtime, provider.async_stop());
@@ -1036,6 +1041,7 @@ std::string run_scenario(forge::asio::runtime& runtime, forge::net::p2p::node& v
                 json_escape(querier_identity.peer.to_string()) + "\",\"returned_provider_peer\":\"" +
                 json_escape(returned_provider_peer) + "\",\"address_count\":" + std::to_string(address_count) +
                 ",\"protocol_streams_opened_delta\":" + std::to_string(streams_after - streams_before) +
+                ",\"query_requests_delta\":" + std::to_string(queries_after - queries_before) +
                 ",\"negotiated_protocol\":\"/ipfs/kad/1.0.0\"";
       } catch (...) {
          try {
@@ -1335,6 +1341,7 @@ int dial_mode(const std::map<std::string, std::string>& args) {
                    forge::net::p2p::capabilities::hole_punching | forge::net::p2p::capabilities::relay_reservation |
                    forge::net::p2p::capabilities::rendezvous | forge::net::p2p::capabilities::pubsub});
 
+   auto connection_evidence = std::string{};
    if (scenario == "identify" || scenario.starts_with("dht_") || scenario == "gossipsub_publish" ||
        scenario == "gossipsub_mixed_mesh_stress") {
       const auto session = forge::asio::blocking::run(
@@ -1345,13 +1352,28 @@ int dial_mode(const std::map<std::string, std::string>& args) {
          throw std::runtime_error{"FORGE automatic Identify did not complete, state=" +
                                   std::to_string(static_cast<int>(session.identify_state))};
       }
+      if (scenario == "identify") {
+         if (session.remote_peer != peer || session.path != forge::net::p2p::path::kind::direct) {
+            throw std::runtime_error{"FORGE Identify connection did not retain the authenticated direct peer"};
+         }
+         const auto snapshot = value.diagnostics();
+         const auto observed =
+             std::ranges::find(snapshot.sessions, session.remote_peer, &forge::net::p2p::diagnostics::session::remote_peer);
+         if (observed == snapshot.sessions.end() || !observed->remote_endpoint ||
+             observed->remote_endpoint->transport.protocol != forge::net::p2p::endpoint::protocol_kind::quic_v1) {
+            throw std::runtime_error{"FORGE Identify connection did not expose an observed QUIC v1 endpoint"};
+         }
+         connection_evidence = "\"negotiated_transport\":\"/quic-v1\",\"authenticated_remote_peer_id\":\"" +
+                               json_escape(session.remote_peer.to_string()) + "\"";
+      }
    }
 
    const auto details = run_scenario(runtime, value, scenario, optional_value(args, "payload", pubsub_payload), peer,
                                      remote, optional_value(args, "target-peer-id"));
    forge::asio::blocking::run(runtime, value.async_stop());
    write_file(required(args, "result-file"), "{\"implementation\":\"forge\",\"role\":\"dialer\",\"scenario\":\"" +
-                                                 json_escape(scenario) + "\",\"status\":\"ok\"," + details + "}\n");
+                                                 json_escape(scenario) + "\",\"status\":\"ok\"," + details +
+                                                 (connection_evidence.empty() ? "" : "," + connection_evidence) + "}\n");
    return 0;
 }
 

@@ -184,6 +184,7 @@
         "acceptance_scenario_id",
         "profile",
         "transport_stack",
+        "transport",
         "result",
         "listener_process",
         "effective_configuration"
@@ -1246,7 +1247,9 @@
       "donor_sources": [
         "donors/libp2p-specs/connections/simopen.md",
         "donors/go-libp2p/p2p/net/swarm/swarm_dial.go",
-        "donors/rust-libp2p/swarm/src/connection/pool.rs"
+        "donors/rust-libp2p/swarm/src/connection/pool.rs",
+        "donors/rust-libp2p/swarm/src/dial_opts.rs",
+        "donors/rust-libp2p/transports/tcp/src/lib.rs"
       ],
       "rationale": "Modern coordinated dial and port reuse are part of direct path establishment; no legacy /libp2p/simultaneous-connect negotiation is permitted."
     },

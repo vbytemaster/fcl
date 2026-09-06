@@ -951,26 +951,27 @@ def require_dht_provider_evidence(result: dict, dialer: str) -> None:
     provider_count = result.get("provider_count")
     if type(provider_count) is not int or provider_count < 1:
         raise RuntimeError(f"{dialer} DHT provider lookup did not return a provider: {result}")
-    if dialer != "forge":
-        return
     provider_peer = result.get("provider_peer")
     querier_peer = result.get("querier_peer")
     if not isinstance(provider_peer, str) or not provider_peer:
-        raise RuntimeError(f"FORGE DHT provider proof did not identify the provider: {result}")
+        raise RuntimeError(f"{dialer} DHT provider proof did not identify the provider: {result}")
     if not isinstance(querier_peer, str) or not querier_peer:
-        raise RuntimeError(f"FORGE DHT provider proof did not identify the querier: {result}")
+        raise RuntimeError(f"{dialer} DHT provider proof did not identify the querier: {result}")
     if provider_peer == querier_peer:
-        raise RuntimeError(f"FORGE DHT provider proof reused the provider as its querier: {result}")
+        raise RuntimeError(f"{dialer} DHT provider proof reused the provider as its querier: {result}")
     if result.get("returned_provider_peer") != provider_peer:
-        raise RuntimeError(f"FORGE DHT provider proof returned a different provider: {result}")
+        raise RuntimeError(f"{dialer} DHT provider proof returned a different provider: {result}")
     address_count = result.get("address_count")
     if type(address_count) is not int or address_count < 1:
-        raise RuntimeError(f"FORGE DHT provider proof returned no provider address: {result}")
+        raise RuntimeError(f"{dialer} DHT provider proof returned no provider address: {result}")
     stream_delta = result.get("protocol_streams_opened_delta")
     if type(stream_delta) is not int or stream_delta < 1:
-        raise RuntimeError(f"FORGE DHT provider proof did not open a DHT protocol stream: {result}")
+        raise RuntimeError(f"{dialer} DHT provider proof did not open a DHT protocol stream: {result}")
+    query_delta = result.get("query_requests_delta")
+    if type(query_delta) is not int or query_delta < 1:
+        raise RuntimeError(f"{dialer} DHT provider proof did not issue a DHT query: {result}")
     if result.get("negotiated_protocol") != "/ipfs/kad/1.0.0":
-        raise RuntimeError(f"FORGE DHT provider proof negotiated the wrong protocol: {result}")
+        raise RuntimeError(f"{dialer} DHT provider proof negotiated the wrong protocol: {result}")
 
 
 def run_pair(dialer_binary: Path, dialer: str, listener_binary: Path, listener: str, scenario: str, root: Path,
@@ -1152,12 +1153,6 @@ def run_pair_with_transport(dialer_binary: Path, dialer: str, listener_binary: P
                 delivered,
             ),
         }
-        if transport == "tcp":
-            out["negotiated_security"] = "/noise"
-            out["negotiated_muxer"] = "/yamux/1.0.0"
-        elif transport == "tcp-tls":
-            out["negotiated_security"] = "/tls/1.0.0"
-            out["negotiated_muxer"] = "/yamux/1.0.0"
         if listener_result is not None:
             out["listener_result_file"] = str(listener_result)
         return out

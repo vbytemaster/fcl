@@ -736,13 +736,23 @@ func openEchoProtocol(ctx context.Context, h host.Host, peer peer.ID, payload []
 	return len(echoed), nil
 }
 
+func canonicalNegotiatedTransport(transport string) string {
+	switch transport {
+	case "quic-v1", "/quic-v1":
+		return "/quic-v1"
+	default:
+		return transport
+	}
+}
+
 func connectionState(h host.Host, peer peer.ID) map[string]string {
 	for _, conn := range h.Network().ConnsToPeer(peer) {
 		state := conn.ConnState()
 		return map[string]string{
-			"negotiated_security": string(state.Security),
-			"negotiated_muxer":    string(state.StreamMultiplexer),
-			"transport":           state.Transport,
+			"negotiated_security":          string(state.Security),
+			"negotiated_muxer":             string(state.StreamMultiplexer),
+			"negotiated_transport":         canonicalNegotiatedTransport(state.Transport),
+			"authenticated_remote_peer_id": conn.RemotePeer().String(),
 		}
 	}
 	return map[string]string{}

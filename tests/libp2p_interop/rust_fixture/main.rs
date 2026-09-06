@@ -296,6 +296,14 @@ fn transport_addr(mut address: Multiaddr) -> Multiaddr {
     address
 }
 
+fn observed_quic_transport(endpoint: &libp2p::core::ConnectedPoint) -> Option<&'static str> {
+    endpoint
+        .get_remote_address()
+        .iter()
+        .any(|protocol| matches!(protocol, Protocol::QuicV1))
+        .then_some("/quic-v1")
+}
+
 async fn read_frame<S>(stream: &mut S) -> Result<Vec<u8>, Box<dyn Error>>
 where
     S: futures::AsyncRead + Unpin,
@@ -1550,11 +1558,17 @@ async fn dial(opts: Options) -> Result<(), Box<dyn Error>> {
     let mut ping_ok = false;
     let mut identify_count = 0usize;
     let mut identify_signed_record = false;
+    let mut authenticated_remote_peer_id = None;
+    let mut negotiated_transport = None;
     while started.elapsed() < Duration::from_secs(20) {
         match swarm.select_next_some().await {
-            SwarmEvent::ConnectionEstablished { peer_id, .. } if peer_id == remote_peer => {
+            SwarmEvent::ConnectionEstablished {
+                peer_id, endpoint, ..
+            } if peer_id == remote_peer => {
                 eprintln!("rust-dial connected: {peer_id}");
                 connected = true;
+                authenticated_remote_peer_id = Some(peer_id.to_string());
+                negotiated_transport = observed_quic_transport(&endpoint);
                 swarm
                     .behaviour_mut()
                     .kad
@@ -1818,8 +1832,11 @@ async fn dial(opts: Options) -> Result<(), Box<dyn Error>> {
             "scenario": opts.scenario,
             "status": "ok",
             "ping_ok": ping_ok,
+            "relay_hop_stream_opened": opts.scenario == "relay_reserve",
             "protocol_count": identify_count,
-            "signed_peer_record": identify_signed_record
+            "signed_peer_record": identify_signed_record,
+            "negotiated_transport": negotiated_transport,
+            "authenticated_remote_peer_id": authenticated_remote_peer_id
         }),
     )
 }

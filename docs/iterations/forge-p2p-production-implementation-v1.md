@@ -453,6 +453,12 @@ value is `SHA-256("forge-p2p-stage6-pnet-fingerprint-v1" || 0x00 || PSK-file-byt
 the runner requires future fixtures to emit it and the checker independently
 recomputes it from the configured file without serializing, logging or indexing
 the PSK bytes.
+The root PNET scenario additionally needs one same-key positive run and two
+separately indexed control executions: missing key and mismatched key. Each
+control binds its launcher command, log and result to the expected peer and
+must show one attempted connection, zero established connections and zero
+Identify/application streams with rejection before Identify. The mismatched-key
+fixture key also remains outside the artifact directory and evidence index.
 If a private AutoNAT scenario requires
 `reachability.private_internet_policy`, both commands must additionally pass
 `--private-egress-policy allow-internet`; both results must report that policy
@@ -480,7 +486,33 @@ validate emitted Ping, Identify, echo, DHT, Rendezvous and
 implementation-specific Relay reservation/open fields. Merely enabling a
 listener feature is not execution evidence. Future Stage 6 cases declare the
 result/control fields their implementation must emit before the scenario can
-become registered.
+become registered or promoted: the checker derives the permitted launcher
+`--transport` from the manifest profile, stack and exact contract (`quic`,
+native `tcp`/TLS-only `tcp-tls`, or private `tcp-pnet`), never from a raw record
+label. Future protocol families require correlated wire transcripts and
+negative controls: exact security/muxer phases; AutoNAT probe/dialback tokens,
+allow and deny results; relay/DCUtR paths; discovery no-dial controls; and
+correlated DHT, Rendezvous, GossipSub, port-reuse and fragment evidence. Until
+the canonical runner and fixtures emit those fields and separately indexed
+control commands/results/logs, the schemas are deliberately promotion-blocking;
+source labels are not behavior proof.
+For current native scenarios, the command mapping is only a launcher check.
+`quic_v1_transport` additionally requires the endpoint result to report the
+observed `/quic-v1` transport, the authenticated remote peer ID and the Identify
+proof. `multistream_select`, `noise_identity` and `tls_identity` require an
+endpoint-emitted ordered multistream/security/Yamux/application transcript and
+the exact negotiated security and muxer fields in that result; runner-owned
+record fields cannot satisfy either requirement. Go can observe its connection
+security/muxer state and QUIC peer/transport state, while the current Rust Swarm
+public event surface exposes the authenticated peer and remote multiaddr but not
+the selected Noise/TLS/Yamux upgrade phases. Those missing endpoint fields are a
+specific promotion blocker, not a license to emit values derived from fixture
+CLI options. The current Forge TCP fixture has the same transcript requirement
+before a current TCP security case can be promoted.
+`kademlia_amino` likewise requires the exact `/ipfs/kad/1.0.0` result plus
+provider, independent querier and returned-provider equality, a provider address
+count, and positive protocol-stream and query deltas. A `provider_count` alone
+is only registration-path data and is rejected.
 `limited` is valid only for a registry-classified limitation and
 emits `PASS_WITH_DOCUMENTED_LIMITATIONS`; all other directions use the schema's
 `passing_status`. Missing, stale or incomplete artifacts are `NOT_RUN`, never a

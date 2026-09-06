@@ -287,7 +287,7 @@ class InteropFixtureContractTest(unittest.TestCase):
             with self.subTest(profiles=profiles), self.assertRaises(RuntimeError):
                 forge_fixture_requirements(self.fixture_lock(profiles))
 
-    def test_dht_provider_evidence_requires_at_least_one_provider(self) -> None:
+    def test_dht_provider_evidence_requires_correlated_provider_query(self) -> None:
         require_dht_provider_evidence(
             {
                 "provider_count": 1,
@@ -296,11 +296,11 @@ class InteropFixtureContractTest(unittest.TestCase):
                 "returned_provider_peer": "provider",
                 "address_count": 1,
                 "protocol_streams_opened_delta": 1,
+                "query_requests_delta": 1,
                 "negotiated_protocol": "/ipfs/kad/1.0.0",
             },
             "forge",
         )
-        require_dht_provider_evidence({"provider_count": 1}, "rust")
         for result in ({}, {"provider_count": 0}, {"provider_count": -1}, {"provider_count": True}):
             with self.subTest(result=result), self.assertRaises(RuntimeError):
                 require_dht_provider_evidence(result, "forge")
@@ -346,6 +346,16 @@ class InteropFixtureContractTest(unittest.TestCase):
                 "address_count": 1,
                 "protocol_streams_opened_delta": 1,
                 "negotiated_protocol": "/ipfs/kad/1.1.0",
+            },
+            {
+                "provider_count": 1,
+                "provider_peer": "provider",
+                "querier_peer": "querier",
+                "returned_provider_peer": "provider",
+                "address_count": 1,
+                "protocol_streams_opened_delta": 1,
+                "query_requests_delta": 0,
+                "negotiated_protocol": "/ipfs/kad/1.0.0",
             },
         ):
             with self.subTest(result=result), self.assertRaises(RuntimeError):

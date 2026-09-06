@@ -35,6 +35,7 @@ ARTIFACT_SCHEMA = {
         "acceptance_scenario_id",
         "profile",
         "transport_stack",
+        "transport",
         "result",
         "listener_process",
         "effective_configuration",
@@ -81,6 +82,20 @@ EVIDENCE_CONTRACT_SUFFIX = ".v1"
 
 def evidence_contract_for(scenario_id: str) -> str:
     return f"{EVIDENCE_CONTRACT_PREFIX}{scenario_id}{EVIDENCE_CONTRACT_SUFFIX}"
+
+
+TLS_EVIDENCE_CONTRACTS = {evidence_contract_for("tls_identity")}
+
+
+def expected_launcher_transport(profile: str, stack: tuple[str, ...], evidence_contract: str) -> Optional[str]:
+    """Map the manifest's profile contract to the only permitted fixture transport."""
+    if profile == "native" and stack == ("quic",):
+        return "quic"
+    if profile == "native" and stack == ("tcp", "yamux"):
+        return "tcp-tls" if evidence_contract in TLS_EVIDENCE_CONTRACTS else "tcp"
+    if profile == "private_network" and stack == ("tcp", "yamux", "pnet"):
+        return PRIVATE_NETWORK_TRANSPORT
+    return None
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -573,10 +588,58 @@ def positive_integer(value: object) -> bool:
     return type(value) is int and value > 0
 
 
+def nonempty_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def sha256_value(value: object) -> bool:
+    return isinstance(value, str) and SHA256.fullmatch(value) is not None
+
+
+def token_value(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[a-z0-9][a-z0-9._:-]{7,127}", value) is not None
+
+
+def exact_phase_transcript(result: dict, security_protocol: str) -> list[str]:
+    """Require the wire upgrade order rather than a negotiated-label summary."""
+    transcript = result.get("upgrade_transcript")
+    application = result.get("application_protocol")
+    expected = [
+        {"phase": "multistream", "protocol": "/multistream/1.0.0"},
+        {"phase": "security", "protocol": security_protocol},
+        {"phase": "muxer", "protocol": "/yamux/1.0.0"},
+        {"phase": "application", "protocol": application},
+    ]
+    if not nonempty_string(application) or transcript != expected:
+        return ["contract requires the exact ordered multistream/security/Yamux transcript"]
+    return []
+
+
+def control_result(record: dict, name: str, correlation_token: object, expected_status: str) -> tuple[Optional[dict], list[str]]:
+    control = record.get(name)
+    if not isinstance(control, dict):
+        return None, [f"contract lacks the required {name} control"]
+    result = control.get("result")
+    if not isinstance(result, dict) or (
+        result.get("status") != expected_status
+        or result.get("control_kind") != name
+        or result.get("correlation_token") != correlation_token
+    ):
+        return None, [f"{name} control lacks correlated {expected_status} result evidence"]
+    return result, []
+
+
 def validate_ping_evidence(result: dict, _record: dict, _listener: Optional[dict]) -> list[str]:
-    if (type(result.get("rtt_ms")) is int and result["rtt_ms"] >= 0) or result.get("ping_ok") is True:
-        return []
-    return ["Ping evidence lacks an RTT or a successful Ping result"]
+    if result.get("ping_ok") is False:
+        return ["Ping evidence explicitly reports ping_ok=false"]
+    if not ((type(result.get("rtt_ms")) is int and result["rtt_ms"] >= 0) or result.get("ping_ok") is True):
+        return ["Ping evidence lacks an RTT or a successful Ping result"]
+    nonce = result.get("ping_nonce")
+    reply_nonce = result.get("ping_reply_nonce")
+    if nonce is not None or reply_nonce is not None:
+        if not token_value(nonce) or nonce != reply_nonce:
+            return ["Ping nonce/reply evidence is incomplete or uncorrelated"]
+    return []
 
 
 def validate_identify_evidence(result: dict, _record: dict, _listener: Optional[dict]) -> list[str]:
@@ -585,6 +648,16 @@ def validate_identify_evidence(result: dict, _record: dict, _listener: Optional[
     ):
         return []
     return ["Identify evidence lacks a signed peer record and protocol payload"]
+
+
+def validate_quic_v1_transport_evidence(result: dict, record: dict, listener: Optional[dict]) -> list[str]:
+    """Require the connected endpoint's transport and authenticated peer, not CLI intent."""
+    errors = validate_identify_evidence(result, record, listener)
+    if result.get("negotiated_transport") != "/quic-v1":
+        errors.append("QUIC evidence lacks the endpoint-observed /quic-v1 transport")
+    if result.get("authenticated_remote_peer_id") != record.get("peer_id"):
+        errors.append("QUIC evidence lacks the endpoint-authenticated remote peer identity")
+    return errors
 
 
 def validate_echo_evidence(result: dict, _record: dict, _listener: Optional[dict]) -> list[str]:
@@ -597,15 +670,19 @@ def validate_echo_evidence(result: dict, _record: dict, _listener: Optional[dict
 
 def validate_noise_multistream_evidence(result: dict, record: dict, listener: Optional[dict]) -> list[str]:
     errors = validate_identify_evidence(result, record, listener)
-    if record.get("negotiated_security") != "/noise" or record.get("negotiated_muxer") != "/yamux/1.0.0":
-        errors.append("Noise/multistream evidence lacks the expected TCP security and muxer selection")
+    errors.extend(exact_phase_transcript(result, "/noise"))
+    if result.get("negotiated_security") != "/noise" or result.get("negotiated_muxer") != "/yamux/1.0.0":
+        errors.append("Noise/multistream evidence lacks endpoint-observed TCP security and muxer selection")
+    if result.get("selected_protocols") != ["/noise", "/yamux/1.0.0", result.get("application_protocol")]:
+        errors.append("Noise/multistream selected protocols do not match its endpoint upgrade transcript")
     return errors
 
 
 def validate_tls_evidence(result: dict, record: dict, listener: Optional[dict]) -> list[str]:
     errors = validate_identify_evidence(result, record, listener)
-    if record.get("negotiated_security") != "/tls/1.0.0" or record.get("negotiated_muxer") != "/yamux/1.0.0":
-        errors.append("TLS evidence lacks the expected TCP security and muxer selection")
+    errors.extend(exact_phase_transcript(result, "/tls/1.0.0"))
+    if result.get("negotiated_security") != "/tls/1.0.0" or result.get("negotiated_muxer") != "/yamux/1.0.0":
+        errors.append("TLS evidence lacks endpoint-observed TCP security and muxer selection")
     return errors
 
 
@@ -626,9 +703,19 @@ def validate_relay_client_evidence(result: dict, _record: dict, _listener: Optio
 
 
 def validate_kademlia_evidence(result: dict, _record: dict, _listener: Optional[dict]) -> list[str]:
-    if positive_integer(result.get("provider_count")):
+    if (
+        result.get("negotiated_protocol") == "/ipfs/kad/1.0.0"
+        and positive_integer(result.get("provider_count"))
+        and nonempty_string(result.get("provider_peer"))
+        and nonempty_string(result.get("querier_peer"))
+        and result.get("returned_provider_peer") == result.get("provider_peer")
+        and result.get("provider_peer") != result.get("querier_peer")
+        and positive_integer(result.get("address_count"))
+        and positive_integer(result.get("protocol_streams_opened_delta"))
+        and positive_integer(result.get("query_requests_delta"))
+    ):
         return []
-    return ["Kademlia evidence lacks a returned provider"]
+    return ["Kademlia evidence lacks correlated Amino provider, querier, address, stream and query proof"]
 
 
 def validate_rendezvous_evidence(result: dict, _record: dict, _listener: Optional[dict]) -> list[str]:
@@ -647,128 +734,430 @@ def validate_rendezvous_evidence(result: dict, _record: dict, _listener: Optiona
     return ["Rendezvous evidence lacks the register/discover wire record proof"]
 
 
-def validate_pnet_evidence(result: dict, _record: dict, _listener: Optional[dict]) -> list[str]:
-    if (
+def validate_pnet_evidence(result: dict, record: dict, listener: Optional[dict]) -> list[str]:
+    errors: list[str] = []
+    if not (
         result.get("pnet_enabled") is True
         and result.get("negotiated_pnet") is True
         and isinstance(result.get("pnet_fingerprint"), str)
         and SHA256.fullmatch(result["pnet_fingerprint"]) is not None
     ):
-        return []
-    return ["private-network evidence lacks enabled PNET negotiation and its stable fingerprint"]
+        errors.append("private-network evidence lacks enabled PNET negotiation and its stable fingerprint")
+    if record.get("acceptance_scenario_id") != "pnet":
+        return errors
+    if (
+        result.get("expected_peer_id") != record.get("peer_id")
+        or result.get("connected_peer_id") != record.get("peer_id")
+        or result.get("connection_attempts_delta") != 1
+        or result.get("connections_established_delta") != 1
+        or result.get("identify_streams_opened_delta") != 1
+        or result.get("application_streams_opened_delta") != 1
+        or not isinstance(listener, dict)
+        or listener.get("local_peer_id") != record.get("peer_id")
+        or listener.get("connection_attempts_delta") != 1
+        or listener.get("connections_established_delta") != 1
+    ):
+        errors.append("PNET same-key run lacks correlated peer and connection-counter evidence")
+    controls = record.get("pnet_rejection_controls")
+    if not isinstance(controls, dict) or set(controls) != {"missing_key", "mismatched_key"}:
+        errors.append("PNET root contract requires missing-key and mismatched-key controls")
+        return errors
+    for name, control in controls.items():
+        if not isinstance(control, dict) or not isinstance(control.get("result"), dict):
+            errors.append(f"PNET {name} control is malformed")
+            continue
+        control_result_payload = control["result"]
+        if (
+            control_result_payload.get("status") != "rejected"
+            or control_result_payload.get("control_kind") != f"pnet_{name}"
+            or control_result_payload.get("correlation_token") != result.get("pnet_fingerprint")
+            or control_result_payload.get("expected_peer_id") != record.get("peer_id")
+            or control_result_payload.get("connection_attempts_delta") != 1
+            or control_result_payload.get("connections_established_delta") != 0
+            or control_result_payload.get("identify_streams_opened_delta") != 0
+            or control_result_payload.get("application_streams_opened_delta") != 0
+            or control_result_payload.get("rejection_stage") != "before_identify"
+        ):
+            errors.append(f"PNET {name} control does not prove pre-Identify rejection")
+    return errors
 
 
 def validate_future_multistream_evidence(result: dict, _record: dict, _listener: Optional[dict]) -> list[str]:
-    selected = result.get("selected_protocols")
-    if result.get("multistream_negotiated") is True and isinstance(selected, list) and selected and all(
-        isinstance(protocol, str) and protocol for protocol in selected
+    errors = exact_phase_transcript(result, "/noise")
+    if result.get("selected_protocols") != ["/noise", "/yamux/1.0.0", result.get("application_protocol")]:
+        errors.append("multistream selected protocols do not match its ordered upgrade transcript")
+    return errors
+
+
+def validate_future_security_evidence(result: dict, _record: dict, _listener: Optional[dict],
+                                      security_protocol: str) -> list[str]:
+    errors = exact_phase_transcript(result, security_protocol)
+    if result.get("secure_transport_authenticated") is not True or result.get("negotiated_security") != security_protocol:
+        errors.append("secure transport contract lacks the exact authenticated security selection")
+    if result.get("negotiated_muxer") != "/yamux/1.0.0":
+        errors.append("secure transport contract lacks the exact Yamux selection")
+    return errors
+
+
+def autonat_protocol(scenario_id: object) -> Optional[str]:
+    if not isinstance(scenario_id, str):
+        return None
+    if scenario_id.startswith("autonat_v1_"):
+        return "/libp2p/autonat/1.0.0"
+    if scenario_id.startswith("autonat_v2_"):
+        return "/libp2p/autonat/2/dial-request"
+    return None
+
+
+def validate_future_autonat_evidence(result: dict, record: dict, listener: Optional[dict]) -> list[str]:
+    acceptance_scenario_id = record.get("acceptance_scenario_id")
+    protocol = autonat_protocol(acceptance_scenario_id)
+    role = "client" if str(acceptance_scenario_id).split("_")[2:3] == ["client"] else "service"
+    token = result.get("probe_token")
+    errors: list[str] = []
+    if protocol is None or result.get("autonat_protocol") != protocol or result.get("autonat_role") != role:
+        errors.append("AutoNAT result lacks its exact v1/v2 protocol and configured role")
+    if not token_value(token) or result.get("dialback_request_token") != token or result.get("dialback_receipt_token") != token:
+        errors.append("AutoNAT dialback request/receipt does not share one non-empty probe token")
+    if not (
+        nonempty_string(result.get("probe_address"))
+        and nonempty_string(result.get("local_address"))
+        and result["probe_address"] != result["local_address"]
+        and result.get("probe_peer_id") == record.get("peer_id")
     ):
-        return []
-    return ["multistream contract requires selected protocol negotiation evidence"]
-
-
-def validate_future_security_evidence(result: dict, record: dict, _listener: Optional[dict]) -> list[str]:
-    if result.get("secure_transport_authenticated") is True and isinstance(record.get("negotiated_security"), str):
-        return []
-    return ["secure transport contract requires authenticated negotiated security evidence"]
-
-
-def validate_future_autonat_evidence(result: dict, _record: dict, listener: Optional[dict]) -> list[str]:
+        errors.append("AutoNAT probe role/address does not identify a distinct listener endpoint")
     if (
-        result.get("autonat_dialback_attempted") is True
-        and result.get("autonat_dialback_succeeded") is True
-        and result.get("external_dial_attempted") is True
-        and isinstance(listener, dict)
-        and listener.get("autonat_dialback_received") is True
+        result.get("autonat_dialback_attempted") is not True
+        or result.get("autonat_dialback_succeeded") is not True
+        or result.get("external_dial_attempted") is not True
+        or result.get("effective_reachability") != "public"
+    ):
+        errors.append("AutoNAT allow run lacks a successful external dialback and effective reachability")
+    if not isinstance(listener, dict) or (
+        listener.get("autonat_protocol") != protocol
+        or listener.get("autonat_role") != "probe_observer"
+        or listener.get("probe_token") != token
+        or listener.get("dialback_request_token") != token
+        or listener.get("dialback_receipt_token") != token
+        or listener.get("probe_address") != result.get("probe_address")
+        or listener.get("autonat_dialback_received") is not True
+        or listener.get("effective_reachability") != result.get("effective_reachability")
+        or listener.get("local_peer_id") != record.get("peer_id")
+    ):
+        errors.append("AutoNAT listener receipt is missing, uncorrelated, or has the wrong probe role")
+    denial, control_errors = control_result(record, "autonat_deny_control", token, "rejected")
+    errors.extend(control_errors)
+    if denial is not None and (
+        denial.get("probe_listener_peer_id") != record.get("peer_id")
+        or denial.get("probe_listener_dial_delta") != 0
+        or denial.get("dialback_attempts_delta") != 0
+        or denial.get("external_dial_attempted") is not False
+    ):
+        errors.append("AutoNAT deny control did not retain the same probe listener with zero dialback/external dial")
+    return errors
+
+
+def validate_future_relay_service_evidence(result: dict, record: dict, listener: Optional[dict]) -> list[str]:
+    reservation_id = result.get("reservation_id")
+    peers = (result.get("source_peer_id"), result.get("relay_peer_id"), result.get("destination_peer_id"))
+    errors: list[str] = []
+    if (
+        result.get("relay_protocol") != "/libp2p/circuit/relay/0.2.0/hop"
+        or not token_value(reservation_id)
+        or not sha256_value(result.get("voucher_sha256"))
+        or result.get("voucher_reservation_id") != reservation_id
+        or not positive_integer(result.get("reservation_expiry_unix"))
+        or not positive_integer(result.get("limit_duration_seconds"))
+        or not positive_integer(result.get("limit_data_bytes"))
+        or not nonempty_string(result.get("circuit_address"))
+        or "/p2p-circuit" not in result["circuit_address"]
+        or not sha256_value(result.get("relayed_echo_sha256"))
+        or result.get("relay_reservation_accepted") is not True
+        or result.get("relayed_connection_established") is not True
+        or not all(nonempty_string(peer) for peer in peers)
+        or len(set(peers)) != 3
+    ):
+        errors.append("relay service contract lacks correlated reservation, voucher, limits, circuit and three-peer echo proof")
+    if not isinstance(listener, dict) or any(
+        listener.get(field) != result.get(field)
+        for field in ("reservation_id", "voucher_sha256", "voucher_reservation_id", "circuit_address", "relayed_echo_sha256")
+    ):
+        errors.append("relay listener evidence does not match the reservation and relayed echo")
+    rejection, control_errors = control_result(record, "relay_rejection_control", reservation_id, "rejected")
+    errors.extend(control_errors)
+    if rejection is not None and rejection.get("relay_connection_established") is not False:
+        errors.append("relay rejection control did not prove that no relayed connection was established")
+    return errors
+
+
+def validate_future_dcutr_evidence(result: dict, record: dict, listener: Optional[dict]) -> list[str]:
+    token = result.get("hole_punch_token")
+    errors: list[str] = []
+    if (
+        result.get("dcutr_protocol") != "/libp2p/dcutr"
+        or not token_value(token)
+        or not nonempty_string(result.get("initial_relay_path"))
+        or "/p2p-circuit" not in result["initial_relay_path"]
+        or not nonempty_string(result.get("final_direct_path"))
+        or "/p2p-circuit" in result["final_direct_path"]
+        or result.get("hole_punch_attempted") is not True
+        or result.get("hole_punch_succeeded") is not True
+        or result.get("authenticated_direct_connection") is not True
+        or not sha256_value(result.get("echo_sha256"))
+    ):
+        errors.append("DCUtR contract lacks the exact relay-to-authenticated-direct hole-punch path")
+    if not isinstance(listener, dict) or (
+        listener.get("hole_punch_token") != token
+        or listener.get("final_direct_path") != result.get("final_direct_path")
+        or listener.get("echo_sha256") != result.get("echo_sha256")
+    ):
+        errors.append("DCUtR listener evidence is not correlated with the direct path and echo")
+    failure, control_errors = control_result(record, "dcutr_failure_control", token, "rejected")
+    errors.extend(control_errors)
+    if failure is not None and (
+        failure.get("relay_path_retained") is not True
+        or failure.get("direct_connection_established") is not False
+    ):
+        errors.append("DCUtR failure control did not retain the relay path without a direct connection")
+    return errors
+
+
+def validate_future_kademlia_evidence(result: dict, record: dict, _listener: Optional[dict]) -> list[str]:
+    if (
+        result.get("negotiated_protocol") == "/ipfs/kad/1.0.0"
+        and sha256_value(result.get("provider_key_sha256"))
+        and nonempty_string(result.get("provider_peer_id"))
+        and nonempty_string(result.get("querier_peer_id"))
+        and result.get("returned_provider_peer_id") == result.get("provider_peer_id")
+        and result.get("querier_peer_id") != result.get("provider_peer_id")
+        and result.get("querier_peer_id") == record.get("peer_id")
+        and positive_integer(result.get("provider_address_count"))
+        and positive_integer(result.get("protocol_streams_opened_delta"))
+        and positive_integer(result.get("query_requests_delta"))
     ):
         return []
-    return ["AutoNAT contract requires a successful external dialback at both endpoints"]
-
-
-def validate_future_relay_service_evidence(result: dict, _record: dict, _listener: Optional[dict]) -> list[str]:
-    if result.get("relay_reservation_accepted") is True and result.get("relayed_connection_established") is True:
-        return []
-    return ["relay service contract requires reservation and relayed connection evidence"]
-
-
-def validate_future_dcutr_evidence(result: dict, _record: dict, _listener: Optional[dict]) -> list[str]:
-    if result.get("hole_punch_succeeded") is True and result.get("direct_connection_established") is True:
-        return []
-    return ["DCUtR contract requires successful hole-punch and direct connection evidence"]
-
-
-def validate_future_kademlia_evidence(result: dict, _record: dict, _listener: Optional[dict]) -> list[str]:
-    if positive_integer(result.get("provider_count")) and result.get("negotiated_protocol") == "/ipfs/kad/1.0.0":
-        return []
-    return ["Kademlia contract requires a provider and the Amino protocol result"]
+    return ["Kademlia contract lacks the exact Amino key/provider/querier/query correlation"]
 
 
 def validate_future_rendezvous_evidence(result: dict, record: dict, listener: Optional[dict]) -> list[str]:
-    return validate_rendezvous_evidence(result, record, listener)
-
-
-def validate_future_gossipsub_evidence(result: dict, _record: dict, _listener: Optional[dict],
-                                       versions: tuple[str, ...]) -> list[str]:
+    errors = validate_rendezvous_evidence(result, record, listener)
     if (
-        result.get("negotiated_gossipsub_protocol") in versions
-        and result.get("message_delivered") is True
-        and positive_integer(result.get("mesh_peer_count"))
+        not sha256_value(result.get("cookie_sha256"))
+        or not nonempty_string(result.get("namespace"))
+        or result.get("requested_namespace") != result.get("namespace")
+        or result.get("registered_namespace") != result.get("namespace")
+        or result.get("expected_peer_id") != record.get("peer_id")
+        or result.get("returned_peer_id") != record.get("peer_id")
+        or not isinstance(listener, dict)
+        or listener.get("namespace") != result.get("namespace")
+        or listener.get("cookie_sha256") != result.get("cookie_sha256")
     ):
-        return []
-    return [f"GossipSub contract requires one of {versions} plus delivery and mesh evidence"]
+        errors.append("Rendezvous contract lacks expected peer, cookie and namespace correlation")
+    return errors
 
 
-def validate_future_mdns_evidence(result: dict, _record: dict, _listener: Optional[dict]) -> list[str]:
-    if result.get("mdns_discovery_observed") is True and isinstance(result.get("discovered_peer_id"), str) and result["discovered_peer_id"]:
-        return []
-    return ["mDNS contract requires a discovered peer result"]
+def validate_future_gossipsub_evidence(result: dict, record: dict, listener: Optional[dict],
+                                       protocol: str, version: str) -> list[str]:
+    message_id = result.get("message_id")
+    errors: list[str] = []
+    if (
+        result.get("negotiated_gossipsub_protocol") != protocol
+        or not nonempty_string(result.get("topic"))
+        or not token_value(message_id)
+        or not sha256_value(result.get("message_sha256"))
+        or result.get("delivery_ids") != [message_id]
+        or result.get("delivery_count") != 1
+        or result.get("message_delivered") is not True
+        or not positive_integer(result.get("mesh_peer_count"))
+    ):
+        errors.append("GossipSub contract lacks exact protocol/topic/message/digest exactly-once delivery evidence")
+    if not isinstance(listener, dict) or (
+        listener.get("topic") != result.get("topic")
+        or listener.get("received_message_id") != message_id
+        or listener.get("received_message_sha256") != result.get("message_sha256")
+        or listener.get("delivery_count") != 1
+    ):
+        errors.append("GossipSub listener delivery is not correlated with the published message")
+    incompatible, control_errors = control_result(record, "gossipsub_incompatible_control", message_id, "rejected")
+    errors.extend(control_errors)
+    if incompatible is not None and (
+        not nonempty_string(incompatible.get("selected_protocol"))
+        or incompatible.get("selected_protocol") == protocol
+        or incompatible.get("delivery_count") != 0
+    ):
+        errors.append("GossipSub incompatible-version control did not prevent delivery")
+    if version == "1.2":
+        if (
+            result.get("idontwant_ids") != [message_id]
+            or result.get("idontwant_suppressed_ids") != [message_id]
+            or result.get("redelivery_count") != 0
+        ):
+            errors.append("GossipSub v1.2 contract lacks IDONTWANT suppression and no-redelivery proof")
+    if version == "1.3":
+        extensions = result.get("first_rpc_extensions")
+        if (
+            not isinstance(extensions, list)
+            or not extensions
+            or any(not nonempty_string(extension) for extension in extensions)
+            or not isinstance(listener, dict)
+            or listener.get("advertised_first_rpc_extensions") != extensions
+            or result.get("unknown_extension_ignored") is not True
+        ):
+            errors.append("GossipSub v1.3 contract lacks first-RPC extension advertisement and unknown-extension handling")
+    return errors
+
+
+def validate_future_mdns_evidence(result: dict, record: dict, listener: Optional[dict]) -> list[str]:
+    discovery_id = result.get("mdns_discovery_id")
+    errors: list[str] = []
+    if (
+        not token_value(discovery_id)
+        or not nonempty_string(result.get("mdns_service_name"))
+        or result.get("discovered_peer_id") != record.get("peer_id")
+        or result.get("expected_listener_peer_id") != record.get("peer_id")
+        or result.get("discovered_address") != record.get("addr")
+        or result.get("manual_seed_used") is not False
+        or result.get("followup_authenticated_dial") is not True
+        or result.get("followup_peer_id") != record.get("peer_id")
+    ):
+        errors.append("mDNS contract lacks listener peer/address, service, unseeded discovery and authenticated follow-up dial proof")
+    if not isinstance(listener, dict) or (
+        listener.get("local_peer_id") != record.get("peer_id")
+        or listener.get("mdns_discovery_id") != discovery_id
+        or listener.get("mdns_service_name") != result.get("mdns_service_name")
+    ):
+        errors.append("mDNS listener evidence is not correlated with the discovered service")
+    control, control_errors = control_result(record, "mdns_no_discovery_control", discovery_id, "rejected")
+    errors.extend(control_errors)
+    if control is not None and (control.get("discovered_peer_count") != 0 or control.get("followup_dial_attempted") is not False):
+        errors.append("mDNS wrong namespace/fingerprint control unexpectedly discovered or dialled a peer")
+    expected_reason = "wrong_pnet_fingerprint" if record.get("acceptance_scenario_id") == "mdns_private_fingerprinted_go" else "wrong_namespace"
+    if control is not None and control.get("rejection_reason") != expected_reason:
+        errors.append("mDNS no-discovery control does not identify the required wrong namespace/fingerprint")
+    return errors
 
 
 def validate_future_private_mdns_evidence(result: dict, record: dict, listener: Optional[dict]) -> list[str]:
     errors = validate_future_mdns_evidence(result, record, listener)
-    if result.get("mdns_fingerprint") != result.get("pnet_fingerprint"):
+    if not sha256_value(result.get("mdns_fingerprint")) or result.get("mdns_fingerprint") != result.get("pnet_fingerprint"):
         errors.append("private mDNS contract requires the negotiated PNET fingerprint")
     return errors
 
 
-def validate_future_dnsaddr_evidence(result: dict, _record: dict, _listener: Optional[dict]) -> list[str]:
-    addresses = result.get("resolved_dnsaddr")
-    if result.get("dialed_resolved_address") is True and isinstance(addresses, list) and addresses and all(
-        isinstance(address, str) and address for address in addresses
+def validate_future_dnsaddr_evidence(result: dict, record: dict, _listener: Optional[dict]) -> list[str]:
+    addresses = result.get("parsed_addresses")
+    query_id = result.get("dns_query_id")
+    errors: list[str] = []
+    if (
+        not token_value(query_id)
+        or not nonempty_string(result.get("authoritative_query_name"))
+        or not sha256_value(result.get("authoritative_txt_sha256"))
+        or not isinstance(addresses, list)
+        or not addresses
+        or any(not nonempty_string(address) for address in addresses)
+        or result.get("expected_peer_id") != record.get("peer_id")
+        or result.get("selected_address") not in addresses
+        or result.get("followup_authenticated_dial") is not True
+        or result.get("followup_peer_id") != record.get("peer_id")
+    ):
+        errors.append("dnsaddr contract lacks authoritative TXT, parsed address, peer selection and follow-up dial proof")
+    control, control_errors = control_result(record, "dnsaddr_no_dial_control", query_id, "rejected")
+    errors.extend(control_errors)
+    if control is not None and (control.get("parsed_address_count") != 0 or control.get("dial_attempted") is not False):
+        errors.append("dnsaddr malformed/unrelated control unexpectedly parsed an address or dialled")
+    if control is not None and control.get("rejection_reason") not in {"malformed_txt", "unrelated_peer"}:
+        errors.append("dnsaddr no-dial control does not identify malformed or unrelated authoritative data")
+    return errors
+
+
+def validate_future_port_reuse_evidence(result: dict, _record: dict, listener: Optional[dict]) -> list[str]:
+    barrier = result.get("barrier_id")
+    attempt = result.get("attempt_id")
+    if (
+        token_value(barrier)
+        and token_value(attempt)
+        and positive_integer(result.get("local_port"))
+        and result.get("peer_local_port") == result.get("local_port")
+        and positive_integer(result.get("simultaneous_native_attempts"))
+        and result.get("direct_connection_count") == 1
+        and token_value(result.get("direct_connection_id"))
+        and isinstance(listener, dict)
+        and listener.get("barrier_id") == barrier
+        and token_value(listener.get("attempt_id"))
+        and listener.get("attempt_id") != attempt
+        and listener.get("local_port") == result.get("local_port")
+        and listener.get("direct_connection_id") == result.get("direct_connection_id")
+        and listener.get("direct_connection_count") == 1
     ):
         return []
-    return ["dnsaddr contract requires resolved addresses and a dialled result"]
-
-
-def validate_future_port_reuse_evidence(result: dict, _record: dict, _listener: Optional[dict]) -> list[str]:
-    if result.get("coordinated_dial_completed") is True and result.get("source_port_reused") is True:
-        return []
-    return ["coordinated dial contract requires a completed source-port reuse result"]
+    return ["coordinated dial contract lacks barrier/attempt IDs, equal local port and one direct connection"]
 
 
 def validate_future_inline_muxer_evidence(result: dict, _record: dict, _listener: Optional[dict]) -> list[str]:
-    if result.get("inline_muxer_negotiated") is True and result.get("negotiated_muxer") == "/yamux/1.0.0":
-        return []
-    return ["inline muxer contract requires an inline Yamux negotiation result"]
+    errors = exact_phase_transcript(result, result.get("negotiated_security")) if result.get("negotiated_security") in {"/noise", "/tls/1.0.0"} else ["inline muxer contract has an invalid security protocol"]
+    if (
+        result.get("inline_muxer_negotiated") is not True
+        or result.get("negotiated_muxer") != "/yamux/1.0.0"
+        or result.get("post_security_fallback_used") is not False
+    ):
+        errors.append("Go inline muxer contract requires inline Yamux with no post-security fallback")
+    return errors
 
 
 def validate_future_inline_muxer_fallback_evidence(result: dict, _record: dict,
                                                     _listener: Optional[dict]) -> list[str]:
+    errors = exact_phase_transcript(result, result.get("negotiated_security")) if result.get("negotiated_security") in {"/noise", "/tls/1.0.0"} else ["Rust fallback contract has an invalid security protocol"]
     if (
-        result.get("inline_muxer_negotiated") is False
-        and result.get("inline_muxer_fallback_used") is True
-        and result.get("negotiated_muxer") == "/yamux/1.0.0"
+        result.get("inline_muxer_negotiated") is not False
+        or result.get("negotiated_muxer") != "/yamux/1.0.0"
+        or result.get("post_security_fallback_used") is not True
+        or result.get("fallback_reason") != "rust_noise_extension_not_negotiated"
     ):
-        return []
-    return ["Rust inline muxer limitation requires a recorded non-inline Yamux fallback"]
+        errors.append("Rust inline muxer limitation requires its exact documented non-inline fallback")
+    return errors
 
 
-def validate_future_partial_messages_evidence(result: dict, _record: dict, _listener: Optional[dict]) -> list[str]:
-    if result.get("partial_messages_enabled") is True and result.get("partial_message_reassembled") is True and positive_integer(
-        result.get("message_bytes")
+def validate_future_partial_messages_evidence(result: dict, record: dict, listener: Optional[dict]) -> list[str]:
+    fragments = result.get("fragments")
+    count = result.get("fragment_count")
+    max_fragment_bytes = result.get("max_fragment_bytes")
+    errors: list[str] = []
+    if not positive_integer(max_fragment_bytes):
+        errors.append("partial messages contract has no positive per-fragment bound")
+    if not isinstance(fragments, list) or not positive_integer(count) or len(fragments) != count:
+        errors.append("partial messages contract has no complete fragment list")
+    elif not positive_integer(max_fragment_bytes) or any(
+        not isinstance(fragment, dict)
+        or fragment.get("index") != index
+        or not positive_integer(fragment.get("bytes"))
+        or fragment["bytes"] > max_fragment_bytes
+        or not sha256_value(fragment.get("sha256"))
+        for index, fragment in enumerate(fragments)
     ):
-        return []
-    return ["partial messages contract requires enabled reassembly evidence"]
+        errors.append("partial messages fragments lack ordered bounded per-fragment evidence")
+    if (
+        not sha256_value(result.get("aggregate_sha256"))
+        or result.get("aggregate_sha256") != result.get("delivered_message_sha256")
+        or result.get("partial_message_reassembled") is not True
+        or result.get("delivery_count") != 1
+        or not isinstance(listener, dict)
+        or listener.get("delivered_message_sha256") != result.get("aggregate_sha256")
+        or listener.get("delivery_count") != 1
+    ):
+        errors.append("partial messages contract lacks exactly-once aggregate reassembly evidence")
+    controls = record.get("partial_no_delivery_controls")
+    expected_controls = {"corrupted", "missing", "duplicate"}
+    if not isinstance(controls, dict) or set(controls) != expected_controls or any(
+        not isinstance(controls[name], dict)
+        or not isinstance(controls[name].get("result"), dict)
+        or controls[name]["result"].get("status") != "rejected"
+        or controls[name]["result"].get("delivery_count") != 0
+        or controls[name]["result"].get("control_kind") != f"partial_{name}"
+        or controls[name]["result"].get("correlation_token") != result.get("aggregate_sha256")
+        for name in expected_controls
+    ):
+        errors.append("partial messages contract lacks corrupted/missing/duplicate no-delivery controls")
+    return errors
 
 
 def evidence_contracts(validator, *scenario_ids: str) -> dict[str, object]:
@@ -776,7 +1165,8 @@ def evidence_contracts(validator, *scenario_ids: str) -> dict[str, object]:
 
 
 EVIDENCE_CONTRACT_VALIDATORS = {
-    **evidence_contracts(validate_identify_evidence, "quic_v1_transport", "identify", "identify_native_tcp_yamux"),
+    **evidence_contracts(validate_quic_v1_transport_evidence, "quic_v1_transport"),
+    **evidence_contracts(validate_identify_evidence, "identify", "identify_native_tcp_yamux"),
     **evidence_contracts(validate_echo_evidence, "tcp_yamux"),
     **evidence_contracts(validate_noise_multistream_evidence, "multistream_select", "noise_identity"),
     **evidence_contracts(validate_tls_evidence, "tls_identity"),
@@ -786,8 +1176,10 @@ EVIDENCE_CONTRACT_VALIDATORS = {
     **evidence_contracts(validate_rendezvous_evidence, "rendezvous_rust"),
     **evidence_contracts(validate_pnet_evidence, "tcp_yamux_private_pnet", "pnet"),
     **evidence_contracts(validate_future_multistream_evidence, "multistream_select_private_pnet"),
-    **evidence_contracts(validate_future_security_evidence,
-        "noise_identity_private_pnet", "tls_identity_private_pnet"),
+    **evidence_contracts(lambda result, record, listener: validate_future_security_evidence(
+        result, record, listener, "/noise"), "noise_identity_private_pnet"),
+    **evidence_contracts(lambda result, record, listener: validate_future_security_evidence(
+        result, record, listener, "/tls/1.0.0"), "tls_identity_private_pnet"),
     **evidence_contracts(validate_ping_evidence, "ping_private_tcp_yamux_pnet"),
     **evidence_contracts(validate_identify_evidence, "identify_private_tcp_yamux_pnet"),
     **evidence_contracts(validate_future_autonat_evidence,
@@ -800,7 +1192,7 @@ EVIDENCE_CONTRACT_VALIDATORS = {
     **evidence_contracts(validate_future_kademlia_evidence, "kademlia_amino_private_tcp_yamux_pnet"),
     **evidence_contracts(validate_future_rendezvous_evidence, "rendezvous_rust_private_tcp_yamux_pnet"),
     **evidence_contracts(lambda result, record, listener: validate_future_gossipsub_evidence(
-        result, record, listener, ("/meshsub/1.0.0", "/meshsub/1.1.0")),
+        result, record, listener, "/meshsub/1.1.0", "1.1"),
         "gossipsub_v1_0_v1_1", "gossipsub_v1_0_v1_1_native_tcp_yamux", "gossipsub_v1_0_v1_1_private_tcp_yamux_pnet"),
     **evidence_contracts(validate_future_mdns_evidence, "mdns_public"),
     **evidence_contracts(validate_future_private_mdns_evidence, "mdns_private_fingerprinted_go"),
@@ -811,10 +1203,10 @@ EVIDENCE_CONTRACT_VALIDATORS = {
     **evidence_contracts(validate_future_inline_muxer_fallback_evidence,
         "inline_muxer_rust_fallback", "inline_muxer_rust_fallback_private_pnet"),
     **evidence_contracts(lambda result, record, listener: validate_future_gossipsub_evidence(
-        result, record, listener, ("/meshsub/1.2.0",)),
+        result, record, listener, "/meshsub/1.2.0", "1.2"),
         "gossipsub_v1_2", "gossipsub_v1_2_native_tcp_yamux", "gossipsub_v1_2_private_tcp_yamux_pnet"),
     **evidence_contracts(lambda result, record, listener: validate_future_gossipsub_evidence(
-        result, record, listener, ("/meshsub/1.3.0",)),
+        result, record, listener, "/meshsub/1.3.0", "1.3"),
         "gossipsub_v1_3", "gossipsub_v1_3_native_tcp_yamux", "gossipsub_v1_3_private_tcp_yamux_pnet"),
     **evidence_contracts(validate_future_partial_messages_evidence,
         "partial_messages", "partial_messages_native_tcp_yamux", "partial_messages_private_tcp_yamux_pnet"),
@@ -882,6 +1274,162 @@ def private_autonat_control_paths(record: dict, artifact_root: Path) -> set[Path
         )
         if path is not None
     }
+
+
+def indexed_control_paths(control: object, artifact_root: Path) -> set[Path]:
+    if not isinstance(control, dict):
+        return set()
+    return {
+        path
+        for path in (
+            path_within(control.get("evidence_file"), artifact_root),
+            path_within(control.get("log_file"), artifact_root),
+        )
+        if path is not None
+    }
+
+
+def validate_indexed_control(
+    record: dict,
+    control_name: str,
+    control: object,
+    correlation_token: object,
+    expected_transport: str,
+    artifact_root: Path,
+    indexed_evidence: dict[Path, str],
+    binary_paths: dict[str, Path],
+    primary_dial_options: dict[str, str],
+    require_pnet_key: Optional[bool] = None,
+    match_primary_pnet_key: bool = True,
+    private_egress_policy: Optional[str] = None,
+) -> list[str]:
+    """Validate an independently indexed negative control process and result."""
+    if not isinstance(control, dict) or set(control) != {
+        "command", "log_file", "exit_code", "evidence_file", "result"
+    }:
+        return [f"{control_name} control has invalid schema"]
+    errors: list[str] = []
+    command = control.get("command")
+    if not isinstance(command, list) or not command or absolute_path(command[0]) != binary_paths.get(record.get("dialer")):
+        return [f"{control_name} control uses an unrecorded dialer executable"]
+    options, command_errors = command_options(command, "dial")
+    errors.extend(command_errors)
+    expected_options = {
+        "--scenario", "--peer-id", "--addr", "--result-file", "--store-dir", "--transport",
+        "--control-kind", "--correlation-token",
+    }
+    if require_pnet_key is True:
+        expected_options.add("--pnet-key-file")
+    if private_egress_policy is not None:
+        expected_options.add("--private-egress-policy")
+    if set(options) != expected_options:
+        errors.append(f"{control_name} control command has an invalid option schema")
+    elif (
+        options["--scenario"] != f"{record.get('scenario')}-{control_name}"
+        or options["--peer-id"] != record.get("peer_id")
+        or options["--addr"] != record.get("addr")
+        or options["--transport"] != expected_transport
+        or options["--control-kind"] != control_name
+        or options["--correlation-token"] != correlation_token
+        or path_within(options["--store-dir"], artifact_root) is None
+    ):
+        errors.append(f"{control_name} control command does not bind its scenario, peer, address and transport")
+    elif require_pnet_key is True:
+        key = absolute_path(options.get("--pnet-key-file"))
+        primary_key = absolute_path(primary_dial_options.get("--pnet-key-file"))
+        if key is None or not key.is_file() or (match_primary_pnet_key and key != primary_key):
+            errors.append(f"{control_name} control does not bind the active PNET key")
+        elif not match_primary_pnet_key and key == primary_key:
+            errors.append(f"{control_name} control does not use a distinct PNET key")
+    elif require_pnet_key is False and "--pnet-key-file" in options:
+        errors.append(f"{control_name} control unexpectedly supplies a PNET key")
+    if private_egress_policy is not None and options.get("--private-egress-policy") != private_egress_policy:
+        errors.append(f"{control_name} control has the wrong private egress policy")
+    evidence_path = path_within(control.get("evidence_file"), artifact_root)
+    log_path = path_within(control.get("log_file"), artifact_root)
+    if evidence_path is None or log_path is None or evidence_path not in indexed_evidence or log_path not in indexed_evidence:
+        errors.append(f"{control_name} control evidence is absent from the verified index")
+        return errors
+    if options and path_within(options.get("--result-file"), artifact_root) != evidence_path:
+        errors.append(f"{control_name} control result file differs from its command")
+    if control.get("exit_code") != 0:
+        errors.append(f"{control_name} control did not complete successfully")
+    payload, payload_errors = load_evidence_json(evidence_path, f"{control_name} control result")
+    errors.extend(payload_errors)
+    result = control.get("result")
+    if payload is not None and payload != result:
+        errors.append(f"{control_name} control result file does not match its raw result")
+    if not isinstance(result, dict) or (
+        result.get("status") != "rejected"
+        or result.get("control_kind") != control_name
+        or result.get("correlation_token") != correlation_token
+    ):
+        errors.append(f"{control_name} control lacks a correlated rejected result")
+    return errors
+
+
+def validate_pnet_rejection_controls(
+    record: dict,
+    dial_options: dict[str, str],
+    artifact_root: Path,
+    indexed_evidence: dict[Path, str],
+    binary_paths: dict[str, Path],
+) -> list[str]:
+    controls = record.get("pnet_rejection_controls")
+    if not isinstance(controls, dict) or set(controls) != {"missing_key", "mismatched_key"}:
+        return ["PNET root contract lacks the two required rejection controls"]
+    fingerprint = record.get("result", {}).get("pnet_fingerprint") if isinstance(record.get("result"), dict) else None
+    errors: list[str] = []
+    for name, control in controls.items():
+        control_name = f"pnet_{name}"
+        errors.extend(validate_indexed_control(
+            record,
+            control_name,
+            control,
+            fingerprint,
+            PRIVATE_NETWORK_TRANSPORT,
+            artifact_root,
+            indexed_evidence,
+            binary_paths,
+            dial_options,
+            require_pnet_key=(name == "mismatched_key"),
+            match_primary_pnet_key=(name != "mismatched_key"),
+        ))
+        if name == "mismatched_key" and isinstance(control, dict):
+            command = control.get("command")
+            options, _ = command_options(command, "dial")
+            primary_key = absolute_path(dial_options.get("--pnet-key-file"))
+            mismatch_key = absolute_path(options.get("--pnet-key-file"))
+            if mismatch_key is None or not mismatch_key.is_file() or mismatch_key == primary_key:
+                errors.append("PNET mismatched-key control does not use a distinct existing PSK file")
+            else:
+                try:
+                    mismatch_key.relative_to(artifact_root)
+                except ValueError:
+                    pass
+                else:
+                    errors.append("PNET mismatched-key control keeps key material inside the artifact directory")
+                if mismatch_key in indexed_evidence:
+                    errors.append("PNET mismatched-key control serializes or hashes private key material")
+    return errors
+
+
+def contract_control_paths(record: dict, artifact_root: Path) -> set[Path]:
+    paths = private_autonat_control_paths(record, artifact_root)
+    for name in (
+        "autonat_deny_control", "relay_rejection_control", "dcutr_failure_control",
+        "mdns_no_discovery_control", "dnsaddr_no_dial_control", "gossipsub_incompatible_control",
+    ):
+        paths.update(indexed_control_paths(record.get(name), artifact_root))
+    controls = record.get("pnet_rejection_controls")
+    if isinstance(controls, dict):
+        for control in controls.values():
+            paths.update(indexed_control_paths(control, artifact_root))
+    partial = record.get("partial_no_delivery_controls")
+    if isinstance(partial, dict):
+        for control in partial.values():
+            paths.update(indexed_control_paths(control, artifact_root))
+    return paths
 
 
 def validate_private_autonat_egress_control(record: dict, dial_options: dict[str, str],
@@ -1015,6 +1563,66 @@ def validate_private_network_proofs(capability_id: str, expected_requires: tuple
     return errors
 
 
+def validate_contract_controls(
+    capability_id: str,
+    record: dict,
+    expected_profile: str,
+    expected_transport: Optional[str],
+    dial_options: dict[str, str],
+    result: dict,
+    artifact_root: Path,
+    indexed_evidence: dict[Path, str],
+    binary_paths: dict[str, Path],
+) -> list[str]:
+    """Bind every required negative control to a real launcher execution and index entry."""
+    if expected_transport is None:
+        return ["contract controls have no canonical launcher transport"]
+    private = expected_profile == "private_network"
+    pnet = True if private else None
+    scenario_id = record.get("acceptance_scenario_id")
+    errors: list[str] = []
+    if scenario_id == "pnet":
+        return validate_pnet_rejection_controls(
+            record, dial_options, artifact_root, indexed_evidence, binary_paths
+        )
+    controls: list[tuple[str, object, object, Optional[str]]] = []
+    if capability_id.startswith("protocol.autonat_"):
+        controls.append(("autonat_deny_control", record.get("autonat_deny_control"), result.get("probe_token"),
+                         "deny-external" if private else None))
+    elif capability_id == "relay.circuit_v2_service":
+        controls.append(("relay_rejection_control", record.get("relay_rejection_control"), result.get("reservation_id"), None))
+    elif capability_id == "relay.dcutr":
+        controls.append(("dcutr_failure_control", record.get("dcutr_failure_control"), result.get("hole_punch_token"), None))
+    elif capability_id.startswith("discovery.mdns"):
+        controls.append(("mdns_no_discovery_control", record.get("mdns_no_discovery_control"), result.get("mdns_discovery_id"), None))
+    elif capability_id == "addressing.dnsaddr":
+        controls.append(("dnsaddr_no_dial_control", record.get("dnsaddr_no_dial_control"), result.get("dns_query_id"), None))
+    elif capability_id.startswith("pubsub.gossipsub"):
+        controls.append(("gossipsub_incompatible_control", record.get("gossipsub_incompatible_control"), result.get("message_id"), None))
+    elif capability_id == "pubsub.partial_messages":
+        controls.extend(
+            (f"partial_{name}", control, result.get("aggregate_sha256"), None)
+            for name, control in (record.get("partial_no_delivery_controls") or {}).items()
+        )
+        if len(controls) != 3:
+            errors.append("partial messages contract lacks exactly three indexed no-delivery controls")
+    for name, control, token, policy in controls:
+        errors.extend(validate_indexed_control(
+            record,
+            name,
+            control,
+            token,
+            expected_transport,
+            artifact_root,
+            indexed_evidence,
+            binary_paths,
+            dial_options,
+            require_pnet_key=pnet,
+            private_egress_policy=policy,
+        ))
+    return errors
+
+
 def validate_successful_raw_record(
     record: object,
     capability_id: str,
@@ -1027,6 +1635,7 @@ def validate_successful_raw_record(
     expected_evidence_contract: str,
     indexed_evidence: dict[Path, str],
     used_evidence: set[Path],
+    used_autonat_probe_tokens: set[str],
     binary_paths: dict[str, Path],
     artifact_root: Path,
 ) -> list[str]:
@@ -1049,6 +1658,13 @@ def validate_successful_raw_record(
         errors.append("raw runner acceptance scenario differs from the capability requirement")
     if record.get("scenario") != expected_runner_scenario.split("/", 1)[1]:
         errors.append("raw runner fixture scenario does not match runner_scenario_id")
+    expected_transport = expected_launcher_transport(
+        expected_profile, expected_stack, expected_evidence_contract
+    )
+    if expected_transport is None:
+        errors.append("manifest profile/transport stack has no canonical launcher transport")
+    elif record.get("transport") != expected_transport:
+        errors.append("raw runner transport cannot override the manifest contract launcher mapping")
     result = record.get("result")
     if not isinstance(result, dict) or result.get("status") != "ok":
         errors.append("raw runner result does not report status=ok")
@@ -1097,7 +1713,7 @@ def validate_successful_raw_record(
             or path_within(options["--store-dir"], artifact_root) is None
             or not options["--peer-id"]
             or not options["--addr"]
-            or options["--transport"] != record.get("transport")
+            or options["--transport"] != expected_transport
         ):
             errors.append("raw runner dial command does not match its recorded result")
         else:
@@ -1132,7 +1748,7 @@ def validate_successful_raw_record(
                 errors.append("raw runner listener command has an invalid option schema")
             elif (
                 options["--scenario"] != record.get("scenario")
-                or options["--transport"] != record.get("transport")
+                or options["--transport"] != expected_transport
                 or not options["--features"]
                 or any(path_within(options[field], artifact_root) is None for field in ("--ready-file", "--stop-file", "--store-dir"))
                 or (
@@ -1167,6 +1783,14 @@ def validate_successful_raw_record(
     errors.extend(validate_result_semantics(
         expected_evidence_contract, payload or {}, record, listener_payload
     ))
+    if capability_id.startswith("protocol.autonat_"):
+        probe_token = (payload or {}).get("probe_token")
+        if not token_value(probe_token):
+            errors.append("AutoNAT run lacks a unique probe token")
+        elif probe_token in used_autonat_probe_tokens:
+            errors.append("AutoNAT probe token is reused by multiple capability directions")
+        else:
+            used_autonat_probe_tokens.add(probe_token)
 
     if expected_profile == "private_network":
         errors.extend(validate_private_network_proofs(
@@ -1181,7 +1805,18 @@ def validate_successful_raw_record(
             record,
             binary_paths,
         ))
-        claim_paths.update(private_autonat_control_paths(record, artifact_root))
+    errors.extend(validate_contract_controls(
+        capability_id,
+        record,
+        expected_profile,
+        expected_transport,
+        dial_options,
+        payload or {},
+        artifact_root,
+        indexed_evidence,
+        binary_paths,
+    ))
+    claim_paths.update(contract_control_paths(record, artifact_root))
     errors.extend(validate_effective_configuration(
         record,
         expected_profile,
@@ -1319,6 +1954,7 @@ def validate(
 
     used_records: set[int] = set()
     used_evidence: set[Path] = set()
+    used_autonat_probe_tokens: set[str] = set()
     for (capability_id, scenario_id), (
         expected_directions,
         _expected_status,
@@ -1362,6 +1998,7 @@ def validate(
                     expected_evidence_contract,
                     indexed_evidence,
                     used_evidence,
+                    used_autonat_probe_tokens,
                     binary_paths,
                     artifact_root,
                 )
@@ -1372,6 +2009,10 @@ def validate(
 
 
 def fixture_scenario(capability_id: str, profile: str) -> tuple[str, str, list[str], str]:
+    if capability_id == "transport.quic_v1" and profile == "native":
+        return "quic_v1_transport", "quic_base/identify", ["quic"], "identify"
+    if capability_id == PRIVATE_NETWORK_PSK_DEPENDENCY and profile == "private_network":
+        return "pnet", "private_tcp_yamux_pnet/pnet", ["tcp", "yamux", "pnet"], "pnet"
     if capability_id.startswith("protocol.autonat_") and profile == "private_network":
         return (
             "autonat_v1_client_private_tcp_yamux_pnet",
@@ -1470,7 +2111,7 @@ def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: s
         capability_id, profile
     )
     if profile == "native":
-        transport = "tcp"
+        transport = "quic" if transport_stack == ["quic"] else "tcp"
     elif profile == "private_network":
         transport = PRIVATE_NETWORK_TRANSPORT
     else:
@@ -1485,6 +2126,7 @@ def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: s
         PRIVATE_EGRESS_POLICY_VALUE if PRIVATE_EGRESS_POLICY_DEPENDENCY in requires else None
     )
     listener_features = "ping,autonatv1" if capability_id.startswith("protocol.autonat_v1_") else "ping"
+    is_pnet_root = acceptance_scenario_id == "pnet"
     artifacts: list[dict] = []
     for dialer, listener in (("forge", "go"), ("go", "forge")):
         stem = f"{dialer}-to-{listener}"
@@ -1499,7 +2141,14 @@ def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: s
             "status": "ok",
         }
         listener_payload: dict[str, object] = {"implementation": listener, "role": "listener", "status": "ok"}
-        if profile == "native":
+        if acceptance_scenario_id == "quic_v1_transport":
+            result_payload.update({
+                "signed_peer_record": True,
+                "protocol_count": 2,
+                "negotiated_transport": "/quic-v1",
+                "authenticated_remote_peer_id": "listener-peer",
+            })
+        elif profile == "native":
             result_payload.update({
                 "protocol": "/forge/interop/echo/1",
                 "payload_bytes": 7,
@@ -1516,6 +2165,20 @@ def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: s
                 "negotiated_pnet": True,
                 "pnet_fingerprint": private_pnet_fingerprint,
             })
+        if is_pnet_root:
+            result_payload.update({
+                "expected_peer_id": "listener-peer",
+                "connected_peer_id": "listener-peer",
+                "connection_attempts_delta": 1,
+                "connections_established_delta": 1,
+                "identify_streams_opened_delta": 1,
+                "application_streams_opened_delta": 1,
+            })
+            listener_payload.update({
+                "local_peer_id": "listener-peer",
+                "connection_attempts_delta": 1,
+                "connections_established_delta": 1,
+            })
         if private_egress is not None:
             result_payload.update({
                 "private_egress_policy": private_egress,
@@ -1527,18 +2190,38 @@ def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: s
             })
         is_private_autonat = profile == "private_network" and capability_id.startswith("protocol.autonat_")
         if is_private_autonat:
+            probe_token = f"probe-token-{dialer}-to-{listener}"
             result_payload.update({
+                "autonat_protocol": "/libp2p/autonat/1.0.0",
+                "autonat_role": "client",
+                "probe_token": probe_token,
+                "dialback_request_token": probe_token,
+                "dialback_receipt_token": probe_token,
+                "probe_address": "/ip4/127.0.0.1/tcp/1",
+                "local_address": "/ip4/127.0.0.1/tcp/2",
+                "probe_peer_id": "listener-peer",
+                "effective_reachability": "public",
                 "autonat_dialback_attempted": True,
                 "autonat_dialback_succeeded": True,
                 "external_dial_attempted": True,
             })
-            listener_payload["autonat_dialback_received"] = True
+            listener_payload.update({
+                "autonat_protocol": "/libp2p/autonat/1.0.0",
+                "autonat_role": "probe_observer",
+                "probe_token": probe_token,
+                "dialback_request_token": probe_token,
+                "dialback_receipt_token": probe_token,
+                "probe_address": "/ip4/127.0.0.1/tcp/1",
+                "local_peer_id": "listener-peer",
+                "effective_reachability": "public",
+                "autonat_dialback_received": True,
+            })
         result_file.write_text(json.dumps(result_payload) + "\n")
         listener_result_file.write_text(json.dumps(listener_payload) + "\n")
         command_log.write_text("dial finished\n")
         listener_log.write_text("listener stopped\n")
         dial_command = [
-            str(binaries[dialer]), "dial", "--scenario", scenario, "--peer-id", "peer",
+            str(binaries[dialer]), "dial", "--scenario", scenario, "--peer-id", "listener-peer",
             "--addr", "/ip4/127.0.0.1/tcp/1", "--result-file", str(result_file),
             "--store-dir", str(artifact_root / f"{stem}-dial-store"), "--transport", transport,
         ]
@@ -1555,6 +2238,8 @@ def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: s
             dial_command.extend(["--private-egress-policy", private_egress])
             listener_command.extend(["--private-egress-policy", private_egress])
         egress_deny_control = None
+        autonat_deny_control = None
+        pnet_rejection_controls = None
         if is_private_autonat:
             deny_result_file = artifact_root / f"{stem}-egress-deny.json"
             deny_log = artifact_root / f"{stem}-egress-deny.log"
@@ -1578,6 +2263,72 @@ def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: s
                 "evidence_file": str(deny_result_file),
                 "result": deny_payload,
             }
+            autonat_deny_result_file = artifact_root / f"{stem}-autonat-deny.json"
+            autonat_deny_log = artifact_root / f"{stem}-autonat-deny.log"
+            autonat_deny_payload = {
+                "status": "rejected",
+                "control_kind": "autonat_deny_control",
+                "correlation_token": probe_token,
+                "probe_listener_peer_id": "listener-peer",
+                "probe_listener_dial_delta": 0,
+                "dialback_attempts_delta": 0,
+                "external_dial_attempted": False,
+            }
+            autonat_deny_result_file.write_text(json.dumps(autonat_deny_payload) + "\n")
+            autonat_deny_log.write_text("autonat deny control finished\n")
+            autonat_deny_control = {
+                "command": [
+                    str(binaries[dialer]), "dial", "--scenario", f"{scenario}-autonat_deny_control",
+                    "--peer-id", "listener-peer", "--addr", "/ip4/127.0.0.1/tcp/1",
+                    "--result-file", str(autonat_deny_result_file),
+                    "--store-dir", str(artifact_root / f"{stem}-autonat-deny-store"),
+                    "--transport", transport, "--control-kind", "autonat_deny_control",
+                    "--correlation-token", probe_token, "--pnet-key-file", str(pnet_key_file),
+                    "--private-egress-policy", "deny-external",
+                ],
+                "log_file": str(autonat_deny_log),
+                "exit_code": 0,
+                "evidence_file": str(autonat_deny_result_file),
+                "result": autonat_deny_payload,
+            }
+        if is_pnet_root:
+            mismatch_key_file = root / "private-inputs" / f"{stem}-mismatched.pnet.key"
+            mismatch_key_file.write_bytes(b"fixture-mismatched-private-network-key")
+            pnet_rejection_controls = {}
+            for name in ("missing_key", "mismatched_key"):
+                control_name = f"pnet_{name}"
+                control_result_file = artifact_root / f"{stem}-{control_name}.json"
+                control_log = artifact_root / f"{stem}-{control_name}.log"
+                control_payload = {
+                    "status": "rejected",
+                    "control_kind": control_name,
+                    "correlation_token": private_pnet_fingerprint,
+                    "expected_peer_id": "listener-peer",
+                    "connection_attempts_delta": 1,
+                    "connections_established_delta": 0,
+                    "identify_streams_opened_delta": 0,
+                    "application_streams_opened_delta": 0,
+                    "rejection_stage": "before_identify",
+                }
+                control_result_file.write_text(json.dumps(control_payload) + "\n")
+                control_log.write_text(f"{control_name} finished\n")
+                control_command = [
+                    str(binaries[dialer]), "dial", "--scenario", f"{scenario}-{control_name}",
+                    "--peer-id", "listener-peer", "--addr", "/ip4/127.0.0.1/tcp/1",
+                    "--result-file", str(control_result_file),
+                    "--store-dir", str(artifact_root / f"{stem}-{control_name}-store"),
+                    "--transport", transport, "--control-kind", control_name,
+                    "--correlation-token", private_pnet_fingerprint,
+                ]
+                if name == "mismatched_key":
+                    control_command.extend(["--pnet-key-file", str(mismatch_key_file)])
+                pnet_rejection_controls[name] = {
+                    "command": control_command,
+                    "log_file": str(control_log),
+                    "exit_code": 0,
+                    "evidence_file": str(control_result_file),
+                    "result": control_payload,
+                }
         record = {
             "dialer": dialer,
             "listener": listener,
@@ -1587,6 +2338,8 @@ def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: s
             "profile": profile,
             "transport_stack": transport_stack,
             "transport": transport,
+            "peer_id": "listener-peer",
+            "addr": "/ip4/127.0.0.1/tcp/1",
             "effective_configuration": {
                 "activation": "enabled",
                 "profile": profile,
@@ -1619,6 +2372,10 @@ def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: s
         }
         if egress_deny_control is not None:
             record["egress_deny_control"] = egress_deny_control
+        if autonat_deny_control is not None:
+            record["autonat_deny_control"] = autonat_deny_control
+        if pnet_rejection_controls is not None:
+            record["pnet_rejection_controls"] = pnet_rejection_controls
         artifacts.append(record)
     identity = fixture_identity(root, head)
     artifact = {
@@ -1714,6 +2471,471 @@ def rewrite_result_evidence(record: dict) -> None:
         Path(listener_result_file).write_text(json.dumps(record["listener_result"]) + "\n")
 
 
+def rewrite_control_evidence(control: dict) -> None:
+    Path(control["evidence_file"]).write_text(json.dumps(control["result"]) + "\n")
+
+
+def semantic_fixture(scenario_id: str) -> tuple[dict, dict, Optional[dict]]:
+    """Synthetic parser fixtures only: they specify schemas, never live evidence."""
+    token = "correlation-token-0001"
+    digest = "a" * 64
+    record: dict[str, object] = {
+        "dialer": "forge",
+        "listener": "go",
+        "scenario": scenario_id,
+        "acceptance_scenario_id": scenario_id,
+        "peer_id": "listener-peer",
+        "addr": "/ip4/127.0.0.1/tcp/4001",
+    }
+    result: dict[str, object] = {
+        "implementation": "forge",
+        "role": "dialer",
+        "scenario": scenario_id,
+        "status": "ok",
+    }
+    listener: Optional[dict] = {"implementation": "go", "role": "listener", "status": "ok"}
+    identify = {"signed_peer_record": True, "protocol_count": 2}
+    transcript = [
+        {"phase": "multistream", "protocol": "/multistream/1.0.0"},
+        {"phase": "security", "protocol": "/noise"},
+        {"phase": "muxer", "protocol": "/yamux/1.0.0"},
+        {"phase": "application", "protocol": "/ipfs/id/1.0.0"},
+    ]
+    if scenario_id == "quic_v1_transport":
+        result.update({
+            **identify,
+            "negotiated_transport": "/quic-v1",
+            "authenticated_remote_peer_id": "listener-peer",
+        })
+    elif scenario_id in {"identify", "identify_native_tcp_yamux", "identify_private_tcp_yamux_pnet"}:
+        result.update(identify)
+    elif scenario_id == "tcp_yamux":
+        result.update({"protocol": "/forge/interop/echo/1", "payload_bytes": 7, "echo_ok": True})
+    elif scenario_id in {"multistream_select", "noise_identity"}:
+        result.update({
+            **identify,
+            "application_protocol": "/ipfs/id/1.0.0",
+            "upgrade_transcript": transcript,
+            "selected_protocols": ["/noise", "/yamux/1.0.0", "/ipfs/id/1.0.0"],
+            "negotiated_security": "/noise",
+            "negotiated_muxer": "/yamux/1.0.0",
+        })
+    elif scenario_id == "tls_identity":
+        tls_transcript = [dict(item) for item in transcript]
+        tls_transcript[1]["protocol"] = "/tls/1.0.0"
+        result.update({
+            **identify,
+            "application_protocol": "/ipfs/id/1.0.0",
+            "upgrade_transcript": tls_transcript,
+            "negotiated_security": "/tls/1.0.0",
+            "negotiated_muxer": "/yamux/1.0.0",
+        })
+    elif scenario_id.startswith("ping"):
+        result.update({"ping_ok": True, "rtt_ms": 1, "ping_nonce": token, "ping_reply_nonce": token})
+    elif scenario_id == "relay_v2_client_transport":
+        result["voucher_bytes"] = 16
+    elif scenario_id == "kademlia_amino":
+        result.update({
+            "negotiated_protocol": "/ipfs/kad/1.0.0",
+            "provider_count": 1,
+            "provider_peer": "provider-peer",
+            "querier_peer": "querier-peer",
+            "returned_provider_peer": "provider-peer",
+            "address_count": 1,
+            "protocol_streams_opened_delta": 1,
+            "query_requests_delta": 1,
+        })
+    elif scenario_id == "rendezvous_rust":
+        result.update({
+            "negotiated_protocol": "/rendezvous/1.0.0", "wire_registration_count": 1,
+            "signed_peer_record_valid": True, "matching_peer_record": True, "record_sequence": 1,
+            "record_address_count": 1, "registered_ttl_seconds": 7200,
+            "discovered_ttl_seconds": 7200, "cookie_bytes": 16,
+        })
+    elif scenario_id == "tcp_yamux_private_pnet":
+        result.update({"pnet_enabled": True, "negotiated_pnet": True, "pnet_fingerprint": digest})
+    elif scenario_id == "pnet":
+        result.update({
+            "pnet_enabled": True, "negotiated_pnet": True, "pnet_fingerprint": digest,
+            "expected_peer_id": "listener-peer", "connected_peer_id": "listener-peer",
+            "connection_attempts_delta": 1, "connections_established_delta": 1,
+            "identify_streams_opened_delta": 1, "application_streams_opened_delta": 1,
+        })
+        listener.update({
+            "local_peer_id": "listener-peer", "connection_attempts_delta": 1,
+            "connections_established_delta": 1,
+        })
+        record["result"] = result
+        record["pnet_rejection_controls"] = {
+            name: {"result": {
+                "status": "rejected", "control_kind": f"pnet_{name}", "correlation_token": digest,
+                "expected_peer_id": "listener-peer", "connection_attempts_delta": 1,
+                "connections_established_delta": 0, "identify_streams_opened_delta": 0,
+                "application_streams_opened_delta": 0, "rejection_stage": "before_identify",
+            }}
+            for name in ("missing_key", "mismatched_key")
+        }
+    elif scenario_id == "multistream_select_private_pnet":
+        result.update({
+            "application_protocol": "/ipfs/id/1.0.0", "upgrade_transcript": transcript,
+            "selected_protocols": ["/noise", "/yamux/1.0.0", "/ipfs/id/1.0.0"],
+        })
+    elif scenario_id in {"noise_identity_private_pnet", "tls_identity_private_pnet"}:
+        security = "/noise" if scenario_id.startswith("noise") else "/tls/1.0.0"
+        secured_transcript = [dict(item) for item in transcript]
+        secured_transcript[1]["protocol"] = security
+        result.update({
+            "application_protocol": "/ipfs/id/1.0.0", "upgrade_transcript": secured_transcript,
+            "secure_transport_authenticated": True, "negotiated_security": security,
+            "negotiated_muxer": "/yamux/1.0.0",
+        })
+    elif scenario_id.startswith("autonat_"):
+        protocol = "/libp2p/autonat/1.0.0" if scenario_id.startswith("autonat_v1_") else "/libp2p/autonat/2/dial-request"
+        role = "client" if "_client" in scenario_id else "service"
+        result.update({
+            "autonat_protocol": protocol, "autonat_role": role, "probe_token": token,
+            "dialback_request_token": token, "dialback_receipt_token": token,
+            "probe_address": "/ip4/127.0.0.1/tcp/4001", "local_address": "/ip4/127.0.0.1/tcp/4002",
+            "probe_peer_id": "listener-peer", "autonat_dialback_attempted": True,
+            "autonat_dialback_succeeded": True, "external_dial_attempted": True,
+            "effective_reachability": "public",
+        })
+        listener.update({
+            "autonat_protocol": protocol, "autonat_role": "probe_observer", "probe_token": token,
+            "dialback_request_token": token, "dialback_receipt_token": token,
+            "probe_address": "/ip4/127.0.0.1/tcp/4001", "autonat_dialback_received": True,
+            "effective_reachability": "public", "local_peer_id": "listener-peer",
+        })
+        record["autonat_deny_control"] = {"result": {
+            "status": "rejected", "control_kind": "autonat_deny_control", "correlation_token": token,
+            "probe_listener_peer_id": "listener-peer", "probe_listener_dial_delta": 0,
+            "dialback_attempts_delta": 0, "external_dial_attempted": False,
+        }}
+    elif scenario_id == "relay_v2_service":
+        result.update({
+            "relay_protocol": "/libp2p/circuit/relay/0.2.0/hop", "reservation_id": token,
+            "voucher_sha256": digest, "voucher_reservation_id": token,
+            "reservation_expiry_unix": 2, "limit_duration_seconds": 1,
+            "limit_data_bytes": 1, "circuit_address": "/ip4/127.0.0.1/tcp/1/p2p-circuit",
+            "relayed_echo_sha256": digest, "relay_reservation_accepted": True,
+            "relayed_connection_established": True, "source_peer_id": "source-peer",
+            "relay_peer_id": "relay-peer", "destination_peer_id": "destination-peer",
+        })
+        listener.update({
+            "reservation_id": token, "voucher_sha256": digest, "voucher_reservation_id": token,
+            "circuit_address": "/ip4/127.0.0.1/tcp/1/p2p-circuit", "relayed_echo_sha256": digest,
+        })
+        record["relay_rejection_control"] = {"result": {
+            "status": "rejected", "control_kind": "relay_rejection_control", "correlation_token": token,
+            "relay_connection_established": False,
+        }}
+    elif scenario_id == "dcutr":
+        result.update({
+            "dcutr_protocol": "/libp2p/dcutr", "hole_punch_token": token,
+            "initial_relay_path": "/ip4/127.0.0.1/tcp/1/p2p-circuit",
+            "final_direct_path": "/ip4/127.0.0.1/tcp/2", "hole_punch_attempted": True,
+            "hole_punch_succeeded": True, "authenticated_direct_connection": True, "echo_sha256": digest,
+        })
+        listener.update({"hole_punch_token": token, "final_direct_path": "/ip4/127.0.0.1/tcp/2", "echo_sha256": digest})
+        record["dcutr_failure_control"] = {"result": {
+            "status": "rejected", "control_kind": "dcutr_failure_control", "correlation_token": token,
+            "relay_path_retained": True, "direct_connection_established": False,
+        }}
+    elif scenario_id == "kademlia_amino_private_tcp_yamux_pnet":
+        result.update({
+            "negotiated_protocol": "/ipfs/kad/1.0.0", "provider_key_sha256": digest,
+            "provider_peer_id": "provider-peer", "querier_peer_id": "listener-peer",
+            "returned_provider_peer_id": "provider-peer", "provider_address_count": 1,
+            "protocol_streams_opened_delta": 1, "query_requests_delta": 1,
+        })
+    elif scenario_id == "rendezvous_rust_private_tcp_yamux_pnet":
+        result.update({
+            "negotiated_protocol": "/rendezvous/1.0.0", "wire_registration_count": 1,
+            "signed_peer_record_valid": True, "matching_peer_record": True, "record_sequence": 1,
+            "record_address_count": 1, "registered_ttl_seconds": 7200,
+            "discovered_ttl_seconds": 7200, "cookie_bytes": 16, "cookie_sha256": digest,
+            "namespace": "stage6", "requested_namespace": "stage6", "registered_namespace": "stage6",
+            "expected_peer_id": "listener-peer", "returned_peer_id": "listener-peer",
+        })
+        listener.update({"namespace": "stage6", "cookie_sha256": digest})
+    elif scenario_id.startswith("gossipsub_"):
+        version = "1.1" if "v1_0_v1_1" in scenario_id else ("1.2" if "v1_2" in scenario_id else "1.3")
+        protocol = f"/meshsub/{version}.0"
+        result.update({
+            "negotiated_gossipsub_protocol": protocol, "topic": "stage6-topic", "message_id": token,
+            "message_sha256": digest, "delivery_ids": [token], "delivery_count": 1,
+            "message_delivered": True, "mesh_peer_count": 1,
+        })
+        listener.update({"topic": "stage6-topic", "received_message_id": token, "received_message_sha256": digest, "delivery_count": 1})
+        record["gossipsub_incompatible_control"] = {"result": {
+            "status": "rejected", "control_kind": "gossipsub_incompatible_control", "correlation_token": token,
+            "selected_protocol": "/meshsub/0.9.0", "delivery_count": 0,
+        }}
+        if version == "1.2":
+            result.update({"idontwant_ids": [token], "idontwant_suppressed_ids": [token], "redelivery_count": 0})
+        if version == "1.3":
+            result.update({"first_rpc_extensions": ["ihave"], "unknown_extension_ignored": True})
+            listener["advertised_first_rpc_extensions"] = ["ihave"]
+    elif scenario_id.startswith("mdns_"):
+        result.update({
+            "mdns_discovery_id": token, "mdns_service_name": "_p2p._udp.local",
+            "discovered_peer_id": "listener-peer", "expected_listener_peer_id": "listener-peer",
+            "discovered_address": "/ip4/127.0.0.1/tcp/4001", "manual_seed_used": False,
+            "followup_authenticated_dial": True, "followup_peer_id": "listener-peer",
+        })
+        listener.update({"local_peer_id": "listener-peer", "mdns_discovery_id": token, "mdns_service_name": "_p2p._udp.local"})
+        record["mdns_no_discovery_control"] = {"result": {
+            "status": "rejected", "control_kind": "mdns_no_discovery_control", "correlation_token": token,
+            "discovered_peer_count": 0, "followup_dial_attempted": False,
+            "rejection_reason": "wrong_pnet_fingerprint" if scenario_id == "mdns_private_fingerprinted_go" else "wrong_namespace",
+        }}
+        if scenario_id == "mdns_private_fingerprinted_go":
+            result.update({"pnet_fingerprint": digest, "mdns_fingerprint": digest})
+    elif scenario_id.startswith("dnsaddr"):
+        result.update({
+            "dns_query_id": token, "authoritative_query_name": "_dnsaddr.stage6.test",
+            "authoritative_txt_sha256": digest, "parsed_addresses": ["/ip4/127.0.0.1/tcp/4001"],
+            "expected_peer_id": "listener-peer", "selected_address": "/ip4/127.0.0.1/tcp/4001",
+            "followup_authenticated_dial": True, "followup_peer_id": "listener-peer",
+        })
+        record["dnsaddr_no_dial_control"] = {"result": {
+            "status": "rejected", "control_kind": "dnsaddr_no_dial_control", "correlation_token": token,
+            "parsed_address_count": 0, "dial_attempted": False, "rejection_reason": "malformed_txt",
+        }}
+    elif scenario_id.startswith("coordinated_dial_port_reuse"):
+        result.update({
+            "barrier_id": token, "attempt_id": "attempt-token-0001", "local_port": 4001,
+            "peer_local_port": 4001, "simultaneous_native_attempts": 2,
+            "direct_connection_count": 1, "direct_connection_id": "connection-token-0001",
+        })
+        listener.update({
+            "barrier_id": token, "attempt_id": "attempt-token-0002", "local_port": 4001,
+            "direct_connection_count": 1, "direct_connection_id": "connection-token-0001",
+        })
+    elif scenario_id.startswith("inline_muxer_go") or scenario_id.startswith("inline_muxer_rust_fallback"):
+        result.update({
+            "application_protocol": "/ipfs/id/1.0.0", "upgrade_transcript": transcript,
+            "negotiated_security": "/noise", "negotiated_muxer": "/yamux/1.0.0",
+        })
+        if scenario_id.startswith("inline_muxer_go"):
+            result.update({"inline_muxer_negotiated": True, "post_security_fallback_used": False})
+        else:
+            result.update({
+                "inline_muxer_negotiated": False, "post_security_fallback_used": True,
+                "fallback_reason": "rust_noise_extension_not_negotiated",
+            })
+    elif scenario_id.startswith("partial_messages"):
+        result.update({
+            "fragment_count": 2, "max_fragment_bytes": 8,
+            "fragments": [{"index": 0, "bytes": 4, "sha256": digest}, {"index": 1, "bytes": 4, "sha256": digest}],
+            "aggregate_sha256": digest, "delivered_message_sha256": digest,
+            "partial_message_reassembled": True, "delivery_count": 1,
+        })
+        listener.update({"delivered_message_sha256": digest, "delivery_count": 1})
+        record["partial_no_delivery_controls"] = {
+            name: {"result": {
+                "status": "rejected", "control_kind": f"partial_{name}", "correlation_token": digest,
+                "delivery_count": 0,
+            }}
+            for name in ("corrupted", "missing", "duplicate")
+        }
+    else:
+        raise ValueError(f"missing semantic fixture for {scenario_id}")
+    return result, record, listener
+
+
+def remove_path(value: dict, path: tuple[str, ...]) -> None:
+    cursor: object = value
+    for key in path[:-1]:
+        assert isinstance(cursor, dict)
+        cursor = cursor[key]
+    assert isinstance(cursor, dict)
+    cursor.pop(path[-1])
+
+
+def semantic_critical_paths(result: dict, record: dict, listener: Optional[dict]) -> list[tuple[str, ...]]:
+    paths = [
+        ("result", key)
+        for key in result
+        if key != "status" and key not in {"ping_ok", "rtt_ms"}
+    ]
+    if isinstance(listener, dict):
+        paths.extend(("listener", key) for key in listener if key not in {"implementation", "role", "status"})
+    paths.extend(("record", key) for key in ("negotiated_security", "negotiated_muxer") if key in record)
+    for key, value in record.items():
+        if key.endswith("_control") and isinstance(value, dict) and isinstance(value.get("result"), dict):
+            paths.extend(("record", key, "result", field) for field in value["result"])
+        elif key in {"pnet_rejection_controls", "partial_no_delivery_controls"} and isinstance(value, dict):
+            for name, control in value.items():
+                if isinstance(control, dict) and isinstance(control.get("result"), dict):
+                    paths.extend(("record", key, name, "result", field) for field in control["result"])
+    return paths
+
+
+def validate_semantic_fixture_matrix() -> list[str]:
+    errors: list[str] = []
+    for contract in EVIDENCE_CONTRACT_VALIDATORS:
+        scenario_id = contract.removeprefix(EVIDENCE_CONTRACT_PREFIX).removesuffix(EVIDENCE_CONTRACT_SUFFIX)
+        result, record, listener = semantic_fixture(scenario_id)
+        contract_errors = validate_result_semantics(contract, result, record, listener)
+        if contract_errors:
+            errors.append(f"{scenario_id}: valid semantic fixture was rejected: {contract_errors}")
+            continue
+        for path in semantic_critical_paths(result, record, listener):
+            mutated_result, mutated_record, mutated_listener = json.loads(json.dumps((result, record, listener)))
+            target = {"result": mutated_result, "record": mutated_record, "listener": mutated_listener}
+            try:
+                remove_path(target, path)
+            except (AssertionError, KeyError) as error:
+                errors.append(f"{scenario_id}: cannot remove semantic path {path}: {error}")
+                continue
+            if not validate_result_semantics(contract, mutated_result, mutated_record, mutated_listener):
+                errors.append(f"{scenario_id}: removing critical semantic path {path} was accepted")
+        if scenario_id.startswith("ping"):
+            mutated_result, mutated_record, mutated_listener = json.loads(json.dumps((result, record, listener)))
+            mutated_result["ping_ok"] = False
+            if not validate_result_semantics(contract, mutated_result, mutated_record, mutated_listener):
+                errors.append(f"{scenario_id}: ping_ok=false was accepted despite a non-negative RTT")
+        if isinstance(listener, dict) and "probe_token" in result:
+            mutated_result, mutated_record, mutated_listener = json.loads(json.dumps((result, record, listener)))
+            assert isinstance(mutated_listener, dict)
+            mutated_listener["probe_token"] = "different-token-0001"
+            if not validate_result_semantics(contract, mutated_result, mutated_record, mutated_listener):
+                errors.append(f"{scenario_id}: mismatched endpoint correlation token was accepted")
+    for scenario_id, field in (
+        ("quic_v1_transport", "negotiated_transport"),
+        ("multistream_select", "upgrade_transcript"),
+        ("noise_identity", "negotiated_security"),
+        ("tls_identity", "negotiated_muxer"),
+    ):
+        result, record, listener = semantic_fixture(scenario_id)
+        # These are the legacy runner labels. They must not rescue missing endpoint evidence.
+        record.update({"transport": "quic", "negotiated_security": "/noise", "negotiated_muxer": "/yamux/1.0.0"})
+        result.pop(field)
+        if not validate_result_semantics(evidence_contract_for(scenario_id), result, record, listener):
+            errors.append(f"{scenario_id}: runner labels accepted without endpoint {field} evidence")
+    result, record, listener = semantic_fixture("kademlia_amino")
+    for field in tuple(result):
+        if field not in {"implementation", "role", "scenario", "status", "provider_count"}:
+            result.pop(field)
+    if not validate_result_semantics(evidence_contract_for("kademlia_amino"), result, record, listener):
+        errors.append("kademlia_amino: provider_count-only evidence was accepted")
+    return errors
+
+
+def is_private_semantic_scenario(scenario_id: str) -> bool:
+    return scenario_id.endswith("_private_pnet") or scenario_id == "mdns_private_fingerprinted_go" or scenario_id == "pnet"
+
+
+def control_fixture_matrix(root: Path) -> list[str]:
+    """Exercise command/log/index schemas for every future negative-control family."""
+    errors: list[str] = []
+    artifact_root = (root / "control-schema-artifacts").resolve()
+    artifact_root.mkdir(exist_ok=True)
+    key_root = (root / "control-schema-keys").resolve()
+    key_root.mkdir(exist_ok=True)
+    primary_key = key_root / "primary.pnet"
+    mismatch_key = key_root / "mismatch.pnet"
+    primary_key.write_bytes(b"primary-control-key")
+    mismatch_key.write_bytes(b"mismatch-control-key")
+    binary = (artifact_root / "forge-fixture").resolve()
+    binary.write_text("fixture\n")
+    sequence = 0
+    for contract in EVIDENCE_CONTRACT_VALIDATORS:
+        scenario_id = contract.removeprefix(EVIDENCE_CONTRACT_PREFIX).removesuffix(EVIDENCE_CONTRACT_SUFFIX)
+        result, record, _ = semantic_fixture(scenario_id)
+        private = is_private_semantic_scenario(scenario_id)
+        expected_transport = PRIVATE_NETWORK_TRANSPORT if private else "quic"
+        primary_options = {"--transport": expected_transport}
+        if private:
+            primary_options["--pnet-key-file"] = str(primary_key)
+        controls: list[tuple[str, dict, bool, bool, Optional[str]]] = []
+        for name in (
+            "autonat_deny_control", "relay_rejection_control", "dcutr_failure_control",
+            "mdns_no_discovery_control", "dnsaddr_no_dial_control", "gossipsub_incompatible_control",
+        ):
+            value = record.get(name)
+            if isinstance(value, dict):
+                controls.append((name, value, private, True, "deny-external" if name == "autonat_deny_control" and private else None))
+        partial = record.get("partial_no_delivery_controls")
+        if isinstance(partial, dict):
+            controls.extend((f"partial_{name}", value, private, True, None) for name, value in partial.items() if isinstance(value, dict))
+        pnet_controls = record.get("pnet_rejection_controls")
+        if isinstance(pnet_controls, dict):
+            controls.extend(
+                (f"pnet_{name}", value, name == "mismatched_key", name != "mismatched_key", None)
+                for name, value in pnet_controls.items() if isinstance(value, dict)
+            )
+        for name, semantic_control, require_key, match_primary, policy in controls:
+            sequence += 1
+            control = json.loads(json.dumps(semantic_control))
+            result_payload = control["result"]
+            evidence_path = artifact_root / f"{sequence}-{name}.json"
+            log_path = artifact_root / f"{sequence}-{name}.log"
+            evidence_path.write_text(json.dumps(result_payload) + "\n")
+            log_path.write_text(f"{name}\n")
+            command = [
+                str(binary), "dial", "--scenario", f"{scenario_id}-{name}",
+                "--peer-id", str(record["peer_id"]), "--addr", str(record["addr"]),
+                "--result-file", str(evidence_path), "--store-dir", str(artifact_root / f"{sequence}-store"),
+                "--transport", expected_transport, "--control-kind", name,
+                "--correlation-token", str(result_payload["correlation_token"]),
+            ]
+            if require_key:
+                key = mismatch_key if name == "pnet_mismatched_key" else primary_key
+                command.extend(["--pnet-key-file", str(key)])
+            if policy is not None:
+                command.extend(["--private-egress-policy", policy])
+            control.update({
+                "command": command,
+                "log_file": str(log_path),
+                "exit_code": 0,
+                "evidence_file": str(evidence_path),
+            })
+            indexed = {path: sha256_file(path) for path in (evidence_path, log_path)}
+            control_errors = validate_indexed_control(
+                record,
+                name,
+                control,
+                result_payload["correlation_token"],
+                expected_transport,
+                artifact_root,
+                indexed,
+                {"forge": binary},
+                primary_options,
+                require_pnet_key=require_key,
+                match_primary_pnet_key=match_primary,
+                private_egress_policy=policy,
+            )
+            if control_errors:
+                errors.append(f"{scenario_id}/{name}: valid control schema was rejected: {control_errors}")
+                continue
+            for field in ("command", "log_file", "exit_code", "evidence_file", "result"):
+                mutated = json.loads(json.dumps(control))
+                mutated.pop(field)
+                if not validate_indexed_control(
+                    record, name, mutated, result_payload["correlation_token"], expected_transport,
+                    artifact_root, indexed, {"forge": binary}, primary_options,
+                    require_pnet_key=require_key, match_primary_pnet_key=match_primary,
+                    private_egress_policy=policy,
+                ):
+                    errors.append(f"{scenario_id}/{name}: removing control field {field} was accepted")
+            for field in ("status", "control_kind", "correlation_token"):
+                mutated = json.loads(json.dumps(control))
+                mutated["result"].pop(field)
+                Path(mutated["evidence_file"]).write_text(json.dumps(mutated["result"]) + "\n")
+                mutated_indexed = {path: sha256_file(path) for path in (evidence_path, log_path)}
+                if not validate_indexed_control(
+                    record, name, mutated, result_payload["correlation_token"], expected_transport,
+                    artifact_root, mutated_indexed, {"forge": binary}, primary_options,
+                    require_pnet_key=require_key, match_primary_pnet_key=match_primary,
+                    private_egress_policy=policy,
+                ):
+                    errors.append(f"{scenario_id}/{name}: removing control result field {field} was accepted")
+                evidence_path.write_text(json.dumps(result_payload) + "\n")
+    return errors
+
+
 def self_test() -> int:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -1722,7 +2944,10 @@ def self_test() -> int:
         artifact_path = root / "artifacts" / "interop-artifacts.json"
         runner_path.parent.mkdir(parents=True)
         runner_path.write_text("# fixture runner\n")
-        (root / ".gitignore").write_text("artifacts/\nprivate-inputs/\nprivate-*.json\n__pycache__/\n")
+        (root / ".gitignore").write_text(
+            "artifacts/\nprivate-inputs/\nprivate-*.json\n*-manifest.json\n"
+            "control-schema-artifacts/\ncontrol-schema-keys/\n__pycache__/\n"
+        )
         manifest_path.write_text(json.dumps(fixture_manifest()))
         try:
             git_call(root, "init", "-q")
@@ -1747,6 +2972,83 @@ def self_test() -> int:
         if errors or has_limitations:
             print("self-test failed: canonical runner artifact was not accepted", file=sys.stderr)
             return 1
+        quic_manifest_path = root / "quic-manifest.json"
+        quic_artifact_path = root / "artifacts" / "quic" / "interop-artifacts.json"
+        quic_manifest_path.write_text(json.dumps(fixture_manifest(
+            capability_id="transport.quic_v1", profile="native"
+        )))
+        write_artifact(root, quic_manifest_path, quic_artifact_path, head, capability_id="transport.quic_v1")
+        quic_errors, quic_limitations = validate(root, quic_manifest_path, quic_artifact_path, head)
+        if quic_errors or quic_limitations:
+            print("self-test failed: canonical QUIC launcher artifact was not accepted", file=sys.stderr)
+            return 1
+        quic_artifact = load_json(quic_artifact_path)
+        assert isinstance(quic_artifact, dict)
+        for quic_record in quic_artifact["artifacts"]:
+            assert isinstance(quic_record, dict)
+            replace_option(quic_record["result"]["attempts"][0]["command"], "--transport", "tcp")
+            replace_option(quic_record["listener_process"]["command"], "--transport", "tcp")
+        quic_artifact_path.write_text(json.dumps(quic_artifact))
+        if not expect_rejected(
+            root, quic_manifest_path, quic_artifact_path, head,
+            "QUIC metadata with TCP launcher commands",
+            "raw runner dial command does not match its recorded result",
+        ):
+            return 1
+
+        pnet_manifest_path = root / "pnet-manifest.json"
+        pnet_artifact_path = root / "artifacts" / "pnet" / "interop-artifacts.json"
+        pnet_manifest_path.write_text(json.dumps(fixture_manifest(
+            capability_id=PRIVATE_NETWORK_PSK_DEPENDENCY, profile="private_network"
+        )))
+        write_artifact(
+            root,
+            pnet_manifest_path,
+            pnet_artifact_path,
+            head,
+            capability_id=PRIVATE_NETWORK_PSK_DEPENDENCY,
+            profile="private_network",
+        )
+        pnet_errors, pnet_limitations = validate(root, pnet_manifest_path, pnet_artifact_path, head)
+        if pnet_errors or pnet_limitations:
+            print("self-test failed: PNET root same-key/control artifact was not accepted", file=sys.stderr)
+            return 1
+        pnet_artifact = load_json(pnet_artifact_path)
+        assert isinstance(pnet_artifact, dict)
+        pnet_control = pnet_artifact["artifacts"][0]["pnet_rejection_controls"]["missing_key"]
+        pnet_evidence = pnet_control["evidence_file"]
+        pnet_artifact["evidence_index"] = [
+            entry for entry in pnet_artifact["evidence_index"] if entry["path"] != Path(pnet_evidence).name
+        ]
+        pnet_artifact_path.write_text(json.dumps(pnet_artifact))
+        if not expect_rejected(root, pnet_manifest_path, pnet_artifact_path, head, "unindexed PNET missing-key control"):
+            return 1
+        write_artifact(
+            root,
+            pnet_manifest_path,
+            pnet_artifact_path,
+            head,
+            capability_id=PRIVATE_NETWORK_PSK_DEPENDENCY,
+            profile="private_network",
+        )
+        pnet_artifact = load_json(pnet_artifact_path)
+        assert isinstance(pnet_artifact, dict)
+        for pnet_record in pnet_artifact["artifacts"]:
+            assert isinstance(pnet_record, dict)
+            mismatch = pnet_record["pnet_rejection_controls"]["mismatched_key"]
+            replace_option(
+                mismatch["command"],
+                "--pnet-key-file",
+                pnet_record["result"]["attempts"][0]["command"][
+                    pnet_record["result"]["attempts"][0]["command"].index("--pnet-key-file") + 1
+                ],
+            )
+        pnet_artifact_path.write_text(json.dumps(pnet_artifact))
+        if not expect_rejected(
+            root, pnet_manifest_path, pnet_artifact_path, head, "PNET control reusing the active key",
+            "pnet_mismatched_key control does not use a distinct PNET key",
+        ):
+            return 1
         for contract in EVIDENCE_CONTRACT_VALIDATORS:
             if not validate_result_semantics(
                 contract,
@@ -1756,6 +3058,14 @@ def self_test() -> int:
             ):
                 print(f"self-test failed: status-only evidence was accepted for {contract}", file=sys.stderr)
                 return 1
+        semantic_errors = validate_semantic_fixture_matrix()
+        if semantic_errors:
+            print(f"self-test failed: contract semantic fixture matrix is incomplete: {semantic_errors}", file=sys.stderr)
+            return 1
+        control_errors = control_fixture_matrix(root)
+        if control_errors:
+            print(f"self-test failed: control fixture matrix is incomplete: {control_errors}", file=sys.stderr)
+            return 1
         unknown_manifest = fixture_manifest()
         unknown_registry = unknown_manifest["interop_acceptance_registry"]
         unknown_scenario = unknown_registry["capabilities"]["transport.tcp_yamux"]["scenarios"][0]
@@ -2037,6 +3347,41 @@ def self_test() -> int:
             return 1
         artifact = load_json(autonat_artifact_path)
         assert isinstance(artifact, dict)
+        first, second = artifact["artifacts"]
+        assert isinstance(first, dict) and isinstance(second, dict)
+        shared_token = first["result"]["probe_token"]
+        for record in (second,):
+            for payload in (record["result"], record["listener_result"]):
+                payload["probe_token"] = shared_token
+                payload["dialback_request_token"] = shared_token
+                payload["dialback_receipt_token"] = shared_token
+            record["autonat_deny_control"]["result"]["correlation_token"] = shared_token
+            rewrite_result_evidence(record)
+            rewrite_control_evidence(record["autonat_deny_control"])
+        artifact["evidence_index"] = build_evidence_index(
+            Path(artifact["artifact_root"]).resolve(), artifact["artifacts"]
+        )
+        autonat_artifact_path.write_text(json.dumps(artifact))
+        if not expect_rejected(
+            root,
+            autonat_manifest_path,
+            autonat_artifact_path,
+            head,
+            "reused AutoNAT probe token",
+            "AutoNAT probe token is reused by multiple capability directions",
+        ):
+            return 1
+        write_artifact(
+            root,
+            autonat_manifest_path,
+            autonat_artifact_path,
+            head,
+            capability_id="protocol.autonat_v1_client",
+            profile="private_network",
+            requires=autonat_requires,
+        )
+        artifact = load_json(autonat_artifact_path)
+        assert isinstance(artifact, dict)
         for record in artifact["artifacts"]:
             assert isinstance(record, dict)
             record.pop("egress_deny_control")
@@ -2173,7 +3518,9 @@ def self_test() -> int:
     print(
         "stage6 acceptance checker self-test ok: canonical argv, forged executables, missing, stale, "
         "nonzero, failures, result parsing, evidence hashes/reuse, closed contracts, status-only rejection, "
-        "private PNET fingerprint/allow-deny egress proofs, dirty tree, empty scenarios and limitations covered"
+        "all contract semantic/control schemas, current QUIC endpoint and TCP upgrade evidence, "
+        "Kademlia provider/query correlation, private PNET fingerprint/controls, "
+        "AutoNAT allow-deny egress proofs, dirty tree, empty scenarios and limitations covered"
     )
     return 0
 

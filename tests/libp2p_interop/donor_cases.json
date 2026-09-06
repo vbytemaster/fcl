@@ -214,6 +214,27 @@
       ]
     },
     {
+      "id": "connections.coordinated_dial_port_reuse",
+      "protocol": "Coordinated Direct Dial and TCP Port Reuse",
+      "source": "donors/libp2p-specs/connections/simopen.md and pinned Go/Rust swarm and TCP transport paths",
+      "donor": "go-libp2p swarm direct dialing plus rust-libp2p DialOpts, connection pool and TCP transport port-reuse mechanics",
+      "donor_file": [
+        "donors/libp2p-specs/connections/simopen.md",
+        "donors/go-libp2p/p2p/net/swarm/swarm_dial.go",
+        "donors/rust-libp2p/swarm/src/connection/pool.rs",
+        "donors/rust-libp2p/swarm/src/dial_opts.rs",
+        "donors/rust-libp2p/transports/tcp/src/lib.rs"
+      ],
+      "donor_case": [
+        "direct dial coordination without legacy simultaneous-connect negotiation",
+        "DialOpts role and address selection",
+        "TCP transport local-port reuse"
+      ],
+      "mapping_state": "unsupported",
+      "forge_tests": [],
+      "known_gap": "Stage 6 has no runtime fixture control for concurrent port reuse yet. This donor trace is source-only and does not establish an interop result."
+    },
+    {
       "id": "resource.peer_protocol_dial_scopes",
       "protocol": "Resource Manager",
       "source": "go-libp2p resource-manager wrapping tests",
