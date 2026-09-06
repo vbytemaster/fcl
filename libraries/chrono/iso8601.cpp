@@ -17,6 +17,11 @@ namespace {
 
 constexpr auto nanoseconds_per_second = std::int64_t{1'000'000'000};
 
+struct seconds_and_fraction {
+   std::int64_t seconds;
+   std::int64_t fraction;
+};
+
 [[nodiscard]] boost::posix_time::ptime epoch() {
    return boost::posix_time::from_time_t(0);
 }
@@ -58,18 +63,42 @@ void append_fixed_decimal(std::string& output, unsigned value, unsigned width) {
    return parsed;
 }
 
+[[nodiscard]] constexpr seconds_and_fraction decompose_nanoseconds(std::int64_t nanoseconds) noexcept {
+   auto seconds = nanoseconds / nanoseconds_per_second;
+   auto fraction = nanoseconds % nanoseconds_per_second;
+   if (fraction < 0) {
+      --seconds;
+      fraction += nanoseconds_per_second;
+   }
+   return {.seconds = seconds, .fraction = fraction};
+}
+
 [[nodiscard]] std::int64_t checked_nanoseconds(std::int64_t seconds, std::int64_t fraction) {
    constexpr auto minimum = std::numeric_limits<std::int64_t>::min();
    constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
-   if (seconds < minimum / nanoseconds_per_second || seconds > maximum / nanoseconds_per_second) {
+   constexpr auto minimum_parts = decompose_nanoseconds(minimum);
+   constexpr auto maximum_parts = decompose_nanoseconds(maximum);
+   if (fraction < 0 || fraction >= nanoseconds_per_second || seconds < minimum_parts.seconds ||
+       seconds > maximum_parts.seconds || (seconds == minimum_parts.seconds && fraction < minimum_parts.fraction) ||
+       (seconds == maximum_parts.seconds && fraction > maximum_parts.fraction)) {
       throw_invalid_rfc3339("timestamp is outside the nanosecond range");
    }
 
-   const auto nanoseconds = seconds * nanoseconds_per_second;
-   if (fraction < 0 || fraction >= nanoseconds_per_second || nanoseconds > maximum - fraction) {
-      throw_invalid_rfc3339("timestamp is outside the nanosecond range");
+   if (seconds >= 0) {
+      return (seconds * nanoseconds_per_second) + fraction;
    }
-   return nanoseconds + fraction;
+
+   if (seconds == minimum_parts.seconds && fraction == minimum_parts.fraction) {
+      return minimum;
+   }
+
+   const auto magnitude_seconds = -seconds;
+   if (fraction == 0) {
+      return -(magnitude_seconds * nanoseconds_per_second);
+   }
+
+   const auto magnitude = ((magnitude_seconds - 1) * nanoseconds_per_second) + (nanoseconds_per_second - fraction);
+   return -magnitude;
 }
 
 } // namespace
@@ -143,14 +172,16 @@ std::chrono::sys_time<std::chrono::microseconds> parse_microseconds(std::string_
 }
 
 std::string format_rfc3339(std::chrono::sys_time<std::chrono::nanoseconds> value) {
-   const auto day = std::chrono::floor<std::chrono::days>(value);
+   const auto timestamp = decompose_nanoseconds(value.time_since_epoch().count());
+   const auto whole_seconds = std::chrono::sys_seconds{std::chrono::seconds{timestamp.seconds}};
+   const auto day = std::chrono::floor<std::chrono::days>(whole_seconds);
    const auto date = std::chrono::year_month_day{day};
    const auto year = static_cast<int>(date.year());
    if (!date.ok() || year < 0 || year > 9999) {
       throw std::out_of_range{"RFC3339 timestamp is outside the supported range"};
    }
 
-   const auto time = std::chrono::hh_mm_ss<std::chrono::nanoseconds>{value - day};
+   const auto time = std::chrono::hh_mm_ss<std::chrono::seconds>{whole_seconds - day};
    auto output = std::string{};
    output.reserve(30);
    append_fixed_decimal(output, static_cast<unsigned>(year), 4);
@@ -165,10 +196,10 @@ std::string format_rfc3339(std::chrono::sys_time<std::chrono::nanoseconds> value
    output.push_back(':');
    append_fixed_decimal(output, static_cast<unsigned>(time.seconds().count()), 2);
 
-   if (const auto fraction = time.subseconds().count(); fraction != 0) {
+   if (timestamp.fraction != 0) {
       auto digits = std::string{};
       digits.reserve(9);
-      append_fixed_decimal(digits, static_cast<unsigned>(fraction), 9);
+      append_fixed_decimal(digits, static_cast<unsigned>(timestamp.fraction), 9);
       while (digits.back() == '0') {
          digits.pop_back();
       }

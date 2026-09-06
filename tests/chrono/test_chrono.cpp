@@ -1,6 +1,8 @@
 #include <boost/test/unit_test.hpp>
 
 #include <chrono>
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
 
 import forge.chrono.iso8601;
@@ -52,6 +54,23 @@ BOOST_AUTO_TEST_CASE(rfc3339_preserves_nanoseconds_and_normalizes_offsets) {
    BOOST_CHECK(forge::chrono::iso8601::parse_rfc3339("1970-01-01T01:30:01.120340500+01:30") == instant);
 }
 
+BOOST_AUTO_TEST_CASE(rfc3339_roundtrips_exact_int64_nanosecond_boundaries) {
+   const auto minimum = std::chrono::sys_time<std::chrono::nanoseconds>{
+       std::chrono::nanoseconds{std::numeric_limits<std::int64_t>::min()}};
+   const auto maximum = std::chrono::sys_time<std::chrono::nanoseconds>{
+       std::chrono::nanoseconds{std::numeric_limits<std::int64_t>::max()}};
+
+   BOOST_CHECK_EQUAL(forge::chrono::iso8601::format_rfc3339(minimum), "1677-09-21T00:12:43.145224192Z");
+   BOOST_CHECK_EQUAL(forge::chrono::iso8601::format_rfc3339(maximum), "2262-04-11T23:47:16.854775807Z");
+   BOOST_CHECK(forge::chrono::iso8601::parse_rfc3339("1677-09-21T00:12:43.145224192Z") == minimum);
+   BOOST_CHECK(forge::chrono::iso8601::parse_rfc3339("2262-04-11T23:47:16.854775807Z") == maximum);
+
+   BOOST_CHECK_THROW(static_cast<void>(forge::chrono::iso8601::parse_rfc3339("1677-09-21T00:12:43.145224191Z")),
+                     std::invalid_argument);
+   BOOST_CHECK_THROW(static_cast<void>(forge::chrono::iso8601::parse_rfc3339("2262-04-11T23:47:16.854775808Z")),
+                     std::invalid_argument);
+}
+
 BOOST_AUTO_TEST_CASE(rfc3339_rejects_invalid_or_lossy_input) {
    BOOST_CHECK_THROW(static_cast<void>(forge::chrono::iso8601::parse_rfc3339("1970-02-30T00:00:00Z")),
                      std::invalid_argument);
@@ -72,9 +91,22 @@ BOOST_AUTO_TEST_CASE(relative_format_retains_suffix_and_future_behavior) {
                      "2 seconds since start");
    BOOST_CHECK_EQUAL(forge::chrono::relative::format(epoch + std::chrono::seconds{2}, epoch, " ignored"),
                      "2 seconds in the future");
+   BOOST_CHECK_EQUAL(forge::chrono::relative::format(epoch, epoch + std::chrono::days{365}), "52 weeks ago");
+   BOOST_CHECK_EQUAL(forge::chrono::relative::format(epoch, epoch + std::chrono::days{500}), "1 year 5 months ago");
+   BOOST_CHECK_EQUAL(forge::chrono::relative::format(epoch, epoch + std::chrono::days{730}), "2 years ago");
 
    const auto epoch_us = std::chrono::sys_time<std::chrono::microseconds>{};
    BOOST_CHECK_EQUAL(forge::chrono::relative::format(epoch_us, epoch_us + std::chrono::seconds{1}), "1 second ago");
+}
+
+BOOST_AUTO_TEST_CASE(relative_format_handles_full_sys_seconds_range) {
+   const auto minimum = std::chrono::sys_seconds{std::chrono::seconds{std::numeric_limits<std::int64_t>::min()}};
+   const auto maximum = std::chrono::sys_seconds{std::chrono::seconds{std::numeric_limits<std::int64_t>::max()}};
+
+   const auto past = forge::chrono::relative::format(minimum, maximum);
+   const auto future = forge::chrono::relative::format(maximum, minimum);
+   BOOST_CHECK(past.ends_with(" ago"));
+   BOOST_CHECK(future.ends_with(" in the future"));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

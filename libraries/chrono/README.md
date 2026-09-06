@@ -29,4 +29,6 @@ round-tripping full microsecond values. Generic text parsing does not inherit
 the FC `uint32` wire range; that validation belongs to `forge_raw`.
 `format_rfc3339` emits canonical UTC text with `Z` and trims only insignificant
 fractional zeroes. `parse_rfc3339` accepts `Z` or numeric timezone offsets and
-rejects invalid dates, out-of-range timestamps and trailing data.
+rejects invalid dates, trailing data and values outside the exact `int64`
+nanosecond range from `1677-09-21T00:12:43.145224192Z` through
+`2262-04-11T23:47:16.854775807Z`.
