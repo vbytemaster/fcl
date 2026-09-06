@@ -15,7 +15,14 @@ from typing import Optional
 
 sys.dont_write_bytecode = True
 
-from provenance import WorktreeIdentity, sha256_file, worktree_identity
+from provenance import (
+    WorktreeIdentity,
+    fixture_donor_checkout_errors,
+    fixture_donor_revision_bindings,
+    load_canonical_donor_revisions,
+    sha256_file,
+    worktree_identity,
+)
 
 
 LIVE_SCENARIO_PROFILES = {
@@ -1290,6 +1297,12 @@ def main() -> int:
         start_identity = worktree_identity(forge_root)
         provenance["forge_worktree"]["start"] = start_identity.as_json()
         fixture_lock = load_fixture_lock(source_dir)
+        canonical_donor_revisions = load_canonical_donor_revisions(source_dir / "donor_cases.json")
+        fixture_donor_revisions, donor_binding_errors = fixture_donor_revision_bindings(
+            fixture_lock["donors"], canonical_donor_revisions
+        )
+        if donor_binding_errors:
+            raise RuntimeError("; ".join(donor_binding_errors))
         forge_fixture = Path(args.forge_fixture).resolve()
         build_info, build_info_command = require_fixture_provenance(forge_fixture, start_identity, fixture_lock)
         provenance["fixture_build_info"] = build_info
@@ -1300,6 +1313,11 @@ def main() -> int:
         }
 
         if not args.provenance_only:
+            donor_checkout_errors = fixture_donor_checkout_errors(
+                donors_root, fixture_lock["donors"], canonical_donor_revisions
+            )
+            if donor_checkout_errors:
+                raise RuntimeError("; ".join(donor_checkout_errors))
             require_donor(donors_root, "go-libp2p")
             require_donor(donors_root, "go-libp2p-kad-dht")
             require_donor(donors_root, "go-libp2p-pubsub")
@@ -1330,6 +1348,7 @@ def main() -> int:
                 "lock_file": str(source_dir / "fixture-lock.json"),
                 "fixture_deps": str(fixture_deps),
                 "donors": fixture_lock["donors"],
+                "donor_revisions": fixture_donor_revisions,
                 "dependency_graphs": fixture_lock.get("dependency_graphs", {}),
             })
             provenance["commands"].extend(go_build_commands + rust_build_commands)

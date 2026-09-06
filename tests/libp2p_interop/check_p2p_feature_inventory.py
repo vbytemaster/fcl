@@ -8,7 +8,11 @@ from collections import Counter
 from pathlib import Path
 
 from check_stage6_acceptance import EVIDENCE_CONTRACT_VALIDATORS, expected_launcher_transport
-from provenance import donor_checkout_head_errors, donor_revision_schema_errors
+from provenance import (
+    donor_checkout_head_errors,
+    donor_revision_schema_errors,
+    donor_source_object_errors,
+)
 from stage6_evidence_contract import (
     EVIDENCE_CONTRACT_PREFIX,
     EVIDENCE_CONTRACT_SUFFIX,
@@ -631,11 +635,12 @@ def main() -> int:
                 errors.append(
                     f"donor capability {capability_id}: donor repository is not pinned: {relative.parts[1]}"
                 )
-            elif donors_root is not None and not (
-                donors_root / Path(*relative.parts[1:])
-            ).is_file():
-                errors.append(
-                    f"donor capability {capability_id}: donor source does not exist: {source}"
+            elif donors_root is not None:
+                errors.extend(
+                    f"donor capability {capability_id}: {error}"
+                    for error in donor_source_object_errors(
+                        donors_root, capability_revisions, source
+                    )
                 )
         forge_sources = capability.get("forge_sources", [])
         if not isinstance(forge_sources, list) or any(

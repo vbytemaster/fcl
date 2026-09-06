@@ -11,7 +11,13 @@ from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 
-from provenance import donor_checkout_head_errors, donor_revision_schema_errors, worktree_identity
+from provenance import (
+    donor_checkout_head_errors,
+    donor_revision_schema_errors,
+    donor_source_object_errors,
+    fixture_donor_revision_bindings,
+    worktree_identity,
+)
 from check_p2p_feature_inventory import (
     registered_runner_acceptance_pairs,
     registered_runner_pair_errors,
@@ -213,6 +219,65 @@ class DonorCheckoutPinTest(unittest.TestCase):
                     donor_checkout_head_errors(Path("/does-not-matter"), revisions),
                     [expected_error],
                 )
+
+    def test_fixture_donor_binding_rejects_an_alternate_commit_with_the_same_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            donors_root = Path(directory) / "donors"
+            donors_root.mkdir()
+            donor = donors_root / "pinned-donor"
+            initialize_repository(donor)
+            (donor / "source.txt").write_text("same package source\n")
+            canonical_commit = commit(donor, "canonical")
+            canonical_tree = git(donor, "rev-parse", "HEAD^{tree}")
+            git(donor, "commit", "--allow-empty", "-m", "alternate metadata only")
+            alternate_commit = git(donor, "rev-parse", "HEAD")
+            self.assertNotEqual(alternate_commit, canonical_commit)
+            self.assertEqual(git(donor, "rev-parse", "HEAD^{tree}"), canonical_tree)
+
+            fixture_donors = [{
+                "name": "pinned",
+                "directory": "pinned-donor",
+                "commit": alternate_commit,
+                "tree": canonical_tree,
+            }]
+            bindings, errors = fixture_donor_revision_bindings(
+                fixture_donors, {"pinned-donor": canonical_commit}
+            )
+            self.assertEqual(bindings, {})
+            self.assertEqual(
+                errors,
+                [
+                    "fixture lock donor pinned-donor: "
+                    "commit does not match canonical donor_cases revision"
+                ],
+            )
+
+    def test_donor_source_must_exist_as_a_blob_at_the_pinned_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            donors_root = Path(directory) / "donors"
+            donors_root.mkdir()
+            donor = donors_root / "pinned-donor"
+            initialize_repository(donor)
+            (donor / "tracked.txt").write_text("tracked\n")
+            pinned_commit = commit(donor, "pinned")
+            revisions = {"pinned-donor": pinned_commit}
+            self.assertEqual(
+                donor_source_object_errors(
+                    donors_root, revisions, "donors/pinned-donor/tracked.txt"
+                ),
+                [],
+            )
+
+            (donor / "untracked.txt").write_text("mutable checkout file\n")
+            self.assertEqual(
+                donor_source_object_errors(
+                    donors_root, revisions, "donors/pinned-donor/untracked.txt"
+                ),
+                [
+                    "donor source is absent from pinned revision: "
+                    "donors/pinned-donor/untracked.txt"
+                ],
+            )
 
     def test_matching_invalid_revision_maps_block_inventory_and_donor_gates(self) -> None:
         root = Path(__file__).parents[2]

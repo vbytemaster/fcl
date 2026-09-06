@@ -5,7 +5,11 @@ import re
 import sys
 from pathlib import Path
 
-from provenance import donor_checkout_head_errors, donor_revision_schema_errors
+from provenance import (
+    donor_checkout_head_errors,
+    donor_revision_schema_errors,
+    donor_source_object_errors,
+)
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -192,8 +196,13 @@ def main() -> int:
                     repository = relative.parts[1]
                     if repository not in donor_revisions:
                         errors.append(f"{case_id}: donor_file repository is not pinned: {repository}")
-                    elif donors_root is not None and not (donors_root / Path(*relative.parts[1:])).is_file():
-                        errors.append(f"{case_id}: donor_file does not exist: {donor_file}")
+                    elif donors_root is not None:
+                        errors.extend(
+                            f"{case_id}: {error}"
+                            for error in donor_source_object_errors(
+                                donors_root, donor_revisions, donor_file
+                            )
+                        )
                 else:
                     errors.append(f"{case_id}: donor_file must start with docs/ or donors/<repo>/")
         if not isinstance(tests, list) or any(

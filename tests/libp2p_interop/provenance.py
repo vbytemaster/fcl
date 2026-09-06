@@ -9,7 +9,7 @@ import struct
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 
 
@@ -84,6 +84,77 @@ def donor_revision_schema_errors(donor_revisions: object) -> list[str]:
     return errors
 
 
+def reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        value[key] = item
+    return value
+
+
+def load_canonical_donor_revisions(case_matrix_path: Path) -> dict[str, str]:
+    """Load the sole canonical donor pin map from the donor case matrix."""
+    try:
+        case_matrix = json.loads(
+            case_matrix_path.read_text(), object_pairs_hook=reject_duplicate_json_keys
+        )
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        raise RuntimeError(f"cannot load canonical donor revisions: {error}") from error
+    if not isinstance(case_matrix, Mapping):
+        raise RuntimeError("canonical donor case matrix must be an object")
+    donor_revisions = case_matrix.get("donor_revisions")
+    errors = donor_revision_schema_errors(donor_revisions)
+    if errors:
+        raise RuntimeError(f"canonical donor revisions are invalid: {'; '.join(errors)}")
+    assert isinstance(donor_revisions, Mapping)
+    return dict(donor_revisions)
+
+
+def fixture_donor_revision_bindings(
+    fixture_donors: object, canonical_donor_revisions: object
+) -> tuple[dict[str, str], list[str]]:
+    """Bind fixture-lock donor directories and commits to the canonical case-matrix pins."""
+    errors = donor_revision_schema_errors(canonical_donor_revisions)
+    if errors:
+        return {}, [f"canonical donor revisions are invalid: {error}" for error in errors]
+    if not isinstance(fixture_donors, list):
+        return {}, ["fixture lock donors must be an array"]
+
+    assert isinstance(canonical_donor_revisions, Mapping)
+    bindings: dict[str, str] = {}
+    for donor in fixture_donors:
+        if not isinstance(donor, Mapping):
+            errors.append("fixture lock donor entry must be an object")
+            continue
+        directory = donor.get("directory")
+        commit = donor.get("commit")
+        tree = donor.get("tree")
+        if not isinstance(directory, str) or not DONOR_CHECKOUT_KEY_PATTERN.fullmatch(directory):
+            errors.append(f"fixture lock donor directory is invalid: {directory!r}")
+            continue
+        if directory in bindings:
+            errors.append(f"fixture lock donor directory is duplicated: {directory}")
+            continue
+        if not isinstance(commit, str) or not DONOR_REVISION_PATTERN.fullmatch(commit):
+            errors.append(f"fixture lock donor {directory}: commit must be a full lowercase commit SHA")
+            continue
+        if not isinstance(tree, str) or not DONOR_REVISION_PATTERN.fullmatch(tree):
+            errors.append(f"fixture lock donor {directory}: tree must be a full lowercase tree SHA")
+            continue
+        canonical_commit = canonical_donor_revisions.get(directory)
+        if canonical_commit is None:
+            errors.append(f"fixture lock donor directory is not canonically pinned: {directory}")
+            continue
+        if commit != canonical_commit:
+            errors.append(
+                f"fixture lock donor {directory}: commit does not match canonical donor_cases revision"
+            )
+            continue
+        bindings[directory] = canonical_commit
+    return bindings, errors
+
+
 def donor_checkout_head_errors(donors_root: Path, donor_revisions: object) -> list[str]:
     """Return the existing donor-pin errors for unavailable or stale checkouts."""
     schema_errors = donor_revision_schema_errors(donor_revisions)
@@ -107,6 +178,80 @@ def donor_checkout_head_errors(donors_root: Path, donor_revisions: object) -> li
         if head != revision:
             errors.append(f"donor {repository}: checkout does not match pinned revision")
     return errors
+
+
+def fixture_donor_checkout_errors(
+    donors_root: Path, fixture_donors: object, canonical_donor_revisions: object
+) -> list[str]:
+    """Verify fixture donor checkout HEADs and trees against canonical revisions."""
+    bindings, errors = fixture_donor_revision_bindings(fixture_donors, canonical_donor_revisions)
+    if errors:
+        return errors
+    errors.extend(donor_checkout_head_errors(donors_root, bindings))
+    assert isinstance(fixture_donors, list)
+    for donor in fixture_donors:
+        assert isinstance(donor, Mapping)
+        directory = donor["directory"]
+        tree = donor["tree"]
+        assert isinstance(directory, str)
+        assert isinstance(tree, str)
+        if directory not in bindings:
+            continue
+        checkout = donors_root / directory
+        try:
+            actual_tree = git_output(checkout, "rev-parse", f"{bindings[directory]}^{{tree}}")
+        except RuntimeError:
+            errors.append(f"fixture donor revision lookup failed for {directory}")
+            continue
+        if actual_tree.decode("ascii").strip() != tree:
+            errors.append(f"fixture donor tree mismatch: {directory}")
+    return errors
+
+
+def donor_source_object_errors(
+    donors_root: Path, donor_revisions: object, source: object
+) -> list[str]:
+    """Verify a donor evidence path as a blob in the exact pinned Git object tree."""
+    schema_errors = donor_revision_schema_errors(donor_revisions)
+    if schema_errors:
+        return schema_errors
+    if not isinstance(source, str) or not source or "\x00" in source:
+        return [f"donor source must be a non-empty path: {source!r}"]
+    relative = PurePosixPath(source)
+    if (
+        source.startswith("/")
+        or relative.is_absolute()
+        or len(relative.parts) < 3
+        or relative.parts[0] != "donors"
+        or ".." in relative.parts
+    ):
+        return [f"donor source must start with donors/<repo>/: {source}"]
+
+    assert isinstance(donor_revisions, Mapping)
+    repository = relative.parts[1]
+    revision = donor_revisions.get(repository)
+    if revision is None:
+        return [f"donor source repository is not pinned: {repository}"]
+    checkout = donors_root / repository
+    if not checkout.is_dir():
+        return [f"donor {repository}: repository is unavailable"]
+    object_name = f"{revision}:{'/'.join(relative.parts[2:])}"
+    exists = subprocess.run(
+        ["git", "-C", str(checkout), "cat-file", "-e", object_name],
+        capture_output=True,
+        check=False,
+    )
+    if exists.returncode != 0:
+        return [f"donor source is absent from pinned revision: {source}"]
+    object_type = subprocess.run(
+        ["git", "-C", str(checkout), "cat-file", "-t", object_name],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if object_type.returncode != 0 or object_type.stdout.strip() != "blob":
+        return [f"donor source is not a pinned blob: {source}"]
+    return []
 
 
 def safe_worktree_path(root: Path, relative: bytes) -> Path:

@@ -9,7 +9,12 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from provenance import worktree_identity
+from provenance import (
+    fixture_donor_checkout_errors,
+    fixture_donor_revision_bindings,
+    load_canonical_donor_revisions,
+    worktree_identity,
+)
 from stage6_evidence_contract import (
     EVIDENCE_CONTRACT_PREFIX,
     EVIDENCE_CONTRACT_SUFFIX,
@@ -283,6 +288,32 @@ def validate_runner_inputs(root: Path, artifact_path: Path, artifact_root: Path,
     ):
         return {}, ["artifact runner input provenance does not bind canonical roots and artifact paths"]
     return resolved, []
+
+
+def validate_donor_provenance(root: Path, provenance: object, inputs: dict[str, Path]) -> list[str]:
+    """Bind execution evidence to canonical donor commits, not equivalent source trees."""
+    if not isinstance(provenance, dict):
+        return ["artifact fixture_provenance must be an object"]
+    try:
+        canonical_revisions = load_canonical_donor_revisions(
+            root / CANONICAL_RUNNER.parent / "donor_cases.json"
+        )
+        fixture_lock = load_json(root / CANONICAL_RUNNER.parent / "fixture-lock.json")
+    except (OSError, RuntimeError, ValueError) as error:
+        return [f"cannot load canonical donor provenance: {error}"]
+    expected_donors = fixture_lock.get("donors") if isinstance(fixture_lock, dict) else None
+    donors = provenance.get("donors")
+    if donors != expected_donors:
+        return ["artifact fixture donors do not match the locked donor set"]
+    bindings, errors = fixture_donor_revision_bindings(donors, canonical_revisions)
+    if errors:
+        return errors
+    if provenance.get("donor_revisions") != bindings:
+        return ["artifact donor revisions do not match canonical fixture donor revisions"]
+    donors_root = inputs.get("donors_root")
+    if donors_root is None:
+        return ["artifact donor provenance has no canonical donors root"]
+    return fixture_donor_checkout_errors(donors_root, donors, canonical_revisions)
 
 
 def validate_runner_argv(root: Path, argv: object, manifest_path: Path, inputs: dict[str, Path],
@@ -1090,6 +1121,7 @@ def validate(
         root, artifact_path, artifact_root, manifest_path, artifact.get("fixture_provenance")
     )
     errors.extend(input_errors)
+    errors.extend(validate_donor_provenance(root, artifact.get("fixture_provenance"), inputs))
     errors.extend(validate_runner_argv(
         root, artifact.get("runner_argv"), manifest_path, inputs, binary_paths
     ))
@@ -1310,10 +1342,21 @@ def build_evidence_index(root: Path, artifacts: list[dict]) -> list[dict]:
     ]
 
 
-def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, scenario_id: str) -> None:
+def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, scenario_id: str,
+                   donors_root: Path) -> None:
     """Write a canonical-schema parser fixture; it never models future Stage 6 behavior."""
     capability_id, runner_scenario_id, stack, scenario = CURRENT_FIXTURES[scenario_id]
     del capability_id
+    canonical_revisions = load_canonical_donor_revisions(
+        root / CANONICAL_RUNNER.parent / "donor_cases.json"
+    )
+    fixture_lock = load_json(root / CANONICAL_RUNNER.parent / "fixture-lock.json")
+    assert isinstance(fixture_lock, dict)
+    fixture_donors = fixture_lock["donors"]
+    donor_revisions, donor_errors = fixture_donor_revision_bindings(
+        fixture_donors, canonical_revisions
+    )
+    assert not donor_errors
     artifact_root = artifact_path.parent / "interop-run"
     artifact_root.mkdir(parents=True, exist_ok=True)
     binaries: dict[str, Path] = {}
@@ -1382,7 +1425,7 @@ def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, scenari
             "--enabled", "ON", "--forge-fixture", str(binaries["forge"]),
             "--source-dir", str((root / CANONICAL_RUNNER).parent.resolve()),
             "--build-dir", str(artifact_path.parent.resolve()), "--forge-root", str(root.resolve()),
-            "--donors-root", str((root / "donors").resolve()),
+            "--donors-root", str(donors_root.resolve()),
             "--acceptance-manifest", str(manifest_path.resolve()),
         ],
         "started_at_unix": timestamp, "finished_at_unix": timestamp + 0.001,
@@ -1403,8 +1446,10 @@ def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, scenari
             "runner_inputs": {
                 "source_dir": str((root / CANONICAL_RUNNER).parent.resolve()),
                 "build_dir": str(artifact_path.parent.resolve()), "forge_root": str(root.resolve()),
-                "donors_root": str((root / "donors").resolve()), "acceptance_manifest": str(manifest_path.resolve()),
+                "donors_root": str(donors_root.resolve()), "acceptance_manifest": str(manifest_path.resolve()),
             },
+            "donors": fixture_donors,
+            "donor_revisions": donor_revisions,
         },
         "artifacts": artifacts, "failures": [], "evidence_index": build_evidence_index(artifact_root, artifacts),
     }
@@ -1432,6 +1477,40 @@ def git_call(root: Path, *args: str) -> None:
     result = subprocess.run(["git", "-C", str(root), *args], text=True, capture_output=True, check=False)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "git command failed")
+
+
+def self_test_donor_provenance(donors_root: Path) -> tuple[dict[str, str], list[dict[str, str]]]:
+    fixture_donors: list[dict[str, str]] = []
+    revisions: dict[str, str] = {}
+    donor_names = (
+        ("go-libp2p", "go-libp2p"),
+        ("rust-libp2p", "rust-libp2p"),
+        ("go-kad", "go-libp2p-kad-dht"),
+        ("go-pubsub", "go-libp2p-pubsub"),
+        ("libp2p-specs", "libp2p-specs"),
+    )
+    donors_root.mkdir()
+    for name, directory in donor_names:
+        checkout = donors_root / directory
+        checkout.mkdir()
+        git_call(checkout, "init", "-q")
+        git_call(checkout, "config", "user.name", "Stage6 donor self-test")
+        git_call(checkout, "config", "user.email", "stage6-donor@example.invalid")
+        (checkout / "source.txt").write_text(f"{directory}\n")
+        git_call(checkout, "add", "source.txt")
+        git_call(checkout, "commit", "-qm", "pinned donor")
+        commit, commit_error = git_output(checkout, "rev-parse", "HEAD")
+        tree, tree_error = git_output(checkout, "rev-parse", "HEAD^{tree}")
+        if commit is None or tree is None or commit_error is not None or tree_error is not None:
+            raise RuntimeError("cannot create self-test donor provenance")
+        revisions[directory] = commit
+        fixture_donors.append({
+            "name": name,
+            "directory": directory,
+            "commit": commit,
+            "tree": tree,
+        })
+    return revisions, fixture_donors
 
 
 def self_test() -> int:
@@ -1560,7 +1639,11 @@ def self_test() -> int:
         root = Path(directory) / "forge"
         (root / CANONICAL_RUNNER).parent.mkdir(parents=True)
         (root / CANONICAL_RUNNER).write_text("# canonical runner fixture\n")
-        (root / "donors").mkdir()
+        donors_root = Path(directory) / "donors"
+        donor_revisions, fixture_donors = self_test_donor_provenance(donors_root)
+        source_dir = root / CANONICAL_RUNNER.parent
+        (source_dir / "donor_cases.json").write_text(json.dumps({"donor_revisions": donor_revisions}))
+        (source_dir / "fixture-lock.json").write_text(json.dumps({"donors": fixture_donors}))
         manifest_path = root / "manifest.json"
         manifest_path.write_text(json.dumps(fixture_manifest()))
         git_call(root.parent, "init", str(root))
@@ -1573,11 +1656,21 @@ def self_test() -> int:
             print("self-test failed: missing fixture HEAD", file=sys.stderr)
             return 1
         artifact_path = Path(directory) / "build" / "interop-artifacts.json"
-        write_artifact(root, manifest_path, artifact_path, "tcp_yamux")
+        write_artifact(root, manifest_path, artifact_path, "tcp_yamux", donors_root)
         errors, _ = validate(root, manifest_path, artifact_path, head)
         if errors:
             print(f"self-test failed: valid canonical artifact: {errors}", file=sys.stderr)
             return 1
+        artifact = load_json(artifact_path)
+        assert isinstance(artifact, dict)
+        artifact["fixture_provenance"]["donor_revisions"]["go-libp2p"] = "0" * 40
+        artifact_path.write_text(json.dumps(artifact))
+        if not expect_rejected(
+            root, manifest_path, artifact_path, head, "donor revision mismatch", "donor revisions"
+        ):
+            return 1
+
+        write_artifact(root, manifest_path, artifact_path, "tcp_yamux", donors_root)
         artifact = load_json(artifact_path)
         assert isinstance(artifact, dict)
         artifact["artifacts"][0]["result"].pop("authenticated_remote_peer_id")
@@ -1598,7 +1691,7 @@ def self_test() -> int:
         if error is not None or head is None:
             print("self-test failed: missing QUIC fixture HEAD", file=sys.stderr)
             return 1
-        write_artifact(root, manifest_path, artifact_path, "quic_v1_transport")
+        write_artifact(root, manifest_path, artifact_path, "quic_v1_transport", donors_root)
         artifact = load_json(artifact_path)
         assert isinstance(artifact, dict)
         for raw in artifact["artifacts"]:
@@ -1619,7 +1712,7 @@ def self_test() -> int:
         if error is not None or head is None:
             print("self-test failed: missing TCP fixture HEAD", file=sys.stderr)
             return 1
-        write_artifact(root, manifest_path, artifact_path, "tcp_yamux")
+        write_artifact(root, manifest_path, artifact_path, "tcp_yamux", donors_root)
         artifact = load_json(artifact_path)
         assert isinstance(artifact, dict)
         artifact["failures"] = [{"message": "runner failure"}]
@@ -1627,7 +1720,7 @@ def self_test() -> int:
         if not expect_rejected(root, manifest_path, artifact_path, head, "runner failures", "failures"):
             return 1
 
-        write_artifact(root, manifest_path, artifact_path, "tcp_yamux")
+        write_artifact(root, manifest_path, artifact_path, "tcp_yamux", donors_root)
         artifact = load_json(artifact_path)
         assert isinstance(artifact, dict)
         artifact["evidence_index"][0]["sha256"] = "0" * 64
