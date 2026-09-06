@@ -265,6 +265,8 @@ BOOST_AUTO_TEST_CASE(log_otlp_descriptor_api_and_config_are_nested) {
       return std::ranges::any_of(descriptor->fields, [&](const auto& value) { return value.name == field; });
    };
    BOOST_TEST(has("endpoint"));
+   BOOST_TEST(has("export-enabled"));
+   BOOST_TEST(!has("enabled"));
    BOOST_TEST(has("loggers"));
    BOOST_TEST(has("queue"));
    BOOST_TEST(has("batch"));
@@ -275,7 +277,7 @@ BOOST_AUTO_TEST_CASE(log_otlp_descriptor_api_and_config_are_nested) {
 BOOST_AUTO_TEST_CASE(log_otlp_disabled_config_does_not_export_and_api_is_unavailable) {
    auto harness = plugin_harness{};
    auto document = forge::config::core::document{};
-   document.set("plugins.log.otlp.enabled", false);
+   document.set("plugins.log.otlp.export-enabled", false);
    harness.configure(document);
    harness.provide_and_start();
 
@@ -297,7 +299,7 @@ BOOST_AUTO_TEST_CASE(log_otlp_disabled_config_keeps_named_routes_on_the_console_
 
    auto harness = plugin_harness{};
    auto document = plugin_config("http://127.0.0.1:4318", {logger_route("spine.runtime", "debug")});
-   document.set("plugins.log.otlp.enabled", false);
+   document.set("plugins.log.otlp.export-enabled", false);
    harness.configure(document);
    harness.provide_and_start();
 

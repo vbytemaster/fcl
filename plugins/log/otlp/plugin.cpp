@@ -69,7 +69,7 @@ boost::asio::awaitable<void> plugin::provide(forge::api::core::provider& provide
 
 boost::asio::awaitable<void> plugin::initialize(forge::app::plugin_context& context) {
    impl_->runtime = &context.scheduler().runtime_context();
-   if (impl_->settings.enabled) {
+   if (impl_->settings.export_enabled) {
       auto secrets = std::shared_ptr<forge::plugins::crypto::secrets::api>{};
       const auto needs_secrets =
           std::ranges::any_of(impl_->settings.headers, [](const header& value) { return value.secret_id.has_value(); });
@@ -131,7 +131,7 @@ boost::asio::awaitable<void> plugin::startup() {
    for (const auto& route : impl_->settings.loggers) {
       configure_route(route);
    }
-   if (!impl_->settings.enabled) {
+   if (!impl_->settings.export_enabled) {
       impl_->started = true;
       co_return;
    }

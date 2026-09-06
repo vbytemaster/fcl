@@ -67,6 +67,7 @@ plugins:
   log:
     otlp:
       enabled: true
+      export-enabled: true
       endpoint: "http://localhost:4318"
       logs-path: "/v1/logs"
       protocol: "http-json"
@@ -115,10 +116,11 @@ plugins:
         resend-on-startup: true
 ```
 
-`enabled: false` disables only OTLP export: no exporter is created, no OTLP
-sink is attached and no network work is started. Configured logger routes still
-apply their `enabled` and `level` settings, and named routes retain the default
-console parent.
+`enabled` is the application-owned plugin selection flag. When it is `false`,
+the OTLP plugin is not instantiated. `export-enabled: false` keeps the plugin
+loaded and applies configured logger routes without creating an exporter,
+attaching an OTLP sink or starting network work. Named routes retain the
+default console parent.
 
 ### Header Sources
 
@@ -194,8 +196,8 @@ queue/export counters from the underlying `forge_otlp` exporter.
 - Do not log secrets in logger names, resource attributes or structured fields.
 - Use `secret-id` plus `purpose` for cloud authorization headers. Header source
   validation runs before HTTP requests are built.
-- `enabled: false` creates no exporter and starts no network work, but still
-  configures logger routes and their console-parent routing.
+- `export-enabled: false` creates no exporter and starts no network work, but
+  still configures logger routes and their console-parent routing.
 - Flush during shutdown when callers require best-effort delivery of queued
   records.
 

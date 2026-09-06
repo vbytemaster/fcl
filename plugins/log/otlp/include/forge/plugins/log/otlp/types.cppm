@@ -73,7 +73,7 @@ struct crash_spool_config {
 };
 
 struct config {
-   bool enabled = true;
+   bool export_enabled = true;
    std::string endpoint = "http://localhost:4318";
    std::string logs_path = "/v1/logs";
    protocol wire_protocol = protocol::http_json;
@@ -116,8 +116,8 @@ BOOST_DESCRIBE_STRUCT(batch_config, (), (max_records, max_bytes, flush_interval_
 BOOST_DESCRIBE_STRUCT(retry_config, (), (max_attempts, base_delay_ms, max_delay_ms))
 BOOST_DESCRIBE_STRUCT(crash_spool_config, (), (enabled, directory, resend_on_startup))
 BOOST_DESCRIBE_STRUCT(config, (),
-                      (enabled, endpoint, logs_path, wire_protocol, headers, loggers, resource, queue, batch, retry,
-                       request_timeout_ms, shutdown_timeout_ms, crash_spool))
+                      (export_enabled, endpoint, logs_path, wire_protocol, headers, loggers, resource, queue, batch,
+                       retry, request_timeout_ms, shutdown_timeout_ms, crash_spool))
 BOOST_DESCRIBE_STRUCT(flush_request, (), ())
 BOOST_DESCRIBE_STRUCT(flush_result, (), ())
 BOOST_DESCRIBE_STRUCT(metrics_request, (), ())
@@ -231,7 +231,7 @@ export template <> struct forge::schema::rules<forge::plugins::log::otlp::crash_
 export template <> struct forge::schema::rules<forge::plugins::log::otlp::config> {
    [[nodiscard]] static forge::schema::object_schema<forge::plugins::log::otlp::config> define() {
       auto schema = forge::schema::object<forge::plugins::log::otlp::config>();
-      schema.field<&forge::plugins::log::otlp::config::enabled>("enabled").default_value(true);
+      schema.field<&forge::plugins::log::otlp::config::export_enabled>("export-enabled").default_value(true);
       schema.field<&forge::plugins::log::otlp::config::endpoint>("endpoint")
           .default_value("http://localhost:4318")
           .non_empty();
