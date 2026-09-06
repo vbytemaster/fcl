@@ -20,6 +20,7 @@ struct upgraded_session {
 
 struct upgrade_callbacks {
    std::function<void(const peer_id&)> secured;
+   std::function<void(const peer_id&)> established;
    std::function<void(const peer_id&)> upgraded;
 };
 

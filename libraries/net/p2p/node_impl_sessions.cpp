@@ -150,10 +150,10 @@ boost::asio::awaitable<void> node::impl::remember_session(std::shared_ptr<node::
    const auto resource_direction = direction == connection_manager::direction::inbound
                                        ? resource_manager::session_direction::inbound
                                        : resource_manager::session_direction::outbound;
-   if (!session->resource.establish(resource_manager::session_scope{
-           .peer = session->info.remote_peer,
-           .direction = resource_direction,
-       })) {
+   if (!session->resource.established() && !session->resource.establish(resource_manager::session_scope{
+                                               .peer = session->info.remote_peer,
+                                               .direction = resource_direction,
+                                           })) {
       detail::cancel_rejected_session(session);
       session->native_lifetime.reset();
       auto lock = std::scoped_lock{mutex};
@@ -441,6 +441,15 @@ node::impl::connect_direct(forge::net::p2p::endpoint endpoint, node::connect_opt
       ++metrics_value.connection_rejections;
       FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P pending outbound session limit reached");
    }
+   if (expected_peer && !reservation->establish(resource_manager::session_scope{
+                            .peer = *expected_peer,
+                            .direction = resource_manager::session_direction::outbound,
+                        })) {
+      auto lock = std::scoped_lock{mutex};
+      ++metrics_value.backpressure_rejections;
+      ++metrics_value.connection_rejections;
+      FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P established outbound session limit reached");
+   }
    auto descriptor = reservation->reserve_file_descriptors(1);
    if (!descriptor) {
       auto lock = std::scoped_lock{mutex};
@@ -723,7 +732,7 @@ boost::asio::awaitable<void> node::impl::handle_incoming_stream(std::shared_ptr<
       } else if (admitted.protocol == builtins::identify) {
          co_await handle_identify(session, std::move(admitted.stream));
       } else if (admitted.protocol == builtins::identify_push) {
-         co_await handle_identify_push(session, std::move(admitted.stream));
+         co_await handle_identify_push(session, std::move(admitted.stream), std::move(admitted.resource));
       } else if (admitted.protocol == builtins::peer_exchange) {
          auto request = co_await peer_exchange_codec::async_read(admitted.stream, codec_for(options));
          if (request.kind != peer_exchange_message::type::peer_exchange_request) {

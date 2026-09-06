@@ -619,7 +619,8 @@ struct node::impl : std::enable_shared_from_this<impl> {
    boost::asio::awaitable<void> handle_identify(std::shared_ptr<session_state> session, forge::net::p2p::stream stream);
 
    boost::asio::awaitable<void> handle_identify_push(std::shared_ptr<session_state> session,
-                                                     forge::net::p2p::stream stream);
+                                                     forge::net::p2p::stream stream,
+                                                     std::shared_ptr<detail::resource_stream> resource);
 
    boost::asio::awaitable<void> handle_autonat_v2_dial_back(std::shared_ptr<session_state> session,
                                                             forge::net::p2p::stream stream);

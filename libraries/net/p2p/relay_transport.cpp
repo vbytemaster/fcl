@@ -39,6 +39,16 @@ namespace {
                  callback(authenticated_peer);
               }
            },
+       .established =
+           [expected_peer, callback = std::move(callbacks.established)](const peer_id& authenticated_peer) {
+              if (authenticated_peer != expected_peer) {
+                 FORGE_THROW_EXCEPTION(exceptions::peer_verification_failed,
+                                       "P2P relay Noise peer does not match the relay control message");
+              }
+              if (callback) {
+                 callback(authenticated_peer);
+              }
+           },
        .upgraded =
            [expected_peer, callback = std::move(callbacks.upgraded)](const peer_id& authenticated_peer) {
               if (authenticated_peer != expected_peer) {

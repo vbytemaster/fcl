@@ -410,6 +410,13 @@ class quic_profile final {
                FORGE_THROW_EXCEPTION(exceptions::internal, "P2P QUIC connection is missing inbound admission");
             }
             const auto remote = verified_peer_id_for(quic, std::nullopt, options_.allow_insecure_test_mode);
+            if (!admission->establish(resource_manager::session_scope{
+                    .peer = remote,
+                    .direction = resource_manager::session_direction::inbound,
+                })) {
+               FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected,
+                                     "P2P established inbound session limit reached");
+            }
             gate_->secured(connection_direction::inbound, remote, local_endpoint, remote_endpoint);
             gate_->upgraded(connection_direction::inbound, remote, local_endpoint, remote_endpoint);
             co_return connection{

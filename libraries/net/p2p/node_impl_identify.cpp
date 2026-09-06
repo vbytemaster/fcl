@@ -98,7 +98,21 @@ constexpr auto identify_peer_record_payload_type = std::array<std::uint8_t, 2>{0
    FORGE_THROW_EXCEPTION(exceptions::codec_error, "Identify signed peer record has unsupported payload type");
 }
 
-boost::asio::awaitable<identify::document> read_identify_document(auto& self, forge::net::p2p::stream& stream) {
+boost::asio::awaitable<identify::document>
+read_identify_document(auto& self, forge::net::p2p::stream& stream,
+                       const std::shared_ptr<detail::resource_stream>& resource) {
+   if (!resource) {
+      FORGE_THROW_EXCEPTION(exceptions::internal, "P2P Identify stream is missing its resource scope");
+   }
+   // Identify owns the aggregate protobuf and one framed part while decoding.
+   // Charge both before reading so a peer cannot grow unaccounted decode state.
+   auto aggregate_memory = resource->reserve_memory(self.options.identify.max_total_message_size,
+                                                    resource_manager::memory_priority::always);
+   auto framed_memory =
+       resource->reserve_memory(self.options.identify.max_message_size, resource_manager::memory_priority::always);
+   if (!aggregate_memory || !framed_memory) {
+      FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P Identify decode memory limit reached");
+   }
    auto buffer = std::vector<std::uint8_t>{};
    auto protobuf = std::vector<std::uint8_t>{};
    auto parts = std::size_t{};
@@ -157,8 +171,13 @@ boost::asio::awaitable<identify::document> exchange_identify(auto self, auto ses
       auto document = co_await boost::asio::co_spawn(
           strand,
           [self, session]() -> boost::asio::awaitable<identify::document> {
-             auto stream = co_await self->open_session_stream(session, builtins::identify);
-             auto document = co_await read_identify_document(*self, stream);
+             auto resource = std::shared_ptr<detail::resource_stream>{};
+             auto stream = co_await self->open_session_stream(
+                 session, builtins::identify, false,
+                 detail::stream_admission_handler{
+                     [&resource](const std::shared_ptr<detail::resource_stream>& admitted) { resource = admitted; },
+                     {}});
+             auto document = co_await read_identify_document(*self, stream, resource);
              co_await stream.async_close();
              co_return document;
           },
@@ -817,12 +836,14 @@ boost::asio::awaitable<void> node::impl::handle_identify(std::shared_ptr<session
 }
 
 boost::asio::awaitable<void> node::impl::handle_identify_push(std::shared_ptr<session_state> session,
-                                                              forge::net::p2p::stream stream) {
+                                                              forge::net::p2p::stream stream,
+                                                              std::shared_ptr<detail::resource_stream> resource) {
    auto self = shared_from_this();
    co_await run_identify_operation_with_timeout(
        self, "P2P Identify Push",
-       [self, session = std::move(session), stream = std::move(stream)]() mutable -> boost::asio::awaitable<void> {
-          self->learn_from_identify(session, co_await read_identify_document(*self, stream), true);
+       [self, session = std::move(session), stream = std::move(stream),
+        resource = std::move(resource)]() mutable -> boost::asio::awaitable<void> {
+          self->learn_from_identify(session, co_await read_identify_document(*self, stream, resource), true);
           co_await stream.async_close();
        });
 }

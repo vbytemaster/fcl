@@ -731,6 +731,9 @@ finish_noise_outbound(forge::net::p2p::stream stream, const node::options& optio
    if (callbacks.secured) {
       callbacks.secured(secure.peer);
    }
+   if (callbacks.established) {
+      callbacks.established(secure.peer);
+   }
    auto muxer_stream = secure_transport_stream(std::move(secure.secure));
    if (!secure.early_yamux) {
       auto negotiated =
@@ -760,6 +763,9 @@ finish_noise_inbound(forge::net::p2p::stream stream, const node::options& option
                                           deadline.cancel_current);
    if (callbacks.secured) {
       callbacks.secured(secure.peer);
+   }
+   if (callbacks.established) {
+      callbacks.established(secure.peer);
    }
    auto muxer_stream = secure_transport_stream(std::move(secure.secure));
    if (!secure.early_yamux) {
@@ -800,6 +806,9 @@ finish_tls_outbound(forge::net::tcp::connection connection, const node::options&
                                                 options.allow_insecure_test_mode ? std::nullopt : expected_peer);
       if (callbacks.secured) {
          callbacks.secured(peer);
+      }
+      if (callbacks.established) {
+         callbacks.established(peer);
       }
       const auto selected_alpn = tls->selected_alpn();
       if (selected_alpn.empty() || selected_alpn == "libp2p") {
@@ -845,6 +854,9 @@ finish_tls_inbound(forge::net::tcp::connection connection, const node::options& 
                                                 options.allow_insecure_test_mode ? std::nullopt : expected_peer);
       if (callbacks.secured) {
          callbacks.secured(peer);
+      }
+      if (callbacks.established) {
+         callbacks.established(peer);
       }
       const auto selected_alpn = tls->selected_alpn();
       if (selected_alpn.empty() || selected_alpn == "libp2p") {

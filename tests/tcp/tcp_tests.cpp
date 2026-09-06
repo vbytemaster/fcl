@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdint>
 #include <exception>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -47,23 +48,23 @@ using bytes = std::vector<std::uint8_t>;
 
 [[nodiscard]] forge::net::transport::endpoint loopback(std::uint16_t port) {
    return forge::net::transport::endpoint{.host_type = forge::net::transport::endpoint::host_kind::ip4,
-                                   .protocol = forge::net::transport::endpoint::protocol_kind::tcp,
-                                   .host = "127.0.0.1",
-                                   .port = port};
+                                          .protocol = forge::net::transport::endpoint::protocol_kind::tcp,
+                                          .host = "127.0.0.1",
+                                          .port = port};
 }
 
 [[nodiscard]] forge::net::transport::endpoint dns4_loopback(std::uint16_t port) {
    return forge::net::transport::endpoint{.host_type = forge::net::transport::endpoint::host_kind::dns4,
-                                   .protocol = forge::net::transport::endpoint::protocol_kind::tcp,
-                                   .host = "localhost",
-                                   .port = port};
+                                          .protocol = forge::net::transport::endpoint::protocol_kind::tcp,
+                                          .host = "localhost",
+                                          .port = port};
 }
 
 [[nodiscard]] forge::net::transport::endpoint invalid_quic_endpoint() {
    return forge::net::transport::endpoint{.host_type = forge::net::transport::endpoint::host_kind::ip4,
-                                   .protocol = forge::net::transport::endpoint::protocol_kind::quic_v1,
-                                   .host = "127.0.0.1",
-                                   .port = 1};
+                                          .protocol = forge::net::transport::endpoint::protocol_kind::quic_v1,
+                                          .host = "127.0.0.1",
+                                          .port = 1};
 }
 
 boost::asio::awaitable<void> tcp_roundtrip() {
@@ -100,8 +101,8 @@ boost::asio::awaitable<void> tcp_roundtrip() {
    co_await client.stream.async_write(forge::net::transport::chunk{chunk_payload});
    auto received_chunk = co_await server.stream.async_read_chunk();
    const auto received_chunk_bytes = received_chunk.to_vector();
-   BOOST_CHECK_EQUAL_COLLECTIONS(
-       received_chunk_bytes.begin(), received_chunk_bytes.end(), chunk_payload.begin(), chunk_payload.end());
+   BOOST_CHECK_EQUAL_COLLECTIONS(received_chunk_bytes.begin(), received_chunk_bytes.end(), chunk_payload.begin(),
+                                 chunk_payload.end());
 
    const auto framed = text_bytes("framed payload");
    co_await client.stream.async_write_frame(framed);
@@ -181,12 +182,19 @@ boost::asio::awaitable<void> tcp_connection_roundtrip_and_handoff() {
    auto release_listener = forge::net::tcp::listener{executor, loopback(0)};
    auto release_accept =
        boost::asio::co_spawn(executor, release_listener.async_accept_connection(), boost::asio::use_awaitable);
-   auto release_client = co_await connector.async_connect_connection(release_listener.local_endpoint());
+   auto release_lifetime = std::make_shared<int>(1);
+   auto released_lifetime_observer = std::weak_ptr<int>{release_lifetime};
+   auto release_client =
+       co_await connector.async_connect_connection(release_listener.local_endpoint(), {}, release_lifetime);
    auto release_server = co_await std::move(release_accept);
-   auto socket = std::move(release_client).release_socket();
+   release_lifetime.reset();
+   auto transferred_lifetime = std::shared_ptr<void>{};
+   auto socket = std::move(release_client).release_socket(transferred_lifetime);
    BOOST_CHECK(socket.is_open());
+   BOOST_CHECK(!released_lifetime_observer.expired());
    auto ignored = boost::system::error_code{};
    socket.close(ignored);
+   transferred_lifetime.reset();
    co_await release_server.async_close();
    co_await release_listener.async_close();
 }
@@ -630,19 +638,23 @@ boost::asio::awaitable<void> late_foreign_thread_connector_request_cancel_preser
 boost::asio::awaitable<void> tcp_invalid_endpoint_checks() {
    auto executor = co_await boost::asio::this_coro::executor;
    auto connector = forge::net::tcp::connector{executor};
-   BOOST_CHECK_THROW((void)co_await connector.async_connect(invalid_quic_endpoint()), forge::net::tcp::exceptions::invalid_endpoint);
-   BOOST_CHECK_THROW((void)co_await connector.async_connect(loopback(0)), forge::net::tcp::exceptions::invalid_endpoint);
+   BOOST_CHECK_THROW((void)co_await connector.async_connect(invalid_quic_endpoint()),
+                     forge::net::tcp::exceptions::invalid_endpoint);
+   BOOST_CHECK_THROW((void)co_await connector.async_connect(loopback(0)),
+                     forge::net::tcp::exceptions::invalid_endpoint);
 
    auto dns_listen = forge::net::transport::endpoint{.host_type = forge::net::transport::endpoint::host_kind::dns,
-                                              .protocol = forge::net::transport::endpoint::protocol_kind::tcp,
-                                              .host = "localhost",
-                                              .port = 0};
-   BOOST_CHECK_THROW(((void)forge::net::tcp::listener{executor, dns_listen}), forge::net::tcp::exceptions::invalid_endpoint);
+                                                     .protocol = forge::net::transport::endpoint::protocol_kind::tcp,
+                                                     .host = "localhost",
+                                                     .port = 0};
+   BOOST_CHECK_THROW(((void)forge::net::tcp::listener{executor, dns_listen}),
+                     forge::net::tcp::exceptions::invalid_endpoint);
 
    auto refused_probe = forge::net::tcp::listener{executor, loopback(0)};
    auto refused_endpoint = refused_probe.local_endpoint();
    co_await refused_probe.async_close();
-   BOOST_CHECK_THROW((void)co_await connector.async_connect(refused_endpoint), forge::net::tcp::exceptions::connect_failed);
+   BOOST_CHECK_THROW((void)co_await connector.async_connect(refused_endpoint),
+                     forge::net::tcp::exceptions::connect_failed);
 }
 
 } // namespace
@@ -674,15 +686,16 @@ BOOST_AUTO_TEST_CASE(tcp_accept_can_be_canceled_or_closed) {
    BOOST_CHECK(forge::asio::blocking::run_for(runtime, cancel_unblocks_accept(), std::chrono::seconds{2}));
    BOOST_CHECK(forge::asio::blocking::run_for(runtime, close_unblocks_accept(), std::chrono::seconds{2}));
    forge::asio::blocking::run(runtime, close_releases_bound_port());
-   BOOST_CHECK(forge::asio::blocking::run_for(runtime, connection_cancel_unblocks_pending_read(), std::chrono::seconds{2}));
+   BOOST_CHECK(
+       forge::asio::blocking::run_for(runtime, connection_cancel_unblocks_pending_read(), std::chrono::seconds{2}));
    BOOST_CHECK(
        forge::asio::blocking::run_for(runtime, connector_cancel_rejects_future_connects(), std::chrono::seconds{2}));
 }
 
 BOOST_AUTO_TEST_CASE(tcp_foreign_thread_connection_request_cancel_unblocks_read_with_typed_canceled) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
-   BOOST_CHECK(forge::asio::blocking::run_for(
-       runtime, foreign_thread_connection_request_cancel_unblocks_pending_read(), std::chrono::seconds{2}));
+   BOOST_CHECK(forge::asio::blocking::run_for(runtime, foreign_thread_connection_request_cancel_unblocks_pending_read(),
+                                              std::chrono::seconds{2}));
 }
 
 BOOST_AUTO_TEST_CASE(tcp_connection_request_cancel_before_terminal_worker_arm_is_sticky) {
@@ -693,45 +706,44 @@ BOOST_AUTO_TEST_CASE(tcp_connection_request_cancel_before_terminal_worker_arm_is
 
 BOOST_AUTO_TEST_CASE(tcp_stream_request_cancel_before_terminal_worker_arm_is_sticky) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 1}};
-   BOOST_CHECK(forge::asio::blocking::run_for(
-       runtime, stream_request_cancel_before_terminal_worker_arms_is_sticky(), std::chrono::seconds{2}));
+   BOOST_CHECK(forge::asio::blocking::run_for(runtime, stream_request_cancel_before_terminal_worker_arms_is_sticky(),
+                                              std::chrono::seconds{2}));
 }
 
 BOOST_AUTO_TEST_CASE(tcp_transport_stream_destruction_completes_owned_terminal_worker) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 1}};
-   BOOST_CHECK(forge::asio::blocking::run_for(
-       runtime, transport_stream_destruction_completes_owned_terminal_worker(), std::chrono::seconds{2}));
+   BOOST_CHECK(forge::asio::blocking::run_for(runtime, transport_stream_destruction_completes_owned_terminal_worker(),
+                                              std::chrono::seconds{2}));
 }
 
 BOOST_AUTO_TEST_CASE(tcp_foreign_thread_listener_close_unblocks_accept_with_typed_closed) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
-   BOOST_CHECK(forge::asio::blocking::run_for(
-       runtime, foreign_thread_listener_close_unblocks_pending_accept(), std::chrono::seconds{2}));
+   BOOST_CHECK(forge::asio::blocking::run_for(runtime, foreign_thread_listener_close_unblocks_pending_accept(),
+                                              std::chrono::seconds{2}));
 }
 
 BOOST_AUTO_TEST_CASE(tcp_active_io_rejects_native_handoff_without_moving_socket) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
-   BOOST_CHECK(forge::asio::blocking::run_for(
-       runtime, active_connection_io_rejects_native_handoff(), std::chrono::seconds{2}));
+   BOOST_CHECK(
+       forge::asio::blocking::run_for(runtime, active_connection_io_rejects_native_handoff(), std::chrono::seconds{2}));
 }
 
 BOOST_AUTO_TEST_CASE(tcp_late_request_cancel_racing_handoff_preserves_transferred_native_ownership) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 4}};
-   BOOST_CHECK(forge::asio::blocking::run_for(
-       runtime, late_request_cancel_does_not_close_handed_off_native_ownership(), std::chrono::seconds{5}));
+   BOOST_CHECK(forge::asio::blocking::run_for(runtime, late_request_cancel_does_not_close_handed_off_native_ownership(),
+                                              std::chrono::seconds{5}));
 }
 
 BOOST_AUTO_TEST_CASE(tcp_connector_request_cancel_before_terminal_worker_arm_is_sticky) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 1}};
-   BOOST_CHECK(forge::asio::blocking::run_for(
-       runtime, connector_request_cancel_before_terminal_worker_arms_is_sticky(), std::chrono::seconds{2}));
+   BOOST_CHECK(forge::asio::blocking::run_for(runtime, connector_request_cancel_before_terminal_worker_arms_is_sticky(),
+                                              std::chrono::seconds{2}));
 }
 
 BOOST_AUTO_TEST_CASE(tcp_foreign_thread_connector_request_cancel_has_single_resolve_connect_handoff_winner) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 4}};
    BOOST_CHECK(forge::asio::blocking::run_for(
-       runtime, foreign_thread_connector_request_cancel_races_resolve_connect_handoff(),
-       std::chrono::seconds{5}));
+       runtime, foreign_thread_connector_request_cancel_races_resolve_connect_handoff(), std::chrono::seconds{5}));
 }
 
 BOOST_AUTO_TEST_CASE(tcp_late_connector_request_cancel_preserves_handed_off_connection) {

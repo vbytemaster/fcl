@@ -804,6 +804,7 @@ enum class recorded_gater_stage {
 struct recorded_gater_call {
    recorded_gater_stage stage;
    std::optional<peer_id> peer;
+   std::optional<connection_endpoints> endpoints;
 };
 
 class recording_connection_gater final : public connection_gater {
@@ -831,6 +832,11 @@ class recording_connection_gater final : public connection_gater {
       return result;
    }
 
+   [[nodiscard]] std::vector<recorded_gater_call> calls() const {
+      auto lock = std::scoped_lock{mutex_};
+      return calls_;
+   }
+
    void clear() {
       auto lock = std::scoped_lock{mutex_};
       calls_.clear();
@@ -845,26 +851,29 @@ class recording_connection_gater final : public connection_gater {
       return record(recorded_gater_stage::peer_dial, peer);
    }
 
-   bool intercept_address_dial(const peer_id& peer, const endpoint&) noexcept override {
-      return record(recorded_gater_stage::address_dial, peer);
+   bool intercept_address_dial(const peer_id& peer, const endpoint& address) noexcept override {
+      return record(recorded_gater_stage::address_dial, peer, connection_endpoints{.local = {}, .remote = address});
    }
 
-   bool intercept_accept(const connection_endpoints&) noexcept override {
-      return record(recorded_gater_stage::accept);
+   bool intercept_accept(const connection_endpoints& endpoints) noexcept override {
+      return record(recorded_gater_stage::accept, {}, endpoints);
    }
 
-   bool intercept_secured(connection_direction, const peer_id& peer, const connection_endpoints&) noexcept override {
-      return record(recorded_gater_stage::secured, peer);
+   bool intercept_secured(connection_direction, const peer_id& peer,
+                          const connection_endpoints& endpoints) noexcept override {
+      return record(recorded_gater_stage::secured, peer, endpoints);
    }
 
-   bool intercept_upgraded(connection_direction, const peer_id& peer, const connection_endpoints&) noexcept override {
-      return record(recorded_gater_stage::upgraded, peer);
+   bool intercept_upgraded(connection_direction, const peer_id& peer,
+                           const connection_endpoints& endpoints) noexcept override {
+      return record(recorded_gater_stage::upgraded, peer, endpoints);
    }
 
  private:
-   [[nodiscard]] bool record(recorded_gater_stage stage, std::optional<peer_id> peer = {}) noexcept {
+   [[nodiscard]] bool record(recorded_gater_stage stage, std::optional<peer_id> peer = {},
+                             std::optional<connection_endpoints> endpoints = {}) noexcept {
       auto lock = std::scoped_lock{mutex_};
-      calls_.push_back(recorded_gater_call{.stage = stage, .peer = std::move(peer)});
+      calls_.push_back(recorded_gater_call{.stage = stage, .peer = std::move(peer), .endpoints = std::move(endpoints)});
       return rejected_ != stage;
    }
 
@@ -8760,12 +8769,49 @@ BOOST_AUTO_TEST_CASE(p2p_relay_hop_and_stop_apply_connection_gater_without_inven
       wait_on_runtime(runtime, std::chrono::milliseconds{1}, "relayed STOP connection gater stages");
    }
    check_gater_stages(source_gater->stages_for(target.local_peer()),
-                      {recorded_gater_stage::peer_dial, recorded_gater_stage::secured, recorded_gater_stage::upgraded});
+                      {recorded_gater_stage::peer_dial, recorded_gater_stage::address_dial,
+                       recorded_gater_stage::secured, recorded_gater_stage::upgraded});
    check_gater_stages(target_gater->stages_for(source.local_peer()),
                       {recorded_gater_stage::secured, recorded_gater_stage::upgraded});
    BOOST_TEST(std::ranges::count(target_gater->stages(), recorded_gater_stage::accept) == 1U);
    BOOST_TEST(std::ranges::count(source_gater->stages_for(target.local_peer()), recorded_gater_stage::address_dial) ==
-              0U);
+              1U);
+
+   auto source_circuit = relay_endpoint;
+   source_circuit.peer = relay_node.local_peer();
+   source_circuit.relayed = endpoint::circuit{.target = source.local_peer()};
+   auto target_circuit = relay_endpoint;
+   target_circuit.peer = relay_node.local_peer();
+   target_circuit.relayed = endpoint::circuit{.target = target.local_peer()};
+   const auto source_calls = source_gater->calls();
+   const auto target_calls = target_gater->calls();
+   const auto source_call = [&](recorded_gater_stage stage) -> const recorded_gater_call& {
+      const auto found = std::ranges::find_if(
+          source_calls, [&](const auto& call) { return call.stage == stage && call.peer == target.local_peer(); });
+      BOOST_REQUIRE(found != source_calls.end());
+      BOOST_REQUIRE(found->endpoints);
+      return *found;
+   };
+   const auto target_call = [&](recorded_gater_stage stage) -> const recorded_gater_call& {
+      const auto found = std::ranges::find_if(target_calls, [&](const auto& call) {
+         return call.stage == stage && (stage == recorded_gater_stage::accept || call.peer == source.local_peer());
+      });
+      BOOST_REQUIRE(found != target_calls.end());
+      BOOST_REQUIRE(found->endpoints);
+      return *found;
+   };
+   BOOST_TEST(source_call(recorded_gater_stage::address_dial).endpoints->remote.to_string() ==
+              target_circuit.to_string());
+   BOOST_TEST(source_call(recorded_gater_stage::secured).endpoints->local.to_string() == source_circuit.to_string());
+   BOOST_TEST(source_call(recorded_gater_stage::secured).endpoints->remote.to_string() == target_circuit.to_string());
+   BOOST_TEST(source_call(recorded_gater_stage::upgraded).endpoints->local.to_string() == source_circuit.to_string());
+   BOOST_TEST(source_call(recorded_gater_stage::upgraded).endpoints->remote.to_string() == target_circuit.to_string());
+   BOOST_TEST(target_call(recorded_gater_stage::accept).endpoints->local.to_string() == target_circuit.to_string());
+   BOOST_TEST(target_call(recorded_gater_stage::accept).endpoints->remote.to_string() == source_circuit.to_string());
+   BOOST_TEST(target_call(recorded_gater_stage::secured).endpoints->local.to_string() == target_circuit.to_string());
+   BOOST_TEST(target_call(recorded_gater_stage::secured).endpoints->remote.to_string() == source_circuit.to_string());
+   BOOST_TEST(target_call(recorded_gater_stage::upgraded).endpoints->local.to_string() == target_circuit.to_string());
+   BOOST_TEST(target_call(recorded_gater_stage::upgraded).endpoints->remote.to_string() == source_circuit.to_string());
 
    forge::asio::blocking::run(runtime, target.async_stop());
    forge::asio::blocking::run(runtime, source.async_stop());
@@ -16192,9 +16238,10 @@ BOOST_AUTO_TEST_CASE(p2p_production_options_require_peer_state_persistence) {
    }
 }
 
-BOOST_AUTO_TEST_CASE(p2p_node_options_do_not_charge_unowned_identify_decode_memory) {
+BOOST_AUTO_TEST_CASE(p2p_node_options_allow_identify_decode_memory_reservation) {
    auto options = options_for(peer(249));
-   options.limits.resources.stream.max_memory = options.identify.max_message_size;
+   options.limits.resources.stream.max_memory =
+       options.identify.max_total_message_size + options.identify.max_message_size;
 
    BOOST_CHECK_NO_THROW(validate(options));
 }

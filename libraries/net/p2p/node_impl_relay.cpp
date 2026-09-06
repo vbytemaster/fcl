@@ -88,6 +88,27 @@ namespace forge::net::p2p {
 
 namespace asio = boost::asio;
 
+namespace {
+
+[[nodiscard]] endpoint relay_circuit_endpoint(endpoint relay_endpoint, const peer_id& relay_peer,
+                                              const peer_id& circuit_peer) {
+   relay_endpoint.peer = relay_peer;
+   relay_endpoint.relayed = endpoint::circuit{.target = circuit_peer};
+   return relay_endpoint;
+}
+
+[[nodiscard]] const endpoint& relay_transport_endpoint(const auto& session) {
+   if (session.direct_endpoint) {
+      return *session.direct_endpoint;
+   }
+   if (session.remote_endpoint) {
+      return *session.remote_endpoint;
+   }
+   FORGE_THROW_EXCEPTION(exceptions::internal, "P2P relay session has no canonical direct endpoint");
+}
+
+} // namespace
+
 void node::impl::cleanup_expired_relay_reservations_locked() {
    const auto now = std::chrono::steady_clock::now();
    for (auto it = inbound_relay_reservations.begin(); it != inbound_relay_reservations.end();) {
@@ -614,10 +635,10 @@ boost::asio::awaitable<upgraded_session> node::impl::open_relay_yamux(const peer
       }
       record_path_open(path::kind::relay);
       auto stream = detail::stream_access::with_buffer(std::move(exchange.stream), std::move(exchange.buffered));
-      // A relay circuit has no peer-owned native endpoint. Preserve that absence
-      // rather than manufacturing a direct address for virtual HOP transport.
-      const auto local_endpoint = endpoint{};
-      const auto remote_endpoint = endpoint{};
+      const auto& relay_endpoint = relay_transport_endpoint(*relay_session);
+      const auto local_endpoint = relay_circuit_endpoint(relay_endpoint, relay_peer, local);
+      const auto remote_endpoint = relay_circuit_endpoint(relay_endpoint, relay_peer, peer);
+      connection_gate->address_dial(peer, remote_endpoint);
       co_return co_await upgrade_relay_outbound_session(
           std::move(stream), options, identity, peer,
           upgrade_callbacks{
@@ -651,6 +672,15 @@ node::impl::ensure_relay_session(const peer_id& peer, const peer_id& relay_peer,
       ++metrics_value.backpressure_rejections;
       ++metrics_value.connection_rejections;
       FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P pending outbound relay session limit reached");
+   }
+   if (!reservation->establish(resource_manager::session_scope{
+           .peer = peer,
+           .direction = resource_manager::session_direction::outbound,
+       })) {
+      auto lock = std::scoped_lock{mutex};
+      ++metrics_value.backpressure_rejections;
+      ++metrics_value.connection_rejections;
+      FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P established outbound relay session limit reached");
    }
    auto upgraded = co_await open_relay_yamux(peer, relay_peer, timeout);
    auto session = std::make_shared<session_state>();
@@ -687,7 +717,7 @@ boost::asio::awaitable<void> node::impl::handle_relayed_yamux_stream(std::shared
    } else if (admitted.protocol == builtins::identify) {
       co_await handle_identify(session, std::move(admitted.stream));
    } else if (admitted.protocol == builtins::identify_push) {
-      co_await handle_identify_push(session, std::move(admitted.stream));
+      co_await handle_identify_push(session, std::move(admitted.stream), std::move(admitted.resource));
    } else if (admitted.protocol == builtins::dcutr) {
       co_await handle_dcutr(session, std::move(admitted.stream));
    } else if (dht_profiles.contains(admitted.protocol)) {
@@ -724,10 +754,9 @@ boost::asio::awaitable<void> node::impl::handle_relay_stop(std::shared_ptr<node:
       }));
       co_return;
    }
-   // STOP establishes a virtual inbound transport after the CONNECT request.
-   // It has a verified peer later, but no native endpoint to pass to the gate.
-   const auto local_endpoint = endpoint{};
-   const auto remote_endpoint = endpoint{};
+   const auto& relay_endpoint = relay_transport_endpoint(*session);
+   const auto local_endpoint = relay_circuit_endpoint(relay_endpoint, session->info.remote_peer, local);
+   const auto remote_endpoint = relay_circuit_endpoint(relay_endpoint, session->info.remote_peer, request.source->id);
    connection_gate->accept(local_endpoint, remote_endpoint);
    auto reservation = resources.reserve_session(resource_manager::session_direction::inbound);
    if (!reservation) {
@@ -754,6 +783,16 @@ boost::asio::awaitable<void> node::impl::handle_relay_stop(std::shared_ptr<node:
            .secured =
                [gate = connection_gate, local_endpoint, remote_endpoint](const peer_id& authenticated_peer) {
                   gate->secured(connection_direction::inbound, authenticated_peer, local_endpoint, remote_endpoint);
+               },
+           .established =
+               [&reservation](const peer_id& authenticated_peer) {
+                  if (!reservation->establish(resource_manager::session_scope{
+                          .peer = authenticated_peer,
+                          .direction = resource_manager::session_direction::inbound,
+                      })) {
+                     FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected,
+                                           "P2P established inbound relay session limit reached");
+                  }
                },
            .upgraded =
                [gate = connection_gate, local_endpoint, remote_endpoint](const peer_id& authenticated_peer) {

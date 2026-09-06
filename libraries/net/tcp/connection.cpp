@@ -274,10 +274,12 @@ struct connection::impl final : std::enable_shared_from_this<connection::impl> {
       auto state = terminal_state;
       auto requested = terminal_requested;
       auto completed = terminal_completed;
+      auto lifetime_value = lifetime;
       asio::co_spawn(
           strand,
-          [current = std::move(current), state = std::move(state), requested = std::move(requested),
-           completed]() mutable -> asio::awaitable<void> {
+          [current = std::move(current), state = std::move(state), requested = std::move(requested), completed,
+           lifetime_value = std::move(lifetime_value)]() mutable -> asio::awaitable<void> {
+             static_cast<void>(lifetime_value);
              try {
                 static_cast<void>(co_await requested->async_wait(0));
              } catch (...) {
@@ -415,11 +417,17 @@ struct connection::impl final : std::enable_shared_from_this<connection::impl> {
       return out;
    }
 
-   [[nodiscard]] asio_tcp::socket release_socket() {
+   [[nodiscard]] asio_tcp::socket release_socket(std::shared_ptr<void>* lifetime_out) {
       if (!valid()) {
          FORGE_THROW_EXCEPTION(exceptions::closed, "invalid tcp connection");
       }
       auto current = detach_socket();
+      if (lifetime_out) {
+         *lifetime_out = std::move(lifetime);
+      }
+      // A handoff is terminal for this owner. Wake the worker so it can drop
+      // its moved-from socket without retaining a descriptor reservation.
+      terminal_requested->notify();
       auto out = std::move(*current);
       return out;
    }
@@ -583,7 +591,14 @@ boost::asio::ip::tcp::socket connection::release_socket() && {
    if (!impl_) {
       FORGE_THROW_EXCEPTION(exceptions::closed, "invalid tcp connection");
    }
-   return impl_->release_socket();
+   return impl_->release_socket(nullptr);
+}
+
+boost::asio::ip::tcp::socket connection::release_socket(std::shared_ptr<void>& lifetime) && {
+   if (!impl_) {
+      FORGE_THROW_EXCEPTION(exceptions::closed, "invalid tcp connection");
+   }
+   return impl_->release_socket(&lifetime);
 }
 
 } // namespace forge::net::tcp

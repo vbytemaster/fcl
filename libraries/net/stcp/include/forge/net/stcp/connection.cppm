@@ -68,7 +68,7 @@ class connection {
    struct impl;
 
    connection(native_token, std::shared_ptr<native_stream> stream, tls::context_snapshot_ptr context,
-              std::size_t read_chunk_size);
+              std::size_t read_chunk_size, std::shared_ptr<void> lifetime);
 
    std::shared_ptr<impl> impl_;
 };

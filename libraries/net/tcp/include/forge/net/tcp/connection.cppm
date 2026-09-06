@@ -44,6 +44,7 @@ class connection {
 
    [[nodiscard]] transport::stream_connection into_transport_stream() &&;
    [[nodiscard]] boost::asio::ip::tcp::socket release_socket() &&;
+   [[nodiscard]] boost::asio::ip::tcp::socket release_socket(std::shared_ptr<void>& lifetime) &&;
 
  private:
    struct impl;

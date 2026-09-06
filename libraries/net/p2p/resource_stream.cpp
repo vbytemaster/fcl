@@ -87,6 +87,11 @@ bool resource_stream::bind_service(std::string value) noexcept {
    return reservation_.bind_service(std::move(value));
 }
 
+std::optional<resource_manager::memory_reservation>
+resource_stream::reserve_memory(std::uint64_t bytes, resource_manager::memory_priority priority) noexcept {
+   return reservation_.reserve_memory(bytes, priority);
+}
+
 boost::asio::awaitable<void> resource_stream::async_write(std::span<const std::uint8_t> bytes) {
    auto admitted = reservation_.reserve_memory(bytes.size(), resource_manager::memory_priority::high);
    if (!admitted) {
