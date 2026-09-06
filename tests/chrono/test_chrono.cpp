@@ -43,8 +43,47 @@ BOOST_AUTO_TEST_CASE(iso_seconds_do_not_inherit_fc_wire_bounds) {
    BOOST_CHECK_EQUAL(forge::chrono::iso8601::format(before_epoch_us), "1969-12-31T23:59:59.500");
    BOOST_CHECK(forge::chrono::iso8601::parse_microseconds("1969-12-31T23:59:59.500") == before_epoch_us);
 
+   const auto one_microsecond_before_epoch =
+       std::chrono::sys_time<std::chrono::microseconds>{std::chrono::microseconds{-1}};
+   BOOST_CHECK_EQUAL(forge::chrono::iso8601::format(one_microsecond_before_epoch), "1969-12-31T23:59:59.999999");
+   BOOST_CHECK(forge::chrono::iso8601::parse_microseconds("1969-12-31T23:59:59.999999") ==
+               one_microsecond_before_epoch);
+
    const auto after_fc_range = std::chrono::sys_seconds{std::chrono::seconds{4'294'967'296LL}};
    BOOST_CHECK(forge::chrono::iso8601::parse_seconds("2106-02-07T06:28:16") == after_fc_range);
+}
+
+BOOST_AUTO_TEST_CASE(legacy_iso_format_enforces_boost_gregorian_range) {
+   const auto first = std::chrono::sys_seconds{std::chrono::sys_days{
+       std::chrono::year_month_day{std::chrono::year{1400}, std::chrono::month{1}, std::chrono::day{1}}}};
+   const auto last = std::chrono::sys_seconds{std::chrono::sys_days{std::chrono::year_month_day{
+                         std::chrono::year{9999}, std::chrono::month{12}, std::chrono::day{31}}}} +
+                     std::chrono::hours{23} + std::chrono::minutes{59} + std::chrono::seconds{59};
+
+   BOOST_CHECK_EQUAL(forge::chrono::iso8601::format(first), "1400-01-01T00:00:00");
+   BOOST_CHECK_EQUAL(forge::chrono::iso8601::format(last), "9999-12-31T23:59:59");
+   BOOST_CHECK(forge::chrono::iso8601::parse_seconds("1400-01-01T00:00:00") == first);
+   BOOST_CHECK(forge::chrono::iso8601::parse_seconds("9999-12-31T23:59:59") == last);
+
+   const auto first_microseconds = std::chrono::sys_time<std::chrono::microseconds>{first.time_since_epoch()};
+   const auto last_microseconds = std::chrono::sys_time<std::chrono::microseconds>{last.time_since_epoch()};
+   BOOST_CHECK_EQUAL(forge::chrono::iso8601::format(first_microseconds), "1400-01-01T00:00:00.000");
+   BOOST_CHECK_EQUAL(forge::chrono::iso8601::format(last_microseconds), "9999-12-31T23:59:59.000");
+   BOOST_CHECK(forge::chrono::iso8601::parse_microseconds("1400-01-01T00:00:00.000") == first_microseconds);
+   BOOST_CHECK(forge::chrono::iso8601::parse_microseconds("9999-12-31T23:59:59.000") == last_microseconds);
+
+   const auto minimum_seconds =
+       std::chrono::sys_seconds{std::chrono::seconds{std::numeric_limits<std::int64_t>::min()}};
+   const auto maximum_seconds =
+       std::chrono::sys_seconds{std::chrono::seconds{std::numeric_limits<std::int64_t>::max()}};
+   const auto minimum_microseconds = std::chrono::sys_time<std::chrono::microseconds>{
+       std::chrono::microseconds{std::numeric_limits<std::int64_t>::min()}};
+   const auto maximum_microseconds = std::chrono::sys_time<std::chrono::microseconds>{
+       std::chrono::microseconds{std::numeric_limits<std::int64_t>::max()}};
+   BOOST_CHECK_THROW(static_cast<void>(forge::chrono::iso8601::format(minimum_seconds)), std::out_of_range);
+   BOOST_CHECK_THROW(static_cast<void>(forge::chrono::iso8601::format(maximum_seconds)), std::out_of_range);
+   BOOST_CHECK_THROW(static_cast<void>(forge::chrono::iso8601::format(minimum_microseconds)), std::out_of_range);
+   BOOST_CHECK_THROW(static_cast<void>(forge::chrono::iso8601::format(maximum_microseconds)), std::out_of_range);
 }
 
 BOOST_AUTO_TEST_CASE(rfc3339_preserves_nanoseconds_and_normalizes_offsets) {

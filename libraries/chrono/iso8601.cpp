@@ -16,6 +16,12 @@ namespace forge::chrono::iso8601 {
 namespace {
 
 constexpr auto nanoseconds_per_second = std::int64_t{1'000'000'000};
+constexpr auto microseconds_per_second = std::int64_t{1'000'000};
+constexpr auto legacy_boost_first_second = std::chrono::sys_seconds{std::chrono::sys_days{
+    std::chrono::year_month_day{std::chrono::year{1400}, std::chrono::month{1}, std::chrono::day{1}}}};
+constexpr auto legacy_boost_last_second = std::chrono::sys_seconds{std::chrono::sys_days{std::chrono::year_month_day{
+                                              std::chrono::year{9999}, std::chrono::month{12}, std::chrono::day{31}}}} +
+                                          std::chrono::hours{23} + std::chrono::minutes{59} + std::chrono::seconds{59};
 
 struct seconds_and_fraction {
    std::int64_t seconds;
@@ -73,6 +79,23 @@ void append_fixed_decimal(std::string& output, unsigned value, unsigned width) {
    return {.seconds = seconds, .fraction = fraction};
 }
 
+[[nodiscard]] constexpr seconds_and_fraction decompose_microseconds(std::int64_t microseconds) noexcept {
+   auto seconds = microseconds / microseconds_per_second;
+   auto fraction = microseconds % microseconds_per_second;
+   if (fraction < 0) {
+      --seconds;
+      fraction += microseconds_per_second;
+   }
+   return {.seconds = seconds, .fraction = fraction};
+}
+
+void require_legacy_boost_range(std::int64_t seconds) {
+   if (seconds < legacy_boost_first_second.time_since_epoch().count() ||
+       seconds > legacy_boost_last_second.time_since_epoch().count()) {
+      throw std::out_of_range{"legacy ISO timestamp is outside the supported Boost Gregorian range"};
+   }
+}
+
 [[nodiscard]] std::int64_t checked_nanoseconds(std::int64_t seconds, std::int64_t fraction) {
    constexpr auto minimum = std::numeric_limits<std::int64_t>::min();
    constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
@@ -104,11 +127,13 @@ void append_fixed_decimal(std::string& output, unsigned value, unsigned width) {
 } // namespace
 
 std::string format_compact(std::chrono::sys_seconds value) {
+   require_legacy_boost_range(value.time_since_epoch().count());
    const auto ptime = epoch() + boost::posix_time::seconds{value.time_since_epoch().count()};
    return boost::posix_time::to_iso_string(ptime);
 }
 
 std::string format(std::chrono::sys_seconds value) {
+   require_legacy_boost_range(value.time_since_epoch().count());
    const auto ptime = epoch() + boost::posix_time::seconds{value.time_since_epoch().count()};
    return boost::posix_time::to_iso_extended_string(ptime);
 }
@@ -125,14 +150,14 @@ std::chrono::sys_seconds parse_seconds(std::string_view value) {
 }
 
 std::string format(std::chrono::sys_time<std::chrono::microseconds> value) {
-   const auto whole_seconds = std::chrono::floor<std::chrono::seconds>(value);
-   const auto fractional_microseconds = (value - whole_seconds).count();
-   const auto ptime = epoch() + boost::posix_time::seconds{whole_seconds.time_since_epoch().count()};
+   const auto timestamp = decompose_microseconds(value.time_since_epoch().count());
+   require_legacy_boost_range(timestamp.seconds);
+   const auto ptime = epoch() + boost::posix_time::seconds{timestamp.seconds};
    const auto base = boost::posix_time::to_iso_extended_string(ptime);
-   if ((fractional_microseconds % 1000) == 0) {
-      return base + "." + std::to_string((fractional_microseconds / 1000) + 1000).substr(1);
+   if ((timestamp.fraction % 1000) == 0) {
+      return base + "." + std::to_string((timestamp.fraction / 1000) + 1000).substr(1);
    }
-   return base + "." + std::to_string(fractional_microseconds + 1'000'000).substr(1);
+   return base + "." + std::to_string(timestamp.fraction + microseconds_per_second).substr(1);
 }
 
 std::chrono::sys_time<std::chrono::microseconds> parse_microseconds(std::string_view value) {

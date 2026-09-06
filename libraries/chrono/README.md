@@ -27,6 +27,9 @@ Target: `forge_chrono`. Package component: `chrono`.
 The `format` and `parse_*` functions retain existing millisecond text while
 round-tripping full microsecond values. Generic text parsing does not inherit
 the FC `uint32` wire range; that validation belongs to `forge_raw`.
+Legacy ISO formatting accepts only the Boost Gregorian range from
+`1400-01-01T00:00:00` through `9999-12-31T23:59:59` and throws
+`std::out_of_range` before invoking Boost outside that range.
 `format_rfc3339` emits canonical UTC text with `Z` and trims only insignificant
 fractional zeroes. `parse_rfc3339` accepts `Z` or numeric timezone offsets and
 rejects invalid dates, trailing data and values outside the exact `int64`
