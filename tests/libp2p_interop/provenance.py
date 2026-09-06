@@ -65,6 +65,28 @@ def git_output(root: Path, *args: str) -> bytes:
         raise RuntimeError(f"Git command failed for {root}: {error}") from error
 
 
+def donor_checkout_head_errors(donors_root: Path, donor_revisions: dict[str, str]) -> list[str]:
+    """Return the existing donor-pin errors for unavailable or stale checkouts."""
+    errors: list[str] = []
+    for repository, revision in donor_revisions.items():
+        if not isinstance(repository, str) or not repository or "/" in repository:
+            continue
+        if not isinstance(revision, str):
+            continue
+        repository_path = donors_root / repository
+        if not repository_path.is_dir():
+            errors.append(f"donor {repository}: repository is unavailable")
+            continue
+        try:
+            head = git_output(repository_path, "rev-parse", "HEAD").decode("ascii").strip()
+        except RuntimeError:
+            errors.append(f"donor {repository}: checkout does not match pinned revision")
+            continue
+        if head != revision:
+            errors.append(f"donor {repository}: checkout does not match pinned revision")
+    return errors
+
+
 def safe_worktree_path(root: Path, relative: bytes) -> Path:
     decoded = os.fsdecode(relative)
     candidate = Path(decoded)

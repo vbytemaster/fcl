@@ -761,12 +761,20 @@ def prepare_rust_fixture(source_dir: Path, build_dir: Path, cargo_tool: str,
     if work.exists():
         shutil.rmtree(work)
     shutil.copytree(source_dir / "rust_fixture", work)
-    commands = [{
-        "command": [cargo_tool, "build", "--release", "--frozen"],
-        "cwd": str(work),
-        "environment": {"CARGO_NET_OFFLINE": "true", "RUSTUP_OFFLINE": "true"},
-    }]
-    run(commands[0]["command"], cwd=work, env=environment)
+    commands = [
+        {
+            "command": [cargo_tool, "test", "--frozen"],
+            "cwd": str(work),
+            "environment": {"CARGO_NET_OFFLINE": "true", "RUSTUP_OFFLINE": "true"},
+        },
+        {
+            "command": [cargo_tool, "build", "--release", "--frozen"],
+            "cwd": str(work),
+            "environment": {"CARGO_NET_OFFLINE": "true", "RUSTUP_OFFLINE": "true"},
+        },
+    ]
+    for command in commands:
+        run(command["command"], cwd=work, env=environment)
     return work / "target" / "release" / "forge-libp2p-rust-fixture", commands
 
 

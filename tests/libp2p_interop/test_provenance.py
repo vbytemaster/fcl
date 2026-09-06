@@ -5,10 +5,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Optional
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 
-from provenance import worktree_identity
+from provenance import donor_checkout_head_errors, worktree_identity
 from check_p2p_feature_inventory import (
     registered_runner_acceptance_pairs,
     registered_runner_pair_errors,
@@ -16,6 +18,7 @@ from check_p2p_feature_inventory import (
 from runner import (
     SUPPORTED_FORGE_BUILD_PROFILES,
     forge_fixture_requirements,
+    prepare_rust_fixture,
     require_dht_provider_evidence,
     require_local_topology_evidence,
     require_supported_forge_build_profile,
@@ -169,6 +172,28 @@ class WorktreeFingerprintTest(unittest.TestCase):
             self.assertFalse(worktree_identity(root).dirty)
 
 
+class DonorCheckoutPinTest(unittest.TestCase):
+    def test_donor_checkout_helper_accepts_matching_and_rejects_stale_head(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            donors_root = Path(directory) / "donors"
+            donors_root.mkdir()
+            donor = donors_root / "pinned-donor"
+            initialize_repository(donor)
+            (donor / "source.txt").write_text("first\n")
+            pinned_head = commit(donor, "first")
+
+            self.assertEqual(
+                donor_checkout_head_errors(donors_root, {"pinned-donor": pinned_head}), []
+            )
+
+            (donor / "source.txt").write_text("stale\n")
+            commit(donor, "second")
+            self.assertEqual(
+                donor_checkout_head_errors(donors_root, {"pinned-donor": pinned_head}),
+                ["donor pinned-donor: checkout does not match pinned revision"],
+            )
+
+
 class InteropCMakeConfigurationTest(unittest.TestCase):
     def test_multi_config_artifacts_are_configuration_scoped(self) -> None:
         source = (Path(__file__).parents[1] / "CMakeLists.txt").read_text()
@@ -196,6 +221,34 @@ class InteropCMakeConfigurationTest(unittest.TestCase):
 
 
 class InteropRunnerResultTest(unittest.TestCase):
+    def test_prepare_rust_fixture_records_and_runs_frozen_tests_before_build(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_dir = root / "source"
+            rust_fixture = source_dir / "rust_fixture"
+            rust_fixture.mkdir(parents=True)
+            (rust_fixture / "Cargo.toml").write_text("[package]\nname = 'fixture'\n")
+            calls: list[tuple[list[str], Optional[Path], Optional[dict[str, str]]]] = []
+
+            def fake_run(command: list[str], cwd: Optional[Path] = None,
+                         env: Optional[dict[str, str]] = None) -> None:
+                calls.append((command, cwd, env))
+
+            with patch("runner.run", side_effect=fake_run):
+                binary, commands = prepare_rust_fixture(
+                    source_dir, root / "build", "/tools/cargo", {"PATH": "/tools"}
+                )
+
+            expected_commands = [
+                ["/tools/cargo", "test", "--frozen"],
+                ["/tools/cargo", "build", "--release", "--frozen"],
+            ]
+            self.assertEqual([record["command"] for record in commands], expected_commands)
+            self.assertEqual([command for command, _, _ in calls], expected_commands)
+            self.assertEqual(binary, root / "build/rust_fixture/target/release/forge-libp2p-rust-fixture")
+            self.assertTrue(all(record["environment"]["CARGO_NET_OFFLINE"] == "true" for record in commands))
+            self.assertTrue(all(record["environment"]["RUSTUP_OFFLINE"] == "true" for record in commands))
+
     def test_registered_acceptance_pairs_require_tcp_identify(self) -> None:
         runner_pairs = registered_runner_acceptance_pairs(Path(__file__).with_name("runner.py"))
         identify_pair = ("tcp_noise/identify", "identify_native_tcp_yamux")
