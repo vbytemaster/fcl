@@ -99,6 +99,32 @@ struct RelayReservationEvidence {
     renewal: bool,
 }
 
+#[derive(Debug, Default)]
+struct RelayReservationProgress {
+    accepted_renewal: Option<bool>,
+    circuit_addr: Option<String>,
+}
+
+impl RelayReservationProgress {
+    fn record_acceptance(&mut self, renewal: bool) {
+        self.accepted_renewal = Some(renewal);
+    }
+
+    fn record_circuit_addr(&mut self, circuit_addr: String) {
+        self.circuit_addr = Some(circuit_addr);
+    }
+
+    fn complete(&mut self) -> Option<(bool, String)> {
+        if self.accepted_renewal.is_none() || self.circuit_addr.is_none() {
+            return None;
+        }
+        Some((
+            self.accepted_renewal.take().expect("checked above"),
+            self.circuit_addr.take().expect("checked above"),
+        ))
+    }
+}
+
 const RENDEZVOUS_LIFECYCLE_MIN_TTL_SECONDS: u64 = 2;
 const RENDEZVOUS_LIFECYCLE_MAX_TTL_SECONDS: u64 = 3;
 const RENDEZVOUS_LIFECYCLE_TIMING_MARGIN: Duration = Duration::from_millis(200);
@@ -324,8 +350,7 @@ async fn reserve_relay_address(
         .with(Protocol::P2pCircuit);
     let expected_circuit_addr = base_circuit_addr.clone().with(Protocol::P2p(client_peer));
     let relay_listener_id = swarm.listen_on(base_circuit_addr)?;
-    let mut accepted_renewal = None;
-    let mut observed_circuit_addr = None;
+    let mut progress = RelayReservationProgress::default();
     let deadline = tokio::time::sleep(Duration::from_secs(20));
     tokio::pin!(deadline);
 
@@ -339,7 +364,7 @@ async fn reserve_relay_address(
                     if listener_id == relay_listener_id && address == expected_circuit_addr =>
                 {
                     swarm.add_external_address(address.clone());
-                    observed_circuit_addr = Some(address.to_string());
+                    progress.record_circuit_addr(address.to_string());
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::RelayClient(
                     relay::client::Event::ReservationReqAccepted {
@@ -351,16 +376,14 @@ async fn reserve_relay_address(
                     if renewal {
                         return Err("initial relay reservation unexpectedly reported renewal=true".into());
                     }
-                    accepted_renewal = Some(renewal);
+                    progress.record_acceptance(renewal);
                 }
                 other => {
                     eprintln!("rust relay reservation event: {other:?}");
                 }
             },
         }
-        if let (Some(renewal), Some(circuit_addr)) =
-            (accepted_renewal, observed_circuit_addr.take())
-        {
+        if let Some((renewal, circuit_addr)) = progress.complete() {
             return Ok(RelayReservationEvidence {
                 accepted: true,
                 relay_peer_id: relay_peer.to_string(),
@@ -2135,5 +2158,45 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "dial" => dial(opts).await,
         "dial-relay" => dial_relay(opts).await,
         _ => Err(format!("unknown command {}", opts.command).into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RelayReservationProgress;
+
+    #[test]
+    fn relay_reservation_progress_waits_for_acceptance_after_address() {
+        let mut progress = RelayReservationProgress::default();
+        progress.record_circuit_addr("/p2p/relay/p2p-circuit/p2p/client".to_string());
+
+        assert_eq!(progress.complete(), None);
+        assert_eq!(
+            progress.circuit_addr.as_deref(),
+            Some("/p2p/relay/p2p-circuit/p2p/client")
+        );
+
+        progress.record_acceptance(false);
+        assert_eq!(
+            progress.complete(),
+            Some((false, "/p2p/relay/p2p-circuit/p2p/client".to_string(),))
+        );
+        assert_eq!(progress.complete(), None);
+    }
+
+    #[test]
+    fn relay_reservation_progress_waits_for_address_after_acceptance() {
+        let mut progress = RelayReservationProgress::default();
+        progress.record_acceptance(false);
+
+        assert_eq!(progress.complete(), None);
+        assert_eq!(progress.accepted_renewal, Some(false));
+
+        progress.record_circuit_addr("/p2p/relay/p2p-circuit/p2p/client".to_string());
+        assert_eq!(
+            progress.complete(),
+            Some((false, "/p2p/relay/p2p-circuit/p2p/client".to_string(),))
+        );
+        assert_eq!(progress.complete(), None);
     }
 }
