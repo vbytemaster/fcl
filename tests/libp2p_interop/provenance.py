@@ -17,6 +17,17 @@ WORKTREE_FINGERPRINT_FORMAT = b"forge-libp2p-interop-worktree-v2\0"
 DONOR_CHECKOUT_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 DONOR_REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 
+# Fixture provenance has a deliberately smaller, named subset of the complete
+# donor pin map. Names are semantic fixture identities, not interchangeable
+# labels for a checkout that happens to have a canonical pin.
+FIXTURE_DONOR_DIRECTORIES = {
+    "go-libp2p": "go-libp2p",
+    "rust-libp2p": "rust-libp2p",
+    "go-kad": "go-libp2p-kad-dht",
+    "go-pubsub": "go-libp2p-pubsub",
+    "libp2p-specs": "libp2p-specs",
+}
+
 
 @dataclass(frozen=True)
 class WorktreeIdentity:
@@ -123,18 +134,35 @@ def fixture_donor_revision_bindings(
 
     assert isinstance(canonical_donor_revisions, Mapping)
     bindings: dict[str, str] = {}
+    seen_names: set[str] = set()
+    seen_directories: set[str] = set()
     for donor in fixture_donors:
         if not isinstance(donor, Mapping):
             errors.append("fixture lock donor entry must be an object")
             continue
+        name = donor.get("name")
         directory = donor.get("directory")
         commit = donor.get("commit")
         tree = donor.get("tree")
+        if not isinstance(name, str) or name not in FIXTURE_DONOR_DIRECTORIES:
+            errors.append(f"fixture lock donor name is invalid: {name!r}")
+            continue
+        if name in seen_names:
+            errors.append(f"fixture lock donor name is duplicated: {name}")
+            continue
+        seen_names.add(name)
         if not isinstance(directory, str) or not DONOR_CHECKOUT_KEY_PATTERN.fullmatch(directory):
             errors.append(f"fixture lock donor directory is invalid: {directory!r}")
             continue
-        if directory in bindings:
+        if directory in seen_directories:
             errors.append(f"fixture lock donor directory is duplicated: {directory}")
+            continue
+        seen_directories.add(directory)
+        expected_directory = FIXTURE_DONOR_DIRECTORIES[name]
+        if directory != expected_directory:
+            errors.append(
+                f"fixture lock donor {name}: directory must be {expected_directory}"
+            )
             continue
         if not isinstance(commit, str) or not DONOR_REVISION_PATTERN.fullmatch(commit):
             errors.append(f"fixture lock donor {directory}: commit must be a full lowercase commit SHA")
@@ -152,6 +180,10 @@ def fixture_donor_revision_bindings(
             )
             continue
         bindings[directory] = canonical_commit
+    if seen_names != set(FIXTURE_DONOR_DIRECTORIES):
+        errors.append("fixture lock donor names do not match the canonical fixture donor registry")
+    if seen_directories != set(FIXTURE_DONOR_DIRECTORIES.values()):
+        errors.append("fixture lock donor directories do not match the canonical fixture donor registry")
     return bindings, errors
 
 

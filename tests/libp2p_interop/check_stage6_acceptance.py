@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from provenance import (
+    FIXTURE_DONOR_DIRECTORIES,
     fixture_donor_checkout_errors,
     fixture_donor_revision_bindings,
     load_canonical_donor_revisions,
@@ -731,7 +732,43 @@ def validate_tls_evidence(result: dict, record: dict, listener: Optional[dict]) 
     return errors
 
 
-def validate_relay_client_evidence(result: dict, _record: dict, _listener: Optional[dict]) -> list[str]:
+def relay_transport_endpoint(value: object) -> Optional[str]:
+    """Match Rust's relay base-address construction without accepting a suffix."""
+    if not nonempty_string(value) or not value.startswith("/"):
+        return None
+    components = value.split("/")[1:]
+    if not components or any(not component for component in components) or "p2p-circuit" in components:
+        return None
+    if len(components) >= 2 and components[-2] == "p2p":
+        components = components[:-2]
+    return "/" + "/".join(components) if components else None
+
+
+def rust_relay_command_target_errors(record: dict, relay_peer: str, relay_endpoint: str) -> list[str]:
+    """Bind the reservation event to the listener endpoint and Rust dial command."""
+    errors: list[str] = []
+    listener = record.get("listener_process")
+    if not isinstance(listener, dict):
+        return ["Rust relay record lacks listener endpoint evidence"]
+    if listener.get("peer_id") != relay_peer or relay_endpoint not in listener.get("listen_addrs", []):
+        errors.append("Rust relay listener evidence does not match the recorded relay endpoint")
+
+    raw_result = record.get("result")
+    attempts = raw_result.get("attempts") if isinstance(raw_result, dict) else None
+    if not isinstance(attempts, list) or not attempts:
+        return [*errors, "Rust relay record lacks dial command evidence"]
+    for attempt in attempts:
+        command = attempt.get("command") if isinstance(attempt, dict) else None
+        options, command_errors = command_options(command, "dial")
+        if command_errors:
+            errors.append("Rust relay dial command evidence is malformed")
+            continue
+        if options.get("--peer-id") != relay_peer or options.get("--addr") != relay_endpoint:
+            errors.append("Rust relay dial command target differs from the recorded relay endpoint")
+    return errors
+
+
+def validate_relay_client_evidence(result: dict, record: dict, _listener: Optional[dict]) -> list[str]:
     implementation = result.get("implementation")
     if implementation == "forge" and positive_integer(result.get("voucher_bytes")):
         return []
@@ -743,29 +780,35 @@ def validate_relay_client_evidence(result: dict, _record: dict, _listener: Optio
     ):
         return []
     if implementation == "rust":
-        relay_peer = _record.get("peer_id")
+        relay_peer = record.get("peer_id")
         client_peer = result.get("relay_reservation_client_peer_id")
         circuit_addr = result.get("relay_reservation_circuit_addr")
-        expected_circuit_suffix = (
-            f"/p2p/{relay_peer}/p2p-circuit/p2p/{client_peer}"
-            if nonempty_string(relay_peer) and nonempty_string(client_peer)
-            else ""
+        relay_endpoint = record.get("addr")
+        transport_endpoint = relay_transport_endpoint(relay_endpoint)
+        expected_circuit_addr = (
+            f"{transport_endpoint}/p2p/{relay_peer}/p2p-circuit/p2p/{client_peer}"
+            if nonempty_string(relay_peer)
+            and nonempty_string(client_peer)
+            and transport_endpoint is not None
+            else None
         )
-        if (
+        errors = rust_relay_command_target_errors(record, relay_peer, relay_endpoint) if (
+            nonempty_string(relay_peer) and nonempty_string(relay_endpoint)
+        ) else ["Rust relay record lacks a non-empty relay peer and endpoint"]
+        if not (
             result.get("relay_reservation_accepted") is True
             and nonempty_string(relay_peer)
             and result.get("relay_reservation_relay_peer_id") == relay_peer
             and nonempty_string(client_peer)
-            and nonempty_string(circuit_addr)
-            and circuit_addr.endswith(expected_circuit_suffix)
+            and circuit_addr == expected_circuit_addr
             and result.get("relay_reservation_renewal") is False
             and result.get("authenticated_remote_peer_id") == relay_peer
             and result.get("negotiated_transport") == "/quic-v1"
         ):
-            return []
-        return [
-            "Rust relay client evidence lacks a correlated ReservationReqAccepted event and confirmed circuit address"
-        ]
+            errors.append(
+                "Rust relay client evidence lacks a correlated ReservationReqAccepted event and exact confirmed circuit address"
+            )
+        return errors
     return ["relay client evidence lacks an implementation-specific reservation/open proof"]
 
 
@@ -1309,6 +1352,22 @@ def semantic_fixture(scenario_id: str) -> tuple[dict, dict, Optional[dict]]:
 def rust_relay_reservation_fixture() -> tuple[dict, dict, Optional[dict]]:
     """Observed Rust relay-client event fields required for the reservation contract."""
     result, record, listener = semantic_fixture("relay_v2_client_transport")
+    relay_endpoint = "/ip4/127.0.0.1/udp/4001/quic-v1/p2p/listener-peer"
+    record.update({
+        "addr": relay_endpoint,
+        "listener_process": {
+            "peer_id": record["peer_id"],
+            "listen_addrs": [relay_endpoint],
+        },
+        "result": {
+            "attempts": [{
+                "kind": "dial",
+                "command": [
+                    "/fixture/rust", "dial", "--peer-id", record["peer_id"], "--addr", relay_endpoint,
+                ],
+            }],
+        },
+    })
     result.update({
         "implementation": "rust",
         "negotiated_transport": "/quic-v1",
@@ -1482,15 +1541,8 @@ def git_call(root: Path, *args: str) -> None:
 def self_test_donor_provenance(donors_root: Path) -> tuple[dict[str, str], list[dict[str, str]]]:
     fixture_donors: list[dict[str, str]] = []
     revisions: dict[str, str] = {}
-    donor_names = (
-        ("go-libp2p", "go-libp2p"),
-        ("rust-libp2p", "rust-libp2p"),
-        ("go-kad", "go-libp2p-kad-dht"),
-        ("go-pubsub", "go-libp2p-pubsub"),
-        ("libp2p-specs", "libp2p-specs"),
-    )
     donors_root.mkdir()
-    for name, directory in donor_names:
+    for name, directory in FIXTURE_DONOR_DIRECTORIES.items():
         checkout = donors_root / directory
         checkout.mkdir()
         git_call(checkout, "init", "-q")
@@ -1596,6 +1648,25 @@ def self_test() -> int:
     rust_relay["relay_reservation_circuit_addr"] = "/ip4/127.0.0.1/udp/4001/quic-v1/p2p/wrong"
     if not validate_relay_client_evidence(rust_relay, relay_record, relay_listener):
         print("self-test failed: Rust relay reservation accepted an unconfirmed circuit address", file=sys.stderr)
+        return 1
+    rust_relay, relay_record, relay_listener = rust_relay_reservation_fixture()
+    rust_relay["relay_reservation_circuit_addr"] = rust_relay["relay_reservation_circuit_addr"].replace(
+        "/udp/4001/quic-v1", "/tcp/4001"
+    )
+    if not validate_relay_client_evidence(rust_relay, relay_record, relay_listener):
+        print("self-test failed: Rust relay reservation accepted a forged transport prefix", file=sys.stderr)
+        return 1
+    rust_relay, relay_record, relay_listener = rust_relay_reservation_fixture()
+    command = relay_record["result"]["attempts"][0]["command"]
+    command[command.index("--addr") + 1] = "/ip4/127.0.0.1/udp/4999/quic-v1/p2p/listener-peer"
+    if not validate_relay_client_evidence(rust_relay, relay_record, relay_listener):
+        print("self-test failed: Rust relay reservation accepted a mismatched dial command target", file=sys.stderr)
+        return 1
+    rust_relay, relay_record, relay_listener = rust_relay_reservation_fixture()
+    command = relay_record["result"]["attempts"][0]["command"]
+    command[command.index("--peer-id") + 1] = "wrong-relay-peer"
+    if not validate_relay_client_evidence(rust_relay, relay_record, relay_listener):
+        print("self-test failed: Rust relay reservation accepted a mismatched dial command peer", file=sys.stderr)
         return 1
     rust_relay, relay_record, relay_listener = rust_relay_reservation_fixture()
     rust_relay["relay_reservation_renewal"] = True

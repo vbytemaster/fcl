@@ -6,6 +6,7 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
+from typing import Optional
 
 from check_stage6_acceptance import EVIDENCE_CONTRACT_VALIDATORS, expected_launcher_transport
 from provenance import (
@@ -153,6 +154,51 @@ def donor_case_text(case: object) -> str:
         elif isinstance(value, list):
             values.extend(item for item in value if isinstance(item, str))
     return " ".join(values).lower()
+
+
+def donor_case_source_errors(
+    root: Path, donor_cases: object, donor_revisions: object, donors_root: Optional[Path]
+) -> list[str]:
+    """Validate every donor case file directly against its pinned source object."""
+    if not isinstance(donor_cases, list):
+        return ["donor matrix: cases must be an array"]
+
+    errors: list[str] = []
+    for case in donor_cases:
+        if not isinstance(case, dict):
+            errors.append("donor matrix: every donor case must be an object")
+            continue
+        case_id = case.get("id")
+        label = case_id if isinstance(case_id, str) and case_id else "<unknown>"
+        donor_files = case.get("donor_file")
+        if not isinstance(donor_files, list):
+            errors.append(f"donor case {label}: donor_file must be an array")
+            continue
+        for donor_file in donor_files:
+            if not isinstance(donor_file, str) or not donor_file:
+                errors.append(f"donor case {label}: donor_file must contain non-empty strings")
+                continue
+            relative = Path(donor_file)
+            if relative.is_absolute() or ".." in relative.parts:
+                errors.append(f"donor case {label}: donor_file must be repository-relative: {donor_file}")
+            elif relative.parts and relative.parts[0] == "docs":
+                if not (root / relative).is_file():
+                    errors.append(f"donor case {label}: local donor_file does not exist: {donor_file}")
+            elif relative.parts and relative.parts[0] == "donors" and len(relative.parts) > 2:
+                if donors_root is None:
+                    errors.append(
+                        f"donor case {label}: pinned donor_file validation requires DONORS_ROOT"
+                    )
+                    continue
+                errors.extend(
+                    f"donor case {label}: {error}"
+                    for error in donor_source_object_errors(
+                        donors_root, donor_revisions, donor_file
+                    )
+                )
+            else:
+                errors.append(f"donor case {label}: donor_file must start with docs/ or donors/<repo>/")
+    return errors
 
 
 def registered_runner_acceptance_pairs(runner_path: Path) -> set[tuple[str, str]]:
@@ -531,6 +577,7 @@ def main() -> int:
         capability_revisions = {}
     if donors_root is not None and not donor_revision_errors:
         errors.extend(donor_checkout_head_errors(donors_root, donor_revisions))
+    errors.extend(donor_case_source_errors(root, donor_cases, donor_revisions, donors_root))
 
     required_capability_fields = {
         "id",

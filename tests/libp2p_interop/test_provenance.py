@@ -12,6 +12,7 @@ from unittest.mock import patch
 sys.dont_write_bytecode = True
 
 from provenance import (
+    FIXTURE_DONOR_DIRECTORIES,
     donor_checkout_head_errors,
     donor_revision_schema_errors,
     donor_source_object_errors,
@@ -19,6 +20,7 @@ from provenance import (
     worktree_identity,
 )
 from check_p2p_feature_inventory import (
+    donor_case_source_errors,
     registered_runner_acceptance_pairs,
     registered_runner_pair_errors,
 )
@@ -234,23 +236,75 @@ class DonorCheckoutPinTest(unittest.TestCase):
             self.assertNotEqual(alternate_commit, canonical_commit)
             self.assertEqual(git(donor, "rev-parse", "HEAD^{tree}"), canonical_tree)
 
-            fixture_donors = [{
-                "name": "pinned",
-                "directory": "pinned-donor",
-                "commit": alternate_commit,
-                "tree": canonical_tree,
-            }]
+            canonical_revisions = {
+                directory: "a" * 40 for directory in FIXTURE_DONOR_DIRECTORIES.values()
+            }
+            canonical_revisions["go-libp2p"] = canonical_commit
+            fixture_donors = [
+                {
+                    "name": name,
+                    "directory": directory,
+                    "commit": (
+                        alternate_commit if directory == "go-libp2p" else canonical_revisions[directory]
+                    ),
+                    "tree": canonical_tree,
+                }
+                for name, directory in FIXTURE_DONOR_DIRECTORIES.items()
+            ]
             bindings, errors = fixture_donor_revision_bindings(
-                fixture_donors, {"pinned-donor": canonical_commit}
+                fixture_donors, canonical_revisions
             )
-            self.assertEqual(bindings, {})
+            self.assertNotIn("go-libp2p", bindings)
             self.assertEqual(
                 errors,
                 [
-                    "fixture lock donor pinned-donor: "
+                    "fixture lock donor go-libp2p: "
                     "commit does not match canonical donor_cases revision"
                 ],
             )
+
+    def test_fixture_donor_registry_rejects_swapped_names_and_directories(self) -> None:
+        canonical_revisions = {
+            directory: f"{index:040x}"
+            for index, directory in enumerate(FIXTURE_DONOR_DIRECTORIES.values(), start=1)
+        }
+        fixture_donors = [
+            {
+                "name": name,
+                "directory": directory,
+                "commit": canonical_revisions[directory],
+                "tree": f"{index:040x}",
+            }
+            for index, (name, directory) in enumerate(FIXTURE_DONOR_DIRECTORIES.items(), start=11)
+        ]
+        bindings, errors = fixture_donor_revision_bindings(fixture_donors, canonical_revisions)
+        self.assertEqual(bindings, canonical_revisions)
+        self.assertEqual(errors, [])
+
+        swapped = [dict(donor) for donor in fixture_donors]
+        swapped[0]["directory"], swapped[1]["directory"] = (
+            swapped[1]["directory"], swapped[0]["directory"]
+        )
+        _, errors = fixture_donor_revision_bindings(swapped, canonical_revisions)
+        self.assertIn(
+            "fixture lock donor go-libp2p: directory must be go-libp2p", errors
+        )
+        self.assertIn(
+            "fixture lock donor rust-libp2p: directory must be rust-libp2p", errors
+        )
+
+        substituted = [dict(donor) for donor in fixture_donors]
+        substituted[0]["directory"] = "boxo"
+        substituted[0]["commit"] = "f" * 40
+        _, errors = fixture_donor_revision_bindings(
+            substituted, canonical_revisions | {"boxo": "f" * 40}
+        )
+        self.assertIn(
+            "fixture lock donor go-libp2p: directory must be go-libp2p", errors
+        )
+        self.assertIn(
+            "fixture lock donor directories do not match the canonical fixture donor registry", errors
+        )
 
     def test_donor_source_must_exist_as_a_blob_at_the_pinned_revision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -278,6 +332,35 @@ class DonorCheckoutPinTest(unittest.TestCase):
                     "donors/pinned-donor/untracked.txt"
                 ],
             )
+
+    def test_inventory_donor_case_sources_reject_an_untracked_pinned_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "source"
+            root.mkdir()
+            donors_root = Path(directory) / "donors"
+            donors_root.mkdir()
+            donor = donors_root / "go-libp2p"
+            initialize_repository(donor)
+            (donor / "tracked.txt").write_text("tracked\n")
+            revision = commit(donor, "pinned")
+            cases = [{
+                "id": "registered-case",
+                "mapping_state": "registered",
+                "donor_file": ["donors/go-libp2p/tracked.txt"],
+            }]
+            self.assertEqual(
+                donor_case_source_errors(root, cases, {"go-libp2p": revision}, donors_root),
+                [],
+            )
+
+            (donor / "untracked.txt").write_text("mutable checkout path\n")
+            cases[0]["donor_file"] = ["donors/go-libp2p/untracked.txt"]
+            errors = donor_case_source_errors(root, cases, {"go-libp2p": revision}, donors_root)
+            self.assertEqual(errors, [
+                "donor case registered-case: donor source is absent from pinned revision: "
+                "donors/go-libp2p/untracked.txt"
+            ])
+            self.assertEqual(promotion_status(0, errors), "FAILED")
 
     def test_matching_invalid_revision_maps_block_inventory_and_donor_gates(self) -> None:
         root = Path(__file__).parents[2]

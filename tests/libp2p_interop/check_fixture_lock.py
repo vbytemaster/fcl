@@ -157,22 +157,6 @@ def main() -> int:
             donors, canonical_donor_revisions
         )
         errors.extend(binding_errors)
-        expected_names = {"go-libp2p", "rust-libp2p", "go-kad", "go-pubsub", "libp2p-specs"}
-        seen_names = set()
-        for donor in donors:
-            if not isinstance(donor, dict):
-                errors.append("fixture lock donor entry must be an object")
-                continue
-            name = donor.get("name")
-            directory = donor.get("directory")
-            commit = donor.get("commit")
-            tree = donor.get("tree")
-            if not all(isinstance(value, str) and value for value in (name, directory, commit, tree)):
-                errors.append(f"fixture lock donor entry is invalid: {donor}")
-                continue
-            seen_names.add(name)
-        if seen_names != expected_names:
-            errors.append("fixture lock donor names do not match the pinned donor set")
         if not binding_errors:
             errors.extend(
                 fixture_donor_checkout_errors(donors_root, donors, canonical_donor_revisions)

@@ -1054,6 +1054,8 @@ def run_pair_with_transport(dialer_binary: Path, dialer: str, listener_binary: P
                 "command": server.command,
                 "log_file": str(server.log_file),
                 "terminal_status": server.terminal_status,
+                "peer_id": peer_id,
+                "listen_addrs": server.ready.get("listen_addrs", []),
             },
             "result": result,
             "listener_result": delivered,
