@@ -674,11 +674,17 @@ def main() -> int:
             )
 
     required_semantics = {
+        "protocol.ping": (
+            {"native", "private_network"}, "required", "enabled", "go_and_rust", "current"
+        ),
+        "reachability.periodic_ping_liveness": (
+            {"native", "private_network"}, "required", "opt_in", "not_applicable", "stage_6"
+        ),
         "reachability.autonat_v1_node_lifecycle": (
-            {"native", "private_network"}, "required", "opt_in", "go_and_rust", "stage_6"
+            {"native", "private_network"}, "required", "opt_in", "not_applicable", "stage_6"
         ),
         "reachability.autonat_v2_address_lifecycle": (
-            {"native", "private_network"}, "required", "opt_in", "go_and_rust", "stage_6"
+            {"native", "private_network"}, "required", "opt_in", "not_applicable", "stage_6"
         ),
         "reachability.private_internet_policy": (
             {"private_network"}, "required", "opt_in", "not_applicable", "stage_6"
@@ -717,6 +723,12 @@ def main() -> int:
             {"native", "private_network"}, "required", "opt_in", "go_and_rust", "stage_6"
         ),
         "protocol.autonat_v1_service": (
+            {"native", "private_network"}, "optional", "opt_in", "go_and_rust", "stage_6"
+        ),
+        "protocol.autonat_v2_client": (
+            {"native", "private_network"}, "required", "opt_in", "go_and_rust", "stage_6"
+        ),
+        "protocol.autonat_v2_service": (
             {"native", "private_network"}, "optional", "opt_in", "go_and_rust", "stage_6"
         ),
     }
@@ -881,19 +893,45 @@ def main() -> int:
             errors.append(f"donor capability {capability_id}: Stage 6 registry owner differs from planned_branch")
 
     for capability_id, capability in capabilities_by_id.items():
-        dependencies = capability.get("capability_dependencies", [])
-        if not isinstance(dependencies, list) or any(
-            not isinstance(dependency, str) or dependency not in capabilities_by_id
-            for dependency in dependencies
-        ) or len(set(dependencies)) != len(dependencies):
-            errors.append(f"donor capability {capability_id}: capability_dependencies must name unique capabilities")
-    nat_mapping = capabilities_by_id.get("nat.upnp_mapping")
-    if nat_mapping is None or nat_mapping.get("capability_dependencies") != [
-        "reachability.private_internet_policy"
-    ]:
-        errors.append(
-            "donor capability nat.upnp_mapping: must depend explicitly on reachability.private_internet_policy"
-        )
+        if "capability_dependencies" in capability:
+            errors.append(
+                f"donor capability {capability_id}: global capability_dependencies are not allowed"
+            )
+        profile_dependencies = capability.get("profile_dependencies", {})
+        capability_profiles = capability.get("profiles", [])
+        if not isinstance(profile_dependencies, dict) or any(
+            not isinstance(profile, str)
+            or profile not in capability_profiles
+            or not isinstance(dependencies, list)
+            or not dependencies
+            or any(
+                not isinstance(dependency, str) or dependency not in capabilities_by_id
+                for dependency in dependencies
+            )
+            or len(set(dependencies)) != len(dependencies)
+            for profile, dependencies in profile_dependencies.items()
+        ):
+            errors.append(
+                f"donor capability {capability_id}: profile_dependencies must name unique capabilities for its own profiles"
+            )
+
+    private_policy_dependents = {
+        "reachability.autonat_v1_node_lifecycle",
+        "reachability.autonat_v2_address_lifecycle",
+        "protocol.autonat_v1_client",
+        "protocol.autonat_v1_service",
+        "protocol.autonat_v2_client",
+        "protocol.autonat_v2_service",
+        "nat.upnp_mapping",
+    }
+    for capability_id in private_policy_dependents:
+        capability = capabilities_by_id.get(capability_id)
+        if capability is None or capability.get("profile_dependencies") != {
+            "private_network": ["reachability.private_internet_policy"]
+        }:
+            errors.append(
+                f"donor capability {capability_id}: private profile must depend only on reachability.private_internet_policy"
+            )
 
     interop_registry = capability_inventory.get("interop_acceptance_registry")
     if not isinstance(interop_registry, dict) or set(interop_registry) != {
@@ -909,17 +947,21 @@ def main() -> int:
         "required_fields": [
             "schema_version",
             "head",
-            "runner_command",
+            "manifest_sha256",
+            "runner_argv",
             "started_at_unix",
             "finished_at_unix",
             "capability_results",
-            "artifact_paths",
         ],
         "result_required_fields": [
             "capability_id",
             "scenario_id",
+            "profile",
+            "transport_stack",
+            "activation",
             "directions",
             "status",
+            "evidence",
         ],
         "allowed_result_statuses": ["passed", "limited"],
         "passing_status": "passed",
@@ -956,6 +998,10 @@ def main() -> int:
         "go_only_rust_limited": "rust",
         "rust_only_go_limited": "go",
     }
+    allowed_profile_transport_stacks = {
+        "native": {("quic",), ("tcp", "yamux")},
+        "private_network": {("tcp", "yamux", "pnet")},
+    }
     seen_scenario_ids: set[str] = set()
     for capability_id, acceptance in acceptance_capabilities.items():
         capability = capabilities_by_id.get(capability_id, {})
@@ -985,23 +1031,48 @@ def main() -> int:
             continue
         expected_primary_directions = expected_directions.get(applicability, set())
         has_primary_scenario = False
+        has_registered_scenario = False
         for scenario in scenarios:
             if not isinstance(scenario, dict):
                 errors.append(f"donor capability {capability_id}: acceptance scenario must be an object")
                 continue
-            allowed_scenario_fields = {"id", "required_directions", "expected_status"}
-            if capability.get("decision") == "current":
+            registration = scenario.get("registration")
+            allowed_scenario_fields = {
+                "id",
+                "profile",
+                "transport_stack",
+                "activation",
+                "registration",
+                "required_directions",
+                "expected_status",
+            }
+            if registration == "registered":
                 allowed_scenario_fields |= {"runner_scenario_id", "source_case_id"}
+            elif registration == "planned" and "requires_capabilities" in scenario:
+                allowed_scenario_fields.add("requires_capabilities")
             if set(scenario) != allowed_scenario_fields:
                 errors.append(f"donor capability {capability_id}: acceptance scenario has invalid shape")
                 continue
             scenario_id = scenario.get("id")
+            profile = scenario.get("profile")
+            transport_stack = scenario.get("transport_stack")
+            activation = scenario.get("activation")
             directions = scenario.get("required_directions")
             expected_status = scenario.get("expected_status")
             if not isinstance(scenario_id, str) or not scenario_id or scenario_id in seen_scenario_ids:
                 errors.append(f"donor capability {capability_id}: acceptance scenario id must be globally unique")
             elif scenario_id:
                 seen_scenario_ids.add(scenario_id)
+            stack = tuple(transport_stack) if isinstance(transport_stack, list) else ()
+            if (
+                not isinstance(profile, str)
+                or profile not in capability.get("profiles", [])
+                or stack not in allowed_profile_transport_stacks.get(profile, set())
+                or activation != "enabled"
+            ):
+                errors.append(
+                    f"donor capability {capability_id}: acceptance profile, transport stack or activation is invalid"
+                )
             if not isinstance(directions, list) or any(
                 not isinstance(direction, str) or direction not in {
                     "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge"
@@ -1014,7 +1085,12 @@ def main() -> int:
                 errors.append(f"donor capability {capability_id}: acceptance status is invalid")
             if expected_status == "passed" and set(directions) == expected_primary_directions:
                 has_primary_scenario = True
-            if capability.get("decision") == "current":
+            if registration == "registered":
+                has_registered_scenario = True
+                if capability.get("decision") != "current":
+                    errors.append(
+                        f"donor capability {capability_id}: staged scenario cannot claim current runner registration"
+                    )
                 runner_scenario_id = scenario.get("runner_scenario_id")
                 source_case_id = scenario.get("source_case_id")
                 source_case = donor_by_id.get(source_case_id)
@@ -1038,10 +1114,31 @@ def main() -> int:
                         errors.append(
                             f"donor capability {capability_id}: donor case does not match required donor implementations"
                         )
-            elif "runner_scenario_id" in scenario or "source_case_id" in scenario:
-                errors.append(f"donor capability {capability_id}: staged scenario cannot claim current runner registration")
+            elif registration == "planned":
+                required_capabilities = scenario.get("requires_capabilities", [])
+                if not isinstance(required_capabilities, list) or any(
+                    not isinstance(required, str)
+                    or capabilities_by_id.get(required, {}).get("decision") != "stage_6"
+                    for required in required_capabilities
+                ) or len(set(required_capabilities)) != len(required_capabilities):
+                    errors.append(
+                        f"donor capability {capability_id}: planned scenario has invalid Stage 6 prerequisites"
+                    )
+                if capability.get("decision") == "current" and (
+                    profile != "private_network"
+                    or required_capabilities != ["security.private_network_psk"]
+                ):
+                    errors.append(
+                        f"donor capability {capability_id}: current planned scenario must be the private PSK comprehensive gate"
+                    )
+            else:
+                errors.append(
+                    f"donor capability {capability_id}: acceptance registration must be registered or planned"
+                )
         if not has_primary_scenario:
             errors.append(f"donor capability {capability_id}: acceptance lacks its primary directions")
+        if capability.get("decision") == "current" and not has_registered_scenario:
+            errors.append(f"donor capability {capability_id}: current acceptance needs a registered runner scenario")
 
         if applicability in limitation_implementation:
             limitation = acceptance.get("limitation")
@@ -1067,19 +1164,56 @@ def main() -> int:
                 errors.append(f"donor capability {capability_id}: explicit {expected_implementation} limitation is invalid")
 
     required_stage_6_scenarios = {
-        "reachability.autonat_v1_node_lifecycle": {"autonat_v1"},
-        "reachability.autonat_v2_address_lifecycle": {"autonat_v2"},
+        "protocol.autonat_v1_client": {
+            "autonat_v1_client",
+            "autonat_v1_client_native_tcp_yamux",
+            "autonat_v1_client_private_tcp_yamux_pnet",
+        },
+        "protocol.autonat_v1_service": {
+            "autonat_v1_service",
+            "autonat_v1_service_native_tcp_yamux",
+            "autonat_v1_service_private_tcp_yamux_pnet",
+        },
+        "protocol.autonat_v2_client": {
+            "autonat_v2_client",
+            "autonat_v2_client_native_tcp_yamux",
+            "autonat_v2_client_private_tcp_yamux_pnet",
+        },
+        "protocol.autonat_v2_service": {
+            "autonat_v2_service",
+            "autonat_v2_service_native_tcp_yamux",
+            "autonat_v2_service_private_tcp_yamux_pnet",
+        },
         "relay.circuit_v2_service": {"relay_v2_service"},
         "relay.dcutr": {"dcutr"},
-        "pubsub.gossipsub_v1_0_v1_1": {"gossipsub_v1_0_v1_1"},
+        "pubsub.gossipsub_v1_0_v1_1": {
+            "gossipsub_v1_0_v1_1",
+            "gossipsub_v1_0_v1_1_native_tcp_yamux",
+            "gossipsub_v1_0_v1_1_private_tcp_yamux_pnet",
+        },
         "discovery.mdns_public": {"mdns_public"},
-        "addressing.dnsaddr": {"dnsaddr"},
+        "addressing.dnsaddr": {"dnsaddr", "dnsaddr_private_tcp_yamux_pnet"},
         "security.private_network_psk": {"pnet"},
-        "pubsub.gossipsub_v1_2": {"gossipsub_v1_2"},
-        "pubsub.gossipsub_v1_3": {"gossipsub_v1_3"},
-        "pubsub.partial_messages": {"partial_messages"},
+        "pubsub.gossipsub_v1_2": {
+            "gossipsub_v1_2",
+            "gossipsub_v1_2_native_tcp_yamux",
+            "gossipsub_v1_2_private_tcp_yamux_pnet",
+        },
+        "pubsub.gossipsub_v1_3": {
+            "gossipsub_v1_3",
+            "gossipsub_v1_3_native_tcp_yamux",
+            "gossipsub_v1_3_private_tcp_yamux_pnet",
+        },
+        "pubsub.partial_messages": {
+            "partial_messages",
+            "partial_messages_native_tcp_yamux",
+            "partial_messages_private_tcp_yamux_pnet",
+        },
         "connections.inlined_muxer_negotiation": {
-            "inline_muxer_go", "inline_muxer_rust_fallback"
+            "inline_muxer_go",
+            "inline_muxer_go_private_pnet",
+            "inline_muxer_rust_fallback",
+            "inline_muxer_rust_fallback_private_pnet",
         },
     }
     for capability_id, expected_ids in required_stage_6_scenarios.items():
@@ -1099,7 +1233,9 @@ def main() -> int:
     }
     if inlined_shape != {
         ("inline_muxer_go", ("forge_to_go", "go_to_forge"), "passed"),
+        ("inline_muxer_go_private_pnet", ("forge_to_go", "go_to_forge"), "passed"),
         ("inline_muxer_rust_fallback", ("forge_to_rust", "rust_to_forge"), "limited"),
+        ("inline_muxer_rust_fallback_private_pnet", ("forge_to_rust", "rust_to_forge"), "limited"),
     }:
         errors.append("donor capability connections.inlined_muxer_negotiation: Go inline and Rust fallback scenarios are required")
 
@@ -1113,6 +1249,22 @@ def main() -> int:
     if not isinstance(noise_tls_sources, list) or not required_noise_tls_sources <= set(noise_tls_sources):
         errors.append("donor capability security.noise_tls_identity: exact Noise and TLS donor paths are required")
 
+    inlined_muxer_sources = capabilities_by_id.get(
+        "connections.inlined_muxer_negotiation", {}
+    ).get("donor_sources", [])
+    required_inlined_muxer_sources = {
+        "donors/go-libp2p/p2p/security/noise/handshake.go",
+        "donors/go-libp2p/p2p/security/tls/crypto.go",
+        "donors/rust-libp2p/transports/noise/src/lib.rs",
+        "donors/rust-libp2p/transports/tls/src/upgrade.rs",
+    }
+    if not isinstance(inlined_muxer_sources, list) or not required_inlined_muxer_sources <= set(
+        inlined_muxer_sources
+    ):
+        errors.append(
+            "donor capability connections.inlined_muxer_negotiation: Go TLS/Noise and Rust ALPN/extensions donors are required"
+        )
+
     gossipsub_v13 = capabilities_by_id.get("pubsub.gossipsub_v1_3", {})
     v13_rationale = gossipsub_v13.get("rationale", "")
     if not isinstance(v13_rationale, str) or not all(
@@ -1120,9 +1272,21 @@ def main() -> int:
         for phrase in ("first-rpc", "unknown", "capability matching")
     ):
         errors.append("donor capability pubsub.gossipsub_v1_3: v1.3 first-RPC advertisement semantics are required")
+    v13_sources = gossipsub_v13.get("donor_sources", [])
+    required_v13_sources = {
+        "donors/go-libp2p-pubsub/extensions.go",
+        "donors/rust-libp2p/protocols/gossipsub/src/behaviour.rs",
+    }
+    if not isinstance(v13_sources, list) or not required_v13_sources <= set(v13_sources):
+        errors.append(
+            "donor capability pubsub.gossipsub_v1_3: Go first-RPC and Rust advertisement donors are required"
+        )
 
     host_local_policy_ids = {
         "reachability.private_internet_policy",
+        "reachability.periodic_ping_liveness",
+        "reachability.autonat_v1_node_lifecycle",
+        "reachability.autonat_v2_address_lifecycle",
         "security.connection_gater",
         "resource.memory_fd_transient_service_scopes",
         "dialing.happy_eyeballs",
@@ -1140,6 +1304,22 @@ def main() -> int:
         elif capability.get("interop_applicability") != "not_applicable":
             errors.append(
                 f"donor capability {capability_id}: host-local orchestration cannot claim bilateral interop"
+            )
+
+    forge_policy_extensions = {
+        "discovery.mdns_private_fingerprinted",
+        "reachability.private_internet_policy",
+    }
+    for capability_id in forge_policy_extensions:
+        capability = capabilities_by_id.get(capability_id)
+        if (
+            capability is None
+            or capability.get("origin") != "forge_extension"
+            or capability.get("forge_sources")
+            != ["docs/iterations/forge-p2p-production-implementation-v1.md"]
+        ):
+            errors.append(
+                f"donor capability {capability_id}: must remain a Forge extension with its design source"
             )
 
     gossipsub_branch_owners = {

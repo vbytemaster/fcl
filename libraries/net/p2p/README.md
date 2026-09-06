@@ -36,8 +36,10 @@ The following surfaces are not production claims yet:
 - Rendezvous currently has registered Forge/Rust directions only. Go is an
   explicit limitation because no official Go rendezvous behaviour donor is
   pinned; this is not a claim of Go compatibility;
-- Ping sampling, AutoNAT v1 node-level reachability and AutoNAT v2 address-level
-  evidence are not yet inputs to the managed topology score;
+- the Go/Rust Ping wire protocol is current; bounded periodic Ping health
+  sampling, AutoNAT v1 node-level reachability and AutoNAT v2 address-level
+  evidence remain separate Stage 6 host-local inputs to the managed topology
+  score;
 - observed-address confidence/expiry, public mDNS, private fingerprinted mDNS,
   DNSAddr, the private TCP/Yamux transport PSK layer, optional native UPnP
   mapping, adaptive Happy Eyeballs, IPv6 black-hole detection for native/private
@@ -79,10 +81,23 @@ chrono and crypto prerequisite PRs own none.
 The source inventory checker validates this registration only and never emits a
 live interop PASS. Such a PASS requires a separate external artifact matching
 `interop_acceptance_registry.artifact_schema` at the exact reviewed `HEAD`, with
-the runner command, times, each capability-specific scenario, its required
-directions/status and existing artifact paths. Current capability scenarios must
-also be registered in the live runner; future Stage 6 scenario IDs cannot count
-as evidence. Missing, stale or incomplete artifacts are `NOT_RUN`.
+the manifest SHA-256, canonical structured runner argv, commit-bound timestamps,
+each capability-specific scenario and a unique SHA-256-verified evidence file
+for every direction. The checked-out tracked tree must be clean. Current
+capability scenarios must also be registered in the live runner. Every artifact
+result repeats the registry's profile, transport stack and enabled-run state, so
+native QUIC, native TCP/Yamux and private TCP/Yamux+pnet are independent proofs.
+An optional capability is tested only as an explicit enabled run, never inferred
+to be a default. Planned Stage 6 scenario IDs are comprehensive acceptance
+requirements, not runner registration or evidence. Missing, stale or incomplete artifacts
+are `NOT_RUN`; a documented limitation reports
+`PASS_WITH_DOCUMENTED_LIMITATIONS`, never plain `PASS`.
+
+`test_forge_p2p_inventory` remains the paired source-manifest gate. CMake runs
+actual artifact validation only when
+`FORGE_P2P_STAGE6_ACCEPTANCE_ARTIFACT` is configured; without that cache path,
+PR0 runs only source validation and the deterministic acceptance-checker
+self-test.
 
 `discovery::policy` and `node::limits::discovery` remain Stable source
 compatibility surfaces. Node construction normalizes non-default legacy values
@@ -158,9 +173,11 @@ TCP+TLS/Noise+Yamux direct paths are wired through private direct profiles.
 Future transports must plug into the same multiaddr and transport session
 boundary, not fork P2P core. The private profile is TCP/Yamux plus a transport
 PSK layer before the normal secure channel, not a negotiated `/pnet` protocol
-ID. It excludes QUIC, Relay and DCUtR; AutoNAT and UPnP require explicit
-private-profile Internet egress. Public mDNS has Go/Rust interop; fingerprinted
-private mDNS is Go-compatible with a documented Rust limitation.
+ID. It excludes QUIC, Relay and DCUtR; AutoNAT lifecycle/client/service and
+UPnP each require explicit private-profile Internet egress, while native runs do
+not inherit that dependency. Public mDNS has Go/Rust interop; fingerprinted
+private mDNS is a Forge extension informed by donors and is Go-compatible with
+a documented Rust limitation.
 
 The direct QUIC profile keeps a bounded, peer-scoped cache of opaque QUIC
 `NEW_TOKEN` values only for authenticated expected peers. Its key includes the
@@ -184,10 +201,12 @@ Network-level behaviors that must not be pushed into plugins:
 - network limits, backpressure, metrics and shutdown behavior.
 
 Stage 6 must add typed host events and periodic Ping liveness within
-`forge_net_p2p`. `plugins.p2p.node` may map the validated configuration and
+`forge_net_p2p`; this host-local policy is distinct from the already current
+Ping wire protocol. `plugins.p2p.node` may map the validated configuration and
 consume narrow local events, but it must not own Ping, observed-address,
-AutoNAT, mDNS, UPnP or topology maintenance loops. Coordinated direct dial and
-port reuse replace the deprecated `/libp2p/simultaneous-connect` negotiation.
+AutoNAT lifecycle, mDNS, UPnP or topology maintenance loops. Coordinated direct
+dial and port reuse replace the deprecated `/libp2p/simultaneous-connect`
+negotiation.
 
 Circuit Relay v2 reservations belong to authenticated peer sessions. Renewal
 keeps the same reservation generation and active-circuit accounting; the final

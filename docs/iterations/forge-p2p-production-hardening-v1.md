@@ -780,8 +780,9 @@ corresponding Forge facility exists.
 ### Stage 6: Donor Parity, Reachability And Path Management
 
 - build one observed-address/effective-reachability service from independent
-  Identify, v1 node-level and v2 address-level AutoNAT observations, expiry and
-  bounded Ping liveness; client and opt-in service roles have independent gates;
+  Identify, host-local v1 node-level and v2 address-level AutoNAT observations,
+  expiry and bounded periodic Ping liveness; Ping and AutoNAT client/service
+  wire roles retain independent Go/Rust gates;
 - add public Go/Rust mDNS, private fingerprinted mDNS with its Rust limitation,
   and DNSAddr discovery without parallel topology loops;
 - add the PSK transport layer as an explicit TCP/Yamux private profile, with no
@@ -814,15 +815,32 @@ The exact order, dependency DAG and permitted capability owners are locked by
 crypto prerequisite PRs deliberately own no capability entries. The
 `interop_acceptance_registry` is source-only registration. It cannot produce an execution
 PASS: release acceptance requires an external exact-`HEAD` artifact with the
-declared runner command, timing, capability-specific scenarios, their declared
-directions/status and existing artifact paths. An absent, stale or incomplete
-artifact is `NOT_RUN`.
+manifest SHA-256, canonical structured runner argv, commit-bound timing,
+capability-specific profile, transport-stack and enabled-run scenarios and
+distinct SHA-256-verified evidence files per direction. Native QUIC, native
+TCP/Yamux and private TCP/Yamux+pnet are separate evidence scopes; an enabled
+optional run is not a default-activation claim. The checked-out tracked tree
+must be clean. `limited` is allowed only
+for a registry-classified limitation and yields
+`PASS_WITH_DOCUMENTED_LIMITATIONS`; an absent, stale or incomplete artifact is
+`NOT_RUN`. The inventory checker remains the paired source-manifest gate, while
+the CMake artifact gate is opt-in through
+`FORGE_P2P_STAGE6_ACCEPTANCE_ARTIFACT`; PR0 itself remains source-only.
+
+The manifest's inline-muxer evidence names Go TLS and Noise support plus the
+pinned Rust TLS fixed-ALPN and Noise extension/fallback paths. Its GossipSub
+v1.3 evidence names Go `extensions.go` first-RPC behavior and Rust
+`behaviour.rs` advertisement handling in addition to codec/spec sources.
 
 Private-network and address-resolution depend on host protection; path
 management also depends on address resolution. Reachability has no direct
 address-resolution dependency because AutoNAT, Ping and observed-address policy
 operate on configured or Identify-observed endpoints and do not resolve
-`/dnsaddr`. Rendezvous is Rust-supported with an explicit Go limitation: no
+`/dnsaddr`. In the private profile, every AutoNAT lifecycle/client/service role
+and UPnP depends on the Forge-owned Internet-egress policy; native roles do not.
+Private fingerprinted mDNS and that egress policy are Forge extensions informed
+by donor patterns and limitations, not donor-spec claims. Rendezvous is
+Rust-supported with an explicit Go limitation: no
 official Go rendezvous behaviour donor is pinned, so it cannot be presented as
 Go-compatible.
 

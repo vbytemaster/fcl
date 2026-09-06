@@ -1087,6 +1087,12 @@ set(FORGE_P2P_INVENTORY_CHECK ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/check_p
 set(FORGE_P2P_STAGE6_ACCEPTANCE_CHECK
    ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/check_stage6_acceptance.py
 )
+set(
+   FORGE_P2P_STAGE6_ACCEPTANCE_ARTIFACT
+   ""
+   CACHE FILEPATH
+   "Optional exact-head Stage 6 interop acceptance artifact; empty keeps PR0 source-only"
+)
 add_custom_target(
    test_forge_p2p_inventory
    COMMAND ${Python3_EXECUTABLE}
@@ -1116,6 +1122,46 @@ add_test(
    COMMAND ${Python3_EXECUTABLE} ${FORGE_P2P_STAGE6_ACCEPTANCE_CHECK} --self-test
    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
+
+if(FORGE_P2P_STAGE6_ACCEPTANCE_ARTIFACT)
+   get_filename_component(
+      _forge_p2p_stage6_acceptance_artifact
+      "${FORGE_P2P_STAGE6_ACCEPTANCE_ARTIFACT}"
+      ABSOLUTE
+      BASE_DIR "${CMAKE_BINARY_DIR}"
+   )
+   execute_process(
+      COMMAND git -C ${CMAKE_SOURCE_DIR} rev-parse HEAD
+      RESULT_VARIABLE _forge_p2p_stage6_git_result
+      OUTPUT_VARIABLE _forge_p2p_stage6_expected_head
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+   )
+   if(NOT _forge_p2p_stage6_git_result EQUAL 0)
+      message(FATAL_ERROR "Cannot resolve exact git HEAD for Stage 6 acceptance artifact validation")
+   endif()
+   add_custom_target(
+      test_forge_p2p_stage6_acceptance_artifact
+      COMMAND ${Python3_EXECUTABLE}
+         ${FORGE_P2P_STAGE6_ACCEPTANCE_CHECK}
+         ${CMAKE_SOURCE_DIR}
+         ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/p2p_donor_capabilities.json
+         ${_forge_p2p_stage6_acceptance_artifact}
+         ${_forge_p2p_stage6_expected_head}
+      DEPENDS test_forge_p2p_inventory
+      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+      VERBATIM
+   )
+   add_test(
+      NAME test_forge_p2p_stage6_acceptance_artifact
+      COMMAND ${Python3_EXECUTABLE}
+         ${FORGE_P2P_STAGE6_ACCEPTANCE_CHECK}
+         ${CMAKE_SOURCE_DIR}
+         ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/p2p_donor_capabilities.json
+         ${_forge_p2p_stage6_acceptance_artifact}
+         ${_forge_p2p_stage6_expected_head}
+      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+   )
+endif()
 
 add_executable(
    test_forge_plugins
