@@ -90,6 +90,15 @@ struct RendezvousLifecycleEvidence {
     final_registration_count: usize,
 }
 
+#[derive(Debug)]
+struct RelayReservationEvidence {
+    accepted: bool,
+    relay_peer_id: String,
+    client_peer_id: String,
+    circuit_addr: String,
+    renewal: bool,
+}
+
 const RENDEZVOUS_LIFECYCLE_MIN_TTL_SECONDS: u64 = 2;
 const RENDEZVOUS_LIFECYCLE_MAX_TTL_SECONDS: u64 = 3;
 const RENDEZVOUS_LIFECYCLE_TIMING_MARGIN: Duration = Duration::from_millis(200);
@@ -302,6 +311,65 @@ fn observed_quic_transport(endpoint: &libp2p::core::ConnectedPoint) -> Option<&'
         .iter()
         .any(|protocol| matches!(protocol, Protocol::QuicV1))
         .then_some("/quic-v1")
+}
+
+async fn reserve_relay_address(
+    swarm: &mut libp2p::Swarm<Behaviour>,
+    relay_peer: PeerId,
+    relay_addr: Multiaddr,
+) -> Result<RelayReservationEvidence, Box<dyn Error>> {
+    let client_peer = *swarm.local_peer_id();
+    let base_circuit_addr = transport_addr(relay_addr)
+        .with(Protocol::P2p(relay_peer))
+        .with(Protocol::P2pCircuit);
+    let expected_circuit_addr = base_circuit_addr.clone().with(Protocol::P2p(client_peer));
+    let relay_listener_id = swarm.listen_on(base_circuit_addr)?;
+    let mut accepted_renewal = None;
+    let mut observed_circuit_addr = None;
+    let deadline = tokio::time::sleep(Duration::from_secs(20));
+    tokio::pin!(deadline);
+
+    loop {
+        tokio::select! {
+            _ = &mut deadline => {
+                return Err("timed out waiting for relay reservation acceptance and circuit address".into());
+            }
+            event = swarm.select_next_some() => match event {
+                SwarmEvent::NewListenAddr { listener_id, address, .. }
+                    if listener_id == relay_listener_id && address == expected_circuit_addr =>
+                {
+                    swarm.add_external_address(address.clone());
+                    observed_circuit_addr = Some(address.to_string());
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::RelayClient(
+                    relay::client::Event::ReservationReqAccepted {
+                        relay_peer_id,
+                        renewal,
+                        ..
+                    },
+                )) if relay_peer_id == relay_peer => {
+                    if renewal {
+                        return Err("initial relay reservation unexpectedly reported renewal=true".into());
+                    }
+                    accepted_renewal = Some(renewal);
+                }
+                other => {
+                    eprintln!("rust relay reservation event: {other:?}");
+                }
+            },
+        }
+        if let (Some(renewal), Some(circuit_addr)) =
+            (accepted_renewal, observed_circuit_addr.take())
+        {
+            return Ok(RelayReservationEvidence {
+                accepted: true,
+                relay_peer_id: relay_peer.to_string(),
+                client_peer_id: client_peer.to_string(),
+                circuit_addr,
+                renewal,
+            });
+        }
+    }
 }
 
 async fn read_frame<S>(stream: &mut S) -> Result<Vec<u8>, Box<dyn Error>>
@@ -1622,8 +1690,25 @@ async fn dial(opts: Options) -> Result<(), Box<dyn Error>> {
             open_required_stream(&mut swarm, remote_peer, "/libp2p/autonat/2/dial-request").await?;
         }
         "relay_reserve" => {
-            open_required_stream(&mut swarm, remote_peer, "/libp2p/circuit/relay/0.2.0/hop")
-                .await?;
+            let reservation =
+                reserve_relay_address(&mut swarm, remote_peer, remote.clone()).await?;
+            write_json(
+                &opts.result_file,
+                json!({
+                    "implementation": "rust",
+                    "role": "dialer",
+                    "scenario": opts.scenario,
+                    "status": "ok",
+                    "negotiated_transport": negotiated_transport,
+                    "authenticated_remote_peer_id": authenticated_remote_peer_id,
+                    "relay_reservation_accepted": reservation.accepted,
+                    "relay_reservation_relay_peer_id": reservation.relay_peer_id,
+                    "relay_reservation_client_peer_id": reservation.client_peer_id,
+                    "relay_reservation_circuit_addr": reservation.circuit_addr,
+                    "relay_reservation_renewal": reservation.renewal
+                }),
+            )?;
+            return Ok(());
         }
         "echo" | "echo_large" => {
             let payload = if opts.scenario == "echo_large" {
@@ -1832,7 +1917,6 @@ async fn dial(opts: Options) -> Result<(), Box<dyn Error>> {
             "scenario": opts.scenario,
             "status": "ok",
             "ping_ok": ping_ok,
-            "relay_hop_stream_opened": opts.scenario == "relay_reserve",
             "protocol_count": identify_count,
             "signed_peer_record": identify_signed_record,
             "negotiated_transport": negotiated_transport,

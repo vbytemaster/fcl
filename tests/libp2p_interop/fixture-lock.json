@@ -31,7 +31,7 @@
     "go_fixture/main.go": "a3df61259aeb2c3759c29421a5513bc86ab3f28510547687545895fbda1dcf19",
     "rust_fixture/Cargo.lock": "14b5e00e49ffa65cc10ff42c2ec0ad49d7d3654846f749ca12d8e80090a6d781",
     "rust_fixture/Cargo.toml": "a4992715e8f7eaa9576f9f8b9a877b52bb847eb0af0ec70e9078c8113b85d71e",
-    "rust_fixture/main.rs": "1dd30771ac5e3e3e77b1ee7fe23a1e98e310a8ebca3633e70c4a5e8fabf5f9d4",
+    "rust_fixture/main.rs": "4a1995ba1d8400122611021c08c939891c829e06b7e41697412a2a18276b5122",
     "rust_fixture/rust-toolchain.toml": "32d99b8237d5832435d362c395422d69f52348a9fd1a154f70336d2991403064"
   },
   "runtime_artifact_sources": {

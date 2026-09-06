@@ -1261,6 +1261,8 @@
       "donor_sources": [
         "donors/libp2p-specs/connections/simopen.md",
         "donors/go-libp2p/p2p/net/swarm/swarm_dial.go",
+        "donors/go-libp2p/p2p/net/swarm/dial_worker.go",
+        "donors/go-libp2p/p2p/transport/tcp/tcp.go",
         "donors/rust-libp2p/swarm/src/connection/pool.rs",
         "donors/rust-libp2p/swarm/src/dial_opts.rs",
         "donors/rust-libp2p/transports/tcp/src/lib.rs"

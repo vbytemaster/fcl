@@ -711,8 +711,30 @@ def validate_relay_client_evidence(result: dict, _record: dict, _listener: Optio
         and result["reservation_addrs"]
     ):
         return []
-    if implementation == "rust" and result.get("relay_hop_stream_opened") is True:
-        return []
+    if implementation == "rust":
+        relay_peer = _record.get("peer_id")
+        client_peer = result.get("relay_reservation_client_peer_id")
+        circuit_addr = result.get("relay_reservation_circuit_addr")
+        expected_circuit_suffix = (
+            f"/p2p/{relay_peer}/p2p-circuit/p2p/{client_peer}"
+            if nonempty_string(relay_peer) and nonempty_string(client_peer)
+            else ""
+        )
+        if (
+            result.get("relay_reservation_accepted") is True
+            and nonempty_string(relay_peer)
+            and result.get("relay_reservation_relay_peer_id") == relay_peer
+            and nonempty_string(client_peer)
+            and nonempty_string(circuit_addr)
+            and circuit_addr.endswith(expected_circuit_suffix)
+            and result.get("relay_reservation_renewal") is False
+            and result.get("authenticated_remote_peer_id") == relay_peer
+            and result.get("negotiated_transport") == "/quic-v1"
+        ):
+            return []
+        return [
+            "Rust relay client evidence lacks a correlated ReservationReqAccepted event and confirmed circuit address"
+        ]
     return ["relay client evidence lacks an implementation-specific reservation/open proof"]
 
 
@@ -1252,6 +1274,26 @@ def semantic_fixture(scenario_id: str) -> tuple[dict, dict, Optional[dict]]:
     return result, record, None
 
 
+def rust_relay_reservation_fixture() -> tuple[dict, dict, Optional[dict]]:
+    """Observed Rust relay-client event fields required for the reservation contract."""
+    result, record, listener = semantic_fixture("relay_v2_client_transport")
+    result.update({
+        "implementation": "rust",
+        "negotiated_transport": "/quic-v1",
+        "authenticated_remote_peer_id": record["peer_id"],
+        "relay_reservation_accepted": True,
+        "relay_reservation_relay_peer_id": record["peer_id"],
+        "relay_reservation_client_peer_id": "rust-client-peer",
+        "relay_reservation_circuit_addr": (
+            f"/ip4/127.0.0.1/udp/4001/quic-v1/p2p/{record['peer_id']}"
+            "/p2p-circuit/p2p/rust-client-peer"
+        ),
+        "relay_reservation_renewal": False,
+    })
+    result.pop("voucher_bytes")
+    return result, record, listener
+
+
 def fixture_identity(root: Path) -> dict[str, object]:
     return worktree_identity(root).as_json()
 
@@ -1443,6 +1485,44 @@ def self_test() -> int:
             if not validator(result, record, listener):
                 print(f"self-test failed: {scenario_id} accepted without {field}", file=sys.stderr)
                 return 1
+    rust_relay, relay_record, relay_listener = rust_relay_reservation_fixture()
+    if validate_relay_client_evidence(rust_relay, relay_record, relay_listener):
+        print("self-test failed: valid Rust relay reservation fixture was rejected", file=sys.stderr)
+        return 1
+    for field in (
+        "relay_reservation_accepted",
+        "relay_reservation_relay_peer_id",
+        "relay_reservation_client_peer_id",
+        "relay_reservation_circuit_addr",
+        "relay_reservation_renewal",
+        "authenticated_remote_peer_id",
+        "negotiated_transport",
+    ):
+        rust_relay, relay_record, relay_listener = rust_relay_reservation_fixture()
+        rust_relay.pop(field)
+        if not validate_relay_client_evidence(rust_relay, relay_record, relay_listener):
+            print(f"self-test failed: Rust relay reservation accepted without {field}", file=sys.stderr)
+            return 1
+    rust_relay, relay_record, relay_listener = rust_relay_reservation_fixture()
+    rust_relay["relay_reservation_relay_peer_id"] = "wrong-relay"
+    if not validate_relay_client_evidence(rust_relay, relay_record, relay_listener):
+        print("self-test failed: Rust relay reservation accepted an uncorrelated relay peer", file=sys.stderr)
+        return 1
+    rust_relay, relay_record, relay_listener = rust_relay_reservation_fixture()
+    rust_relay["relay_reservation_client_peer_id"] = "wrong-client"
+    if not validate_relay_client_evidence(rust_relay, relay_record, relay_listener):
+        print("self-test failed: Rust relay reservation accepted an uncorrelated client peer", file=sys.stderr)
+        return 1
+    rust_relay, relay_record, relay_listener = rust_relay_reservation_fixture()
+    rust_relay["relay_reservation_circuit_addr"] = "/ip4/127.0.0.1/udp/4001/quic-v1/p2p/wrong"
+    if not validate_relay_client_evidence(rust_relay, relay_record, relay_listener):
+        print("self-test failed: Rust relay reservation accepted an unconfirmed circuit address", file=sys.stderr)
+        return 1
+    rust_relay, relay_record, relay_listener = rust_relay_reservation_fixture()
+    rust_relay["relay_reservation_renewal"] = True
+    if not validate_relay_client_evidence(rust_relay, relay_record, relay_listener):
+        print("self-test failed: Rust relay reservation accepted renewal=true for its initial reservation", file=sys.stderr)
+        return 1
     ping, record, listener = semantic_fixture("ping")
     ping.update({"ping_ok": False, "rtt_ms": 1})
     if not validate_ping_evidence(ping, record, listener):
