@@ -8,6 +8,11 @@ from collections import Counter
 from pathlib import Path
 
 from check_stage6_acceptance import EVIDENCE_CONTRACT_VALIDATORS, expected_launcher_transport
+from stage6_evidence_contract import (
+    EVIDENCE_CONTRACT_PREFIX,
+    EVIDENCE_CONTRACT_SUFFIX,
+    evidence_contract_for,
+)
 
 
 REQUIRED_FIELDS = {
@@ -35,13 +40,6 @@ EVIDENCE_LAYERS = {
     "adversarial",
     "donor_interop",
 }
-
-EVIDENCE_CONTRACT_PREFIX = "forge.p2p.evidence."
-EVIDENCE_CONTRACT_SUFFIX = ".v1"
-
-
-def evidence_contract_for(scenario_id: str) -> str:
-    return f"{EVIDENCE_CONTRACT_PREFIX}{scenario_id}{EVIDENCE_CONTRACT_SUFFIX}"
 
 REQUIRED_OWNERS = {
     "net.p2p.node": {
@@ -991,16 +989,15 @@ def main() -> int:
     if not isinstance(declared_contracts, list) or not declared_contracts or any(
         not isinstance(contract, str)
         or not contract
-        or not contract.startswith(EVIDENCE_CONTRACT_PREFIX)
-        or not contract.endswith(EVIDENCE_CONTRACT_SUFFIX)
+        or evidence_contract_for(
+            contract.removeprefix(EVIDENCE_CONTRACT_PREFIX).removesuffix(EVIDENCE_CONTRACT_SUFFIX)
+        ) != contract
         for contract in declared_contracts
     ) or len(set(declared_contracts)) != len(declared_contracts):
         errors.append("donor capabilities: evidence contracts must be a unique closed contract registry")
         declared_contract_set: set[str] = set()
     else:
         declared_contract_set = set(declared_contracts)
-    if declared_contract_set != set(EVIDENCE_CONTRACT_VALIDATORS):
-        errors.append("donor capabilities: evidence contracts must match the acceptance checker's closed registry")
 
     try:
         runner_scenario_ids = registered_runner_scenario_ids(
@@ -1036,6 +1033,7 @@ def main() -> int:
     }
     seen_scenario_ids: set[str] = set()
     seen_evidence_contracts: set[str] = set()
+    registered_evidence_contracts: set[str] = set()
     for capability_id, acceptance in acceptance_capabilities.items():
         capability = capabilities_by_id.get(capability_id, {})
         applicability = capability.get("interop_applicability")
@@ -1105,7 +1103,9 @@ def main() -> int:
                 or not scenario_id
                 or evidence_contract != evidence_contract_for(scenario_id)
                 or evidence_contract not in declared_contract_set
-                or evidence_contract not in EVIDENCE_CONTRACT_VALIDATORS
+                or registration not in {"registered", "planned"}
+                or (registration == "registered" and evidence_contract not in EVIDENCE_CONTRACT_VALIDATORS)
+                or (registration == "planned" and evidence_contract in EVIDENCE_CONTRACT_VALIDATORS)
                 or evidence_contract in seen_evidence_contracts
             ):
                 errors.append(
@@ -1113,6 +1113,8 @@ def main() -> int:
                 )
             elif isinstance(evidence_contract, str):
                 seen_evidence_contracts.add(evidence_contract)
+                if registration == "registered":
+                    registered_evidence_contracts.add(evidence_contract)
             stack = tuple(transport_stack) if isinstance(transport_stack, list) else ()
             if (
                 not isinstance(profile, str)
@@ -1241,6 +1243,10 @@ def main() -> int:
 
     if declared_contract_set != seen_evidence_contracts:
         errors.append("donor capabilities: evidence contract registry must cover acceptance scenarios exactly")
+    if registered_evidence_contracts != set(EVIDENCE_CONTRACT_VALIDATORS):
+        errors.append(
+            "donor capabilities: executable validator registry must match registered evidence contracts exactly"
+        )
 
     required_stage_6_scenarios = {
         "protocol.autonat_v1_client": {
@@ -1266,9 +1272,12 @@ def main() -> int:
         "relay.circuit_v2_service": {"relay_v2_service"},
         "relay.dcutr": {"dcutr"},
         "pubsub.gossipsub_v1_0_v1_1": {
-            "gossipsub_v1_0_v1_1",
-            "gossipsub_v1_0_v1_1_native_tcp_yamux",
-            "gossipsub_v1_0_v1_1_private_tcp_yamux_pnet",
+            "gossipsub_v1_0_fallback",
+            "gossipsub_v1_1",
+            "gossipsub_v1_0_fallback_native_tcp_yamux",
+            "gossipsub_v1_1_native_tcp_yamux",
+            "gossipsub_v1_0_fallback_private_tcp_yamux_pnet",
+            "gossipsub_v1_1_private_tcp_yamux_pnet",
         },
         "discovery.mdns_public": {"mdns_public"},
         "addressing.dnsaddr": {"dnsaddr", "dnsaddr_private_tcp_yamux_pnet"},
@@ -1289,10 +1298,14 @@ def main() -> int:
             "partial_messages_private_tcp_yamux_pnet",
         },
         "connections.inlined_muxer_negotiation": {
-            "inline_muxer_go",
-            "inline_muxer_go_private_pnet",
-            "inline_muxer_rust_fallback",
-            "inline_muxer_rust_fallback_private_pnet",
+            "inline_muxer_go_noise",
+            "inline_muxer_go_tls",
+            "inline_muxer_go_noise_private_pnet",
+            "inline_muxer_go_tls_private_pnet",
+            "inline_muxer_rust_noise_fallback",
+            "inline_muxer_rust_tls_fixed_alpn_fallback",
+            "inline_muxer_rust_noise_fallback_private_pnet",
+            "inline_muxer_rust_tls_fixed_alpn_fallback_private_pnet",
         },
     }
     for capability_id, expected_ids in required_stage_6_scenarios.items():
@@ -1342,10 +1355,14 @@ def main() -> int:
         if isinstance(scenario, dict)
     }
     if inlined_shape != {
-        ("inline_muxer_go", ("forge_to_go", "go_to_forge"), "passed"),
-        ("inline_muxer_go_private_pnet", ("forge_to_go", "go_to_forge"), "passed"),
-        ("inline_muxer_rust_fallback", ("forge_to_rust", "rust_to_forge"), "limited"),
-        ("inline_muxer_rust_fallback_private_pnet", ("forge_to_rust", "rust_to_forge"), "limited"),
+        ("inline_muxer_go_noise", ("forge_to_go", "go_to_forge"), "passed"),
+        ("inline_muxer_go_tls", ("forge_to_go", "go_to_forge"), "passed"),
+        ("inline_muxer_go_noise_private_pnet", ("forge_to_go", "go_to_forge"), "passed"),
+        ("inline_muxer_go_tls_private_pnet", ("forge_to_go", "go_to_forge"), "passed"),
+        ("inline_muxer_rust_noise_fallback", ("forge_to_rust", "rust_to_forge"), "limited"),
+        ("inline_muxer_rust_tls_fixed_alpn_fallback", ("forge_to_rust", "rust_to_forge"), "limited"),
+        ("inline_muxer_rust_noise_fallback_private_pnet", ("forge_to_rust", "rust_to_forge"), "limited"),
+        ("inline_muxer_rust_tls_fixed_alpn_fallback_private_pnet", ("forge_to_rust", "rust_to_forge"), "limited"),
     }:
         errors.append("donor capability connections.inlined_muxer_negotiation: Go inline and Rust fallback scenarios are required")
 

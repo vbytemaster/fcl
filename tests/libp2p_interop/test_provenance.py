@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import hashlib
 import stat
 import subprocess
 import sys
@@ -15,17 +14,16 @@ from runner import (
     forge_fixture_requirements,
     require_dht_provider_evidence,
     require_local_topology_evidence,
-    require_pnet_fingerprint,
     require_supported_forge_build_profile,
-    pnet_fingerprint as runner_pnet_fingerprint,
     run_dial,
 )
-from check_stage6_acceptance import pnet_fingerprint as checker_pnet_fingerprint
 from promote_stage6_acceptance import (
+    CANONICAL_ACCEPTANCE_MANIFEST,
     PROMOTION_DIRECTORY_PREFIX,
     create_invocation_directory,
     forced_live_environment,
     promotion_status,
+    resolve_canonical_acceptance_manifest,
 )
 
 
@@ -194,19 +192,6 @@ class InteropCMakeConfigurationTest(unittest.TestCase):
 
 
 class InteropRunnerResultTest(unittest.TestCase):
-    def test_pnet_fingerprint_is_domain_separated_and_checked_by_runner_and_checker(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            pnet_key_file = Path(directory) / "pnet.key"
-            pnet_key_file.write_bytes(b"private-network-test-key")
-            expected = hashlib.sha256(
-                b"forge-p2p-stage6-pnet-fingerprint-v1\x00" + pnet_key_file.read_bytes()
-            ).hexdigest()
-            self.assertEqual(runner_pnet_fingerprint(pnet_key_file), expected)
-            self.assertEqual(checker_pnet_fingerprint(pnet_key_file), expected)
-            require_pnet_fingerprint({"pnet_fingerprint": expected}, pnet_key_file, "fixture")
-            with self.assertRaisesRegex(RuntimeError, "did not emit the required PNET fingerprint"):
-                require_pnet_fingerprint({"pnet_fingerprint": "0" * 64}, pnet_key_file, "fixture")
-
     def test_run_dial_rejects_non_ok_fixture_result(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -232,6 +217,18 @@ class InteropRunnerResultTest(unittest.TestCase):
 
 
 class Stage6PromotionHelperTest(unittest.TestCase):
+    def test_promotion_accepts_only_the_source_tree_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            canonical = root / CANONICAL_ACCEPTANCE_MANIFEST
+            canonical.parent.mkdir(parents=True)
+            canonical.write_text("{}\n")
+            self.assertEqual(resolve_canonical_acceptance_manifest(root, str(canonical)), canonical.resolve())
+            external = root / "minimal-manifest.json"
+            external.write_text("{}\n")
+            with self.assertRaisesRegex(ValueError, "must resolve exactly"):
+                resolve_canonical_acceptance_manifest(root, str(external))
+
     def test_invocation_directories_are_unique_children_of_the_configured_base(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory) / "promotion-base"

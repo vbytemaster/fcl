@@ -443,23 +443,23 @@ to equal the corresponding raw payload (except runner-owned `result_file` and
 `attempts`), rejects failure text, non-JSON evidence, `/bin/false`, incomplete or
 provenance-only argv, and reused proof files.
 
-A future private TCP/Yamux+pnet fixture must pass the same existing absolute
+A future PR4 private TCP/Yamux+pnet fixture must pass the same absolute
 `--pnet-key-file` outside the runner artifact directory to both dialer and
 listener and use `--transport tcp-pnet`. The key bytes are neither serialized,
 logged nor added to the evidence index.
 Both endpoint result files must report `pnet_enabled=true`,
 `negotiated_pnet=true`, and one shared non-secret `pnet_fingerprint`. Its exact
 value is `SHA-256("forge-p2p-stage6-pnet-fingerprint-v1" || 0x00 || PSK-file-bytes)`;
-the runner requires future fixtures to emit it and the checker independently
-recomputes it from the configured file without serializing, logging or indexing
-the PSK bytes.
+the PR4 runner and its newly registered validator must independently recompute
+it from the configured file without serializing, logging or indexing the PSK
+bytes. PR0 does not install a PNET validator or synthetic control artifact.
 The root PNET scenario additionally needs one same-key positive run and two
 separately indexed control executions: missing key and mismatched key. Each
 control binds its launcher command, log and result to the expected peer and
 must show one attempted connection, zero established connections and zero
 Identify/application streams with rejection before Identify. The mismatched-key
 fixture key also remains outside the artifact directory and evidence index.
-If a private AutoNAT scenario requires
+If a future private AutoNAT scenario requires
 `reachability.private_internet_policy`, both commands must additionally pass
 `--private-egress-policy allow-internet`; both results must report that policy
 and `egress_policy_enforced=true`, while the dialer reports a successful actual
@@ -467,39 +467,44 @@ dialback and the listener reports its receipt. A separate successful
 `--private-egress-policy deny-external` control must emit a hashed result with
 `status=rejected`, `external_dial_attempted=false` and
 `rejection_reason=private_egress_policy`; it never serializes PSK bytes. The
-checker maps manifest dependencies to these concrete command/result proofs
-rather than trusting enabled-capability labels. Native QUIC, native TCP/Yamux
-and private TCP/Yamux+pnet remain separate proofs. An optional capability is
-tested only through an enabled run and is never thereby claimed as default.
+implementing PR maps manifest dependencies to these concrete command/result
+proofs rather than trusting enabled-capability labels. Native QUIC, native
+TCP/Yamux and private TCP/Yamux+pnet remain separate proofs. An optional
+capability is tested only through an enabled run and is never thereby claimed
+as default.
 
 The SHA-256 index is tamper-evident, self-consistent local evidence only. It is
 not a signed remote attestation and does not claim malicious-artifact
 unforgeability; the promotion authority is the CMake-owned execution and its
 immediate validation, not external artifact replay.
-Every donor acceptance scenario has one closed, exact contract name:
+Every donor acceptance scenario, including a planned scenario, has one closed,
+exact contract name:
 `forge.p2p.evidence.<scenario-id>.v1`. The manifest's `evidence_contracts`
 registry must cover those values exactly, and the paired inventory and
-acceptance checkers reject missing, unknown or reused names. Each registered
-contract maps to a semantic validator; `status=ok`, enabled-capability labels
-or a scenario label alone cannot promote a result. Current runner-backed cases
-validate emitted Ping, Identify, echo, DHT, Rendezvous and
+acceptance checkers reject missing, unknown or reused names. Only a
+`registration: registered` contract maps to an executable semantic validator;
+a planned contract deliberately has no validator and blocks promotion until its
+implementing PR supplies the real runner, observed runtime schema, negative
+controls and donor evidence. `status=ok`, enabled-capability labels or a
+scenario label alone cannot promote a result. Current runner-backed cases
+validate emitted Ping, Identify, TCP/Yamux endpoint state and echo, DHT, Rendezvous and
 implementation-specific Relay reservation/open fields. Merely enabling a
-listener feature is not execution evidence. Future Stage 6 cases declare the
-result/control fields their implementation must emit before the scenario can
-become registered or promoted: the checker derives the permitted launcher
-`--transport` from the manifest profile, stack and exact contract (`quic`,
-native `tcp`/TLS-only `tcp-tls`, or private `tcp-pnet`), never from a raw record
-label. Future protocol families require correlated wire transcripts and
-negative controls: exact security/muxer phases; AutoNAT probe/dialback tokens,
-allow and deny results; relay/DCUtR paths; discovery no-dial controls; and
-correlated DHT, Rendezvous, GossipSub, port-reuse and fragment evidence. Until
-the canonical runner and fixtures emit those fields and separately indexed
-control commands/results/logs, the schemas are deliberately promotion-blocking;
-source labels are not behavior proof.
+listener feature is not execution evidence. The future PR owns the exact
+runtime schema and negative controls for its contract: correlated security/muxer
+transcripts; AutoNAT probe/dialback allow and deny evidence; relay/DCUtR paths;
+discovery no-dial controls; and correlated DHT, Rendezvous, GossipSub,
+port-reuse and fragment evidence. Until that PR registers an observed runner
+schema and separately indexed command/result/log evidence, its declared
+contract ID is promotion-blocking; source labels are not behavior proof.
+The native Go TLS and Rust fixed-ALPN TLS fallback inline-muxer contracts are
+also exact TLS contracts, so their future launcher mapping is `tcp-tls`; the
+private-profile variants remain `tcp-pnet` and need their own PR4 proof.
 For current native scenarios, the command mapping is only a launcher check.
 `quic_v1_transport` additionally requires the endpoint result to report the
 observed `/quic-v1` transport, the authenticated remote peer ID and the Identify
-proof. `multistream_select`, `noise_identity` and `tls_identity` require an
+proof. `tcp_yamux` requires endpoint-emitted `negotiated_transport=tcp`,
+`negotiated_security=/noise`, `negotiated_muxer=/yamux/1.0.0`, the authenticated
+remote peer ID and a completed echo. `multistream_select`, `noise_identity` and `tls_identity` require an
 endpoint-emitted ordered multistream/security/Yamux/application transcript and
 the exact negotiated security and muxer fields in that result; runner-owned
 record fields cannot satisfy either requirement. Go can observe its connection

@@ -28,24 +28,24 @@
   "fixture_files": {
     "go_fixture/go.mod": "d932393c652c4fcab045bc9e35d70bb8ee6700610b63f5ed9c4d2b3b8e1e6be2",
     "go_fixture/go.sum": "4c5c4bab5b838e9027b83777413feb9c2540f2d0c076c86214a549cfad47902a",
-    "go_fixture/main.go": "105dfbaa25f8dc78fe0376ed6dd1199ba9a4ce1c76d0c3b2319484bfc9fa480b",
+    "go_fixture/main.go": "a3df61259aeb2c3759c29421a5513bc86ab3f28510547687545895fbda1dcf19",
     "rust_fixture/Cargo.lock": "14b5e00e49ffa65cc10ff42c2ec0ad49d7d3654846f749ca12d8e80090a6d781",
     "rust_fixture/Cargo.toml": "a4992715e8f7eaa9576f9f8b9a877b52bb847eb0af0ec70e9078c8113b85d71e",
-    "rust_fixture/main.rs": "92db10b5911b175df4c3809d3c706f4ce3848f0e557baf8461df545feaa8bfc8",
+    "rust_fixture/main.rs": "1dd30771ac5e3e3e77b1ee7fe23a1e98e310a8ebca3633e70c4a5e8fabf5f9d4",
     "rust_fixture/rust-toolchain.toml": "32d99b8237d5832435d362c395422d69f52348a9fd1a154f70336d2991403064"
   },
   "runtime_artifact_sources": {
-    "../CMakeLists.txt": "3392ea51cf5a594b85f85c1c1caca2cdba480d0da65f5ad6e17ed26b62da20b6",
+    "../CMakeLists.txt": "01018735ac4699b8ea77c13ff5c85857522b1d24f6f7ff6d63626a0859e6b705",
     "check_fixture_lock.py": "1e9f0229bc3fc13e99724cb7e6c8cafae5b257e14a86128dcee670c7fd8dd0c7",
-    "forge_interop_fixture.cpp": "19cff24c7046f5ce6bc0459715b244dfc27b6f8d7ebbf8d4ae7e00c03a653c1a",
-    "provenance.py": "b52c97e6a817022eddbee267959c5bf722502bdaf19ba73b535ff92e41348745",
-    "runner.py": "fd13223f57dd1ee808bb12a6fbecc5d1704f195363f0540b6bf5e91f671faf45"
+    "forge_interop_fixture.cpp": "d94e7b5a32db8e88856b759160aca8a563b220aa1a5490719e4e6b9cada568f5",
+    "provenance.py": "c80cef5a71c407754598dd9fff77af1762d8174582df3484ed2726273f82d354",
+    "runner.py": "9a234dd04b7cf0b194a2462b5949ea387d46590eac45f636be5023837aee0dbb"
   },
   "evidence_sources": {
-    "donor_cases.json": "c1e6122e7c0a16a902ee89a3627f4e95d8688c09155d4e64c10737c6b4d90117"
+    "donor_cases.json": "ade911de5c4b04ac15da3d122e2b46a05f7e4630a56026ffaf360c1f708750ec"
   },
   "regression_sources": {
-    "test_provenance.py": "1acb242eb9b8c0909ac338252ee88f719d3b4203e774aa819449886a0f641e00"
+    "test_provenance.py": "e88a0495a7f6c02e523b637877105db68bdc046a910cec15c052295b37ce7ed7"
   },
   "dependency_graphs": {
     "go": {

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import hashlib
 import io
 import json
 import os
@@ -71,43 +70,6 @@ LOCKED_FORGE_FIXTURE_COMPILER = {
     "compiler_id": "Clang",
     "compiler_version": "22.1.8",
 }
-PRIVATE_NETWORK_TRANSPORT = "tcp-pnet"
-PRIVATE_EGRESS_POLICY_DEPENDENCY = "reachability.private_internet_policy"
-PRIVATE_EGRESS_POLICY_VALUE = "allow-internet"
-PRIVATE_PNET_RESULT_FIELDS = ("pnet_enabled", "negotiated_pnet", "pnet_fingerprint")
-PNET_FINGERPRINT_DOMAIN = b"forge-p2p-stage6-pnet-fingerprint-v1\x00"
-
-
-def load_acceptance_configurations(path: Optional[str]) -> dict[str, dict]:
-    if path is None:
-        return {}
-    registry = json.loads(Path(path).read_text()).get("interop_acceptance_registry", {})
-    capabilities = registry.get("capabilities", {}) if isinstance(registry, dict) else {}
-    if not isinstance(capabilities, dict):
-        raise RuntimeError("acceptance manifest capabilities are invalid")
-    configurations: dict[str, dict] = {}
-    for capability_id, entry in capabilities.items():
-        scenarios = entry.get("scenarios", []) if isinstance(entry, dict) else []
-        if not isinstance(capability_id, str) or not isinstance(scenarios, list):
-            raise RuntimeError("acceptance manifest scenario configuration is invalid")
-        for scenario in scenarios:
-            if not isinstance(scenario, dict):
-                raise RuntimeError("acceptance manifest scenario is invalid")
-            scenario_id = scenario.get("id")
-            requires = scenario.get("requires_capabilities", [])
-            if (
-                not isinstance(scenario_id, str)
-                or not scenario_id
-                or not isinstance(requires, list)
-                or any(not isinstance(value, str) or not value for value in requires)
-                or len(set(requires)) != len(requires)
-                or scenario_id in configurations
-            ):
-                raise RuntimeError("acceptance manifest capability requirements are invalid")
-            configurations[scenario_id] = {"requires_capabilities": list(requires)}
-    return configurations
-
-
 def command_option_values(command: object) -> dict[str, str]:
     if not isinstance(command, list) or len(command) < 2:
         return {}
@@ -118,33 +80,10 @@ def command_option_values(command: object) -> dict[str, str]:
     }
 
 
-def pnet_fingerprint(pnet_key_file: Path) -> str:
-    """Return the public, domain-separated fingerprint of the exact PSK file bytes."""
-    return hashlib.sha256(PNET_FINGERPRINT_DOMAIN + pnet_key_file.read_bytes()).hexdigest()
-
-
-def require_pnet_fingerprint(result: dict, pnet_key_file: Path, endpoint: str) -> None:
-    expected = pnet_fingerprint(pnet_key_file)
-    if result.get("pnet_fingerprint") != expected:
-        raise RuntimeError(f"{endpoint} did not emit the required PNET fingerprint")
-
-
-def launcher_execution_description(command: object, result: object) -> dict[str, object]:
-    """Keep only non-secret command inputs and result fields required by promotion."""
+def launcher_execution_description(command: object, _result: object) -> dict[str, object]:
+    """Keep only the current registered run's launcher input summary."""
     options = command_option_values(command)
-    description: dict[str, object] = {"transport": options.get("--transport")}
-    if "--pnet-key-file" in options:
-        description["pnet_key_file"] = options["--pnet-key-file"]
-    if "--private-egress-policy" in options:
-        description["private_egress_policy"] = options["--private-egress-policy"]
-    if isinstance(result, dict):
-        for field in PRIVATE_PNET_RESULT_FIELDS:
-            if field in result:
-                description[field] = result[field]
-        for field in ("private_egress_policy", "egress_policy_enforced"):
-            if field in result:
-                description[field] = result[field]
-    return description
+    return {"transport": options.get("--transport")}
 
 
 def effective_configuration(profile: str, transport_stack: tuple[str, ...], dial_result: dict,
@@ -465,9 +404,7 @@ def attach_attempts(result: dict, attempts: list[dict]) -> dict:
 def start_listener(binary: Path, implementation: str, work: Path, scenario: Optional[str] = None,
                    result_file: Optional[Path] = None, seed_file: Optional[Path] = None,
                    expected_messages: Optional[int] = None, transport: str = "quic",
-                   seed_peer_id: Optional[str] = None, seed_addr: Optional[str] = None,
-                   pnet_key_file: Optional[Path] = None,
-                   private_egress_policy: Optional[str] = None) -> Listener:
+                   seed_peer_id: Optional[str] = None, seed_addr: Optional[str] = None) -> Listener:
     ready_file = work / f"{implementation}-ready.json"
     stop_file = work / f"{implementation}.stop"
     log_file = work / f"{implementation}.log"
@@ -488,10 +425,6 @@ def start_listener(binary: Path, implementation: str, work: Path, scenario: Opti
     ]
     if scenario is not None:
         command.extend(["--scenario", scenario])
-    if pnet_key_file is not None:
-        command.extend(["--pnet-key-file", str(pnet_key_file)])
-    if private_egress_policy is not None:
-        command.extend(["--private-egress-policy", private_egress_policy])
     if result_file is not None:
         command.extend(["--result-file", str(result_file)])
     if seed_file is not None:
@@ -547,8 +480,7 @@ def start_destination(binary: Path, implementation: str, relay_addr: str, relay_
 
 def run_dial(binary: Path, implementation: str, scenario: str, peer_id: str, addr: str, work: Path,
              payload: Optional[str] = None, transport: str = "quic", fresh_store_each_attempt: bool = False,
-             target_peer_id: Optional[str] = None, pnet_key_file: Optional[Path] = None,
-             private_egress_policy: Optional[str] = None) -> dict:
+             target_peer_id: Optional[str] = None) -> dict:
     payload_suffix = "" if payload is None else f"-{payload}"
     result_file = work / f"{implementation}-dial-{scenario}{payload_suffix}.json"
     log_file = work / f"{implementation}-dial-{scenario}{payload_suffix}.log"
@@ -573,10 +505,6 @@ def run_dial(binary: Path, implementation: str, scenario: str, peer_id: str, add
         command.extend(["--payload", payload])
     if target_peer_id is not None:
         command.extend(["--target-peer-id", target_peer_id])
-    if pnet_key_file is not None:
-        command.extend(["--pnet-key-file", str(pnet_key_file)])
-    if private_egress_policy is not None:
-        command.extend(["--private-egress-policy", private_egress_policy])
     try:
         reset_paths = (store_dir, result_file) if fresh_store_each_attempt else ()
         attempts = run_command_with_attempts(
@@ -975,8 +903,7 @@ def require_dht_provider_evidence(result: dict, dialer: str) -> None:
 
 
 def run_pair(dialer_binary: Path, dialer: str, listener_binary: Path, listener: str, scenario: str, root: Path,
-             acceptance_scenario_id: Optional[str] = None,
-             acceptance_configurations: Optional[dict[str, dict]] = None) -> dict:
+             acceptance_scenario_id: Optional[str] = None) -> dict:
     runner_profile = "quic_base"
     if scenario in DHT_SCENARIOS:
         runner_profile = "quic_dht"
@@ -996,7 +923,6 @@ def run_pair(dialer_binary: Path, dialer: str, listener_binary: Path, listener: 
         ("quic",),
         f"{runner_profile}/{scenario}",
         acceptance_scenario_id or scenario,
-        acceptance_configurations,
     )
 
 
@@ -1051,33 +977,14 @@ def run_dht_value_remote_get(binaries: dict[str, Path], writer: str, listener: s
 def run_pair_with_transport(dialer_binary: Path, dialer: str, listener_binary: Path, listener: str, scenario: str,
                             root: Path, transport: str, acceptance_profile: str,
                             transport_stack: tuple[str, ...], runner_scenario_id: str,
-                            acceptance_scenario_id: str,
-                            acceptance_configurations: Optional[dict[str, dict]] = None,
-                            pnet_key_file: Optional[Path] = None) -> dict:
+                            acceptance_scenario_id: str) -> dict:
     work = root / f"{transport}-{dialer}-to-{listener}-{acceptance_scenario_id}"
     work.mkdir(parents=True, exist_ok=True)
-    configuration = (acceptance_configurations or {}).get(acceptance_scenario_id, {})
-    requires = configuration.get("requires_capabilities", [])
-    if not isinstance(requires, list):
-        raise RuntimeError("acceptance scenario capability requirements are invalid")
-    private_egress_policy = None
-    if acceptance_profile == "private_network":
-        if transport != PRIVATE_NETWORK_TRANSPORT or transport_stack != ("tcp", "yamux", "pnet"):
-            raise RuntimeError("private-network runner scenarios require the tcp-pnet transport stack")
-        if pnet_key_file is None or not pnet_key_file.is_file():
-            raise RuntimeError("private-network runner scenarios require a prepared --pnet-key-file")
-        pnet_key_file = pnet_key_file.resolve()
-        try:
-            pnet_key_file.relative_to(root.resolve())
-        except ValueError:
-            pass
-        else:
-            raise RuntimeError("private-network key material must stay outside the runner artifact directory")
-        if PRIVATE_EGRESS_POLICY_DEPENDENCY in requires:
-            private_egress_policy = PRIVATE_EGRESS_POLICY_VALUE
+    if acceptance_profile != "native":
+        raise RuntimeError("planned non-native acceptance scenarios have no runner implementation yet")
     listener_result = (
         work / f"{listener}-listen-{scenario}.json"
-        if acceptance_profile == "private_network" or scenario in PUBSUB_SCENARIOS or scenario in DHT_VALUE_SCENARIOS
+        if scenario in PUBSUB_SCENARIOS or scenario in DHT_VALUE_SCENARIOS
         else None
     )
     server = start_listener(
@@ -1087,8 +994,6 @@ def run_pair_with_transport(dialer_binary: Path, dialer: str, listener_binary: P
         scenario,
         listener_result,
         transport=transport,
-        pnet_key_file=pnet_key_file,
-        private_egress_policy=private_egress_policy,
     )
     try:
         addr = server.ready["listen_addrs"][0]
@@ -1101,8 +1006,6 @@ def run_pair_with_transport(dialer_binary: Path, dialer: str, listener_binary: P
             addr,
             work,
             transport=transport,
-            pnet_key_file=pnet_key_file,
-            private_egress_policy=private_egress_policy,
         )
         if scenario == "identify" and dialer == "go" and listener == "forge":
             if result.get("signed_peer_record") is not True:
@@ -1116,12 +1019,6 @@ def run_pair_with_transport(dialer_binary: Path, dialer: str, listener_binary: P
         delivered = wait_json(listener_result, 20) if listener_result is not None else None
         if delivered is not None and delivered.get("status") != "ok":
             raise RuntimeError(f"{listener} listener reported {delivered}")
-        if acceptance_profile == "private_network":
-            assert pnet_key_file is not None
-            require_pnet_fingerprint(result, pnet_key_file, f"{dialer} dialer")
-            if not isinstance(delivered, dict):
-                raise RuntimeError(f"{listener} listener did not emit a PNET result")
-            require_pnet_fingerprint(delivered, pnet_key_file, f"{listener} listener")
         out = {
             "dialer": dialer,
             "listener": listener,
@@ -1372,7 +1269,6 @@ def main() -> int:
     acceptance_manifest = None
     try:
         acceptance_manifest = acceptance_manifest_metadata(args.acceptance_manifest)
-        acceptance_configurations = load_acceptance_configurations(args.acceptance_manifest)
         python_path = str(Path(sys.executable).resolve())
         git_path = str(Path(require_tool("git")).resolve())
         provenance["tools"]["python"] = {
@@ -1460,7 +1356,6 @@ def main() -> int:
                                         scenario,
                                         root,
                                         acceptance_scenario_id,
-                                        acceptance_configurations,
                                     )
                                 )
                             except Exception as error:
@@ -1482,7 +1377,6 @@ def main() -> int:
                                             scenario,
                                             root,
                                             acceptance_scenario_id,
-                                            acceptance_configurations,
                                         )
                                     )
                         except Exception as error:
@@ -1494,7 +1388,6 @@ def main() -> int:
                             artifacts.append(
                                 run_pair(
                                     binaries[dialer], dialer, binaries[listener], listener, scenario, root,
-                                    acceptance_configurations=acceptance_configurations,
                                 )
                             )
                         except Exception as error:
@@ -1519,7 +1412,6 @@ def main() -> int:
                                         ("tcp", "yamux"),
                                         f"{profile}/{scenario}",
                                         acceptance_scenario_id,
-                                        acceptance_configurations,
                                     )
                                 )
                             except Exception as error:
@@ -1545,7 +1437,6 @@ def main() -> int:
                                     scenario,
                                     root,
                                     acceptance_scenario_id,
-                                    acceptance_configurations,
                                 )
                             )
                         except Exception as error:

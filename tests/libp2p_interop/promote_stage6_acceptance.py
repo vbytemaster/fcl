@@ -14,6 +14,7 @@ from check_stage6_acceptance import sha256_file, validate
 
 
 PROMOTION_DIRECTORY_PREFIX = "stage6-promotion-"
+CANONICAL_ACCEPTANCE_MANIFEST = Path("tests/libp2p_interop/p2p_donor_capabilities.json")
 
 
 def write_receipt(path: Path, receipt: dict) -> None:
@@ -37,6 +38,15 @@ def promotion_status(returncode: int, errors: list[str]) -> str:
     return "FAILED" if returncode != 0 or errors else "PASS"
 
 
+def resolve_canonical_acceptance_manifest(root: Path, value: str) -> Path:
+    """Promotion owns one source-tree manifest; arbitrary artifact manifests are not authority."""
+    manifest = Path(value).resolve()
+    expected = (root / CANONICAL_ACCEPTANCE_MANIFEST).resolve()
+    if manifest != expected:
+        raise ValueError(f"acceptance manifest must resolve exactly to {expected}")
+    return manifest
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runner", required=True)
@@ -50,6 +60,11 @@ def main() -> int:
     args = parser.parse_args()
 
     root = Path(args.forge_root).resolve()
+    try:
+        manifest_path = resolve_canonical_acceptance_manifest(root, args.acceptance_manifest)
+    except ValueError as error:
+        print(f"FAILED: {error}", file=sys.stderr)
+        return 2
     build_base = Path(args.build_dir).resolve()
     invocation_directory = create_invocation_directory(build_base)
     artifact_path = invocation_directory / "interop-artifacts.json"
@@ -63,7 +78,7 @@ def main() -> int:
         "--build-dir", str(invocation_directory),
         "--forge-root", str(root),
         "--donors-root", str(Path(args.donors_root).resolve()),
-        "--acceptance-manifest", str(Path(args.acceptance_manifest).resolve()),
+        "--acceptance-manifest", str(manifest_path),
     ]
     started = time.time()
     result = subprocess.run(runner_argv, cwd=root, env=forced_live_environment(), check=False)
@@ -81,7 +96,7 @@ def main() -> int:
     write_receipt(receipt_path, receipt)
 
     errors, has_limitations = validate(
-        root, Path(args.acceptance_manifest).resolve(), artifact_path, args.expected_head, receipt
+        root, manifest_path, artifact_path, args.expected_head, receipt
     )
     print(f"stage6 promotion evidence: {invocation_directory}", file=sys.stderr)
     if promotion_status(result.returncode, errors) == "FAILED":
