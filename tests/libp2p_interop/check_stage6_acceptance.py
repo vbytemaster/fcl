@@ -2,6 +2,7 @@
 import hashlib
 import ipaddress
 import json
+import math
 import re
 import subprocess
 import sys
@@ -81,10 +82,9 @@ RELAY_NATIVE_PEER_ID_IDENTITY_CODE = 0
 RELAY_NATIVE_PEER_ID_SHA256_CODE = 0x12
 RELAY_NATIVE_PEER_ID_MAX_DIGEST_BYTES = 64
 RELAY_NATIVE_PEER_ID_MAX_IDENTITY_DIGEST_BYTES = 42
-# Pinned rust-libp2p accepts only one-byte identity/SHA2-256 codes and their
-# one-byte lengths here, so a valid serialized PeerId is at most 66 bytes.
-# 58**90 < 256**66 <= 58**91, making 91 the exact canonical base58btc bound.
-RELAY_NATIVE_PEER_ID_MAX_BASE58BTC_LENGTH = 91
+# The largest pinned Rust PeerId is 0x12, 0x40 and a 64-byte SHA2-256 digest;
+# its canonical base58btc form is at most 90 characters, not 91.
+RELAY_NATIVE_PEER_ID_MAX_BASE58BTC_LENGTH = 90
 RELAY_NATIVE_BASE58BTC_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 RELAY_NATIVE_BASE58BTC_VALUES = {
     character: index for index, character in enumerate(RELAY_NATIVE_BASE58BTC_ALPHABET)
@@ -120,8 +120,16 @@ def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
+def reject_nonfinite_json_constant(value: str) -> object:
+    raise ValueError(f"non-finite JSON constant is not permitted: {value}")
+
+
 def load_json(path: Path) -> object:
-    return json.loads(path.read_text(), object_pairs_hook=reject_duplicate_keys)
+    return json.loads(
+        path.read_text(),
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=reject_nonfinite_json_constant,
+    )
 
 
 def sha256_file(path: Path) -> str:
@@ -270,7 +278,7 @@ def validate_git_state(root: Path, expected_head: str) -> tuple[Optional[float],
 
 
 def is_timestamp(value: object) -> bool:
-    return type(value) in {int, float}
+    return type(value) is int or (type(value) is float and math.isfinite(value))
 
 
 def absolute_path(value: object) -> Optional[Path]:
@@ -695,6 +703,11 @@ def relay_native_peer_id(value: object) -> bool:
     multihash = relay_native_base58btc_decode(value)
     if multihash is None:
         return False
+    return relay_native_multihash_is_peer_id(multihash)
+
+
+def relay_native_multihash_is_peer_id(multihash: bytes) -> bool:
+    """Apply pinned Rust PeerId rules to already-bounded relay-native multihash bytes."""
     code = relay_native_canonical_varint(multihash, 0)
     if code is None:
         return False
@@ -1715,6 +1728,11 @@ def self_test_donor_provenance(donors_root: Path) -> tuple[dict[str, str], list[
 
 
 def self_test() -> int:
+    if not all(is_timestamp(value) for value in (0, 1.5, -1)) or any(
+        is_timestamp(value) for value in (True, float("nan"), float("inf"), float("-inf"))
+    ):
+        print("self-test failed: timestamp finiteness validation is incorrect", file=sys.stderr)
+        return 1
     # Every registered contract gets a positive observed-result fixture, then a semantic mutation.
     for contract, validator in EVIDENCE_CONTRACT_VALIDATORS.items():
         scenario_id = contract.removeprefix(EVIDENCE_CONTRACT_PREFIX).removesuffix(EVIDENCE_CONTRACT_SUFFIX)
@@ -1780,7 +1798,8 @@ def self_test() -> int:
         multihash = bytes((RELAY_NATIVE_PEER_ID_SHA256_CODE, digest_size)) + bytes(range(digest_size))
         peer_id = relay_native_base58btc_encode(multihash)
         if (
-            relay_native_base58btc_decode(peer_id) != multihash
+            len(peer_id) > RELAY_NATIVE_PEER_ID_MAX_BASE58BTC_LENGTH
+            or relay_native_base58btc_decode(peer_id) != multihash
             or relay_native_base58btc_encode(multihash) != peer_id
             or not relay_native_peer_id(peer_id)
         ):
@@ -1795,11 +1814,12 @@ def self_test() -> int:
     )
     oversized_peer_id = relay_native_base58btc_encode(oversized_multihash)
     if (
-        len(oversized_peer_id) != RELAY_NATIVE_PEER_ID_MAX_BASE58BTC_LENGTH
-        or relay_native_base58btc_decode(oversized_peer_id) != oversized_multihash
+        len(oversized_peer_id) <= RELAY_NATIVE_PEER_ID_MAX_BASE58BTC_LENGTH
+        or relay_native_base58btc_decode(oversized_peer_id) is not None
         or relay_native_peer_id(oversized_peer_id)
+        or relay_native_multihash_is_peer_id(oversized_multihash)
     ):
-        print("self-test failed: SHA2-256 PeerId with 65-byte digest was accepted", file=sys.stderr)
+        print("self-test failed: SHA2-256 PeerId with 65-byte digest was not rejected", file=sys.stderr)
         return 1
     if relay_native_base58btc_decode("2" * (RELAY_NATIVE_PEER_ID_MAX_BASE58BTC_LENGTH + 1)) is not None:
         print("self-test failed: oversized base58btc PeerId text was decoded", file=sys.stderr)
@@ -1938,6 +1958,15 @@ def self_test() -> int:
         return 1
 
     with tempfile.TemporaryDirectory() as directory:
+        nonfinite_path = Path(directory) / "nonfinite.json"
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            nonfinite_path.write_text(f'{{"value":{constant}}}')
+            try:
+                load_json(nonfinite_path)
+            except ValueError:
+                continue
+            print(f"self-test failed: {constant} JSON constant was accepted", file=sys.stderr)
+            return 1
         root = Path(directory) / "forge"
         (root / CANONICAL_RUNNER).parent.mkdir(parents=True)
         (root / CANONICAL_RUNNER).write_text("# canonical runner fixture\n")
@@ -1963,6 +1992,13 @@ def self_test() -> int:
         if errors:
             print(f"self-test failed: valid canonical artifact: {errors}", file=sys.stderr)
             return 1
+        artifact_text = artifact_path.read_text()
+        artifact_path.write_text(
+            re.sub(r'("started_at_unix":)\s*[^,}]+', r'\1NaN', artifact_text, count=1)
+        )
+        if not expect_rejected(root, manifest_path, artifact_path, head, "NaN timestamp", "artifact cannot be read"):
+            return 1
+        write_artifact(root, manifest_path, artifact_path, "tcp_yamux", donors_root)
         artifact = load_json(artifact_path)
         assert isinstance(artifact, dict)
         artifact["fixture_provenance"]["donor_revisions"]["go-libp2p"] = "0" * 40
