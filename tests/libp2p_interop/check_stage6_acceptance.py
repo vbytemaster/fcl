@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import hashlib
+import ipaddress
 import json
 import re
 import subprocess
@@ -76,6 +77,16 @@ RUNNER_FLAGS = (
 ENABLED_VALUES = {"1", "ON", "on", "true", "TRUE", "yes", "YES"}
 PRIVATE_NETWORK_TRANSPORT = "tcp-pnet"
 PRIVATE_NETWORK_PSK_DEPENDENCY = "security.private_network_psk"
+RELAY_NATIVE_PEER_ID_IDENTITY_CODE = 0
+RELAY_NATIVE_PEER_ID_SHA256_CODE = 0x12
+RELAY_NATIVE_PEER_ID_MAX_MULTIHASH_BYTES = 64
+RELAY_NATIVE_PEER_ID_MAX_IDENTITY_DIGEST_BYTES = 42
+RELAY_NATIVE_BASE58BTC_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+RELAY_NATIVE_BASE58BTC_VALUES = {
+    character: index for index, character in enumerate(RELAY_NATIVE_BASE58BTC_ALPHABET)
+}
+RELAY_FIXTURE_RELAY_PEER_ID = "QmcgpsyWgH8Y8ajJz1Cu72KnS5uo2Aa2LpzU7kinSupNKC"
+RELAY_FIXTURE_CLIENT_PEER_ID = "QmNLfbof5rLekrACjeuLk9JmGZD2HDBHCU4z16iYKmx5SE"
 
 
 TLS_EVIDENCE_CONTRACTS = {
@@ -622,57 +633,112 @@ def nonempty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value)
 
 
-MULTIADDR_VALUE_PROTOCOLS = {
-    "certhash",
-    "dns",
-    "dns4",
-    "dns6",
-    "dnsaddr",
-    "ip4",
-    "ip6",
-    "ip6zone",
-    "memory",
-    "onion",
-    "onion3",
-    "p2p",
-    "sctp",
-    "sni",
-    "tcp",
-    "udp",
-    "unix",
-}
-MULTIADDR_FLAG_PROTOCOLS = {
-    "http",
-    "https",
-    "p2p-circuit",
-    "quic",
-    "quic-v1",
-    "tls",
-    "webtransport",
-    "ws",
-    "wss",
-}
+def relay_native_base58btc_decode(value: object) -> Optional[bytes]:
+    """Decode the base58btc form accepted by the pinned Rust relay fixture."""
+    if not nonempty_string(value):
+        return None
+    number = 0
+    for character in value:
+        digit = RELAY_NATIVE_BASE58BTC_VALUES.get(character)
+        if digit is None:
+            return None
+        number = number * 58 + digit
+    encoded = number.to_bytes((number.bit_length() + 7) // 8, "big") if number else b""
+    leading_zeroes = len(value) - len(value.lstrip("1"))
+    return b"\0" * leading_zeroes + encoded
 
 
-def nonempty_multiaddr(value: object) -> bool:
-    """Validate the non-secret multiaddr shape carried by runner evidence."""
-    if not nonempty_string(value) or not value.startswith("/") or value.endswith("/"):
+def relay_native_canonical_varint(data: bytes, offset: int) -> Optional[tuple[int, int]]:
+    """Decode the unsigned canonical LEB128 values in a relay-native multihash."""
+    value = 0
+    shift = 0
+    for index in range(offset, len(data)):
+        byte = data[index]
+        payload = byte & 0x7F
+        if shift >= 64 or (shift == 63 and payload > 1):
+            return None
+        value |= payload << shift
+        if not byte & 0x80:
+            encoded = bytearray()
+            remainder = value
+            while True:
+                next_byte = remainder & 0x7F
+                remainder >>= 7
+                encoded.append(next_byte | (0x80 if remainder else 0))
+                if not remainder:
+                    break
+            if data[offset:index + 1] != bytes(encoded):
+                return None
+            return value, index + 1
+        shift += 7
+    return None
+
+
+def relay_native_peer_id(value: object) -> bool:
+    """Match pinned rust-libp2p PeerId parsing without claiming general multihash support."""
+    multihash = relay_native_base58btc_decode(value)
+    if multihash is None or len(multihash) > RELAY_NATIVE_PEER_ID_MAX_MULTIHASH_BYTES:
         return False
-    components = value.split("/")[1:]
-    if not components:
+    code = relay_native_canonical_varint(multihash, 0)
+    if code is None:
         return False
-    index = 0
-    while index < len(components):
-        protocol = components[index]
-        if protocol in MULTIADDR_FLAG_PROTOCOLS:
-            index += 1
-        elif protocol in MULTIADDR_VALUE_PROTOCOLS:
-            if index + 1 >= len(components) or not components[index + 1]:
-                return False
-            index += 2
-        else:
-            return False
-    return True
+    length = relay_native_canonical_varint(multihash, code[1])
+    if length is None:
+        return False
+    digest = multihash[length[1]:]
+    if length[0] != len(digest):
+        return False
+    if code[0] == RELAY_NATIVE_PEER_ID_SHA256_CODE:
+        return True
+    return (
+        code[0] == RELAY_NATIVE_PEER_ID_IDENTITY_CODE
+        and len(digest) <= RELAY_NATIVE_PEER_ID_MAX_IDENTITY_DIGEST_BYTES
+    )
+
+
+def relay_native_quic_listener_endpoint(
+    value: object,
+) -> tuple[Optional[str], Optional[str], list[str]]:
+    """Parse only Rust Relay's native QUIC listener grammar, not a general multiaddr."""
+    if not nonempty_string(value):
+        return None, None, ["Rust relay endpoint is not a non-empty native QUIC listener address"]
+    components = value.split("/")
+    if (
+        len(components) not in {6, 8}
+        or components[0] != ""
+        or components[1] not in {"ip4", "ip6"}
+        or components[3] != "udp"
+        or components[5] != "quic-v1"
+        or (len(components) == 8 and components[6] != "p2p")
+    ):
+        return None, None, ["Rust relay endpoint is not a native QUIC listener address"]
+
+    address = components[2]
+    try:
+        parsed_address = ipaddress.ip_address(address)
+    except ValueError:
+        return None, None, ["Rust relay endpoint has an invalid IP address"]
+    if (
+        (components[1] == "ip4" and parsed_address.version != 4)
+        or (components[1] == "ip6" and parsed_address.version != 6)
+        or "%" in address
+    ):
+        return None, None, ["Rust relay endpoint IP family does not match its native QUIC address"]
+    if str(parsed_address) != address:
+        return None, None, ["Rust relay endpoint IP address is not canonical"]
+
+    port = components[4]
+    if not port or any(character < "0" or character > "9" for character in port):
+        return None, None, ["Rust relay endpoint has a non-decimal UDP port"]
+    if not 1 <= int(port) <= 65535:
+        return None, None, ["Rust relay endpoint UDP port is outside 1..65535"]
+    if str(int(port)) != port:
+        return None, None, ["Rust relay endpoint UDP port is not canonical"]
+
+    peer_id = components[7] if len(components) == 8 else None
+    if peer_id is not None and not relay_native_peer_id(peer_id):
+        return None, None, ["Rust relay endpoint has an invalid donor-compatible PeerId"]
+    return "/".join(components[:6]), peer_id, []
 
 
 def sha256_value(value: object) -> bool:
@@ -785,18 +851,18 @@ def validate_tls_evidence(result: dict, record: dict, listener: Optional[dict]) 
     return errors
 
 
-def relay_transport_endpoint(value: object, relay_peer: object) -> tuple[Optional[str], list[str]]:
-    """Match Rust's relay base-address construction and bind any terminal peer."""
-    if not nonempty_multiaddr(value):
-        return None, ["Rust relay endpoint is not a valid non-empty multiaddr"]
-    components = value.split("/")[1:]
-    if "p2p-circuit" in components:
-        return None, ["Rust relay endpoint must not already contain p2p-circuit"]
-    if len(components) >= 2 and components[-2] == "p2p":
-        if components[-1] != relay_peer:
-            return None, ["Rust relay endpoint terminal peer differs from record.peer_id"]
-        components = components[:-2]
-    return ("/" + "/".join(components) if components else None), []
+def relay_native_quic_transport_endpoint(
+    value: object, relay_peer: object,
+) -> tuple[Optional[str], list[str]]:
+    """Match Rust Relay's native QUIC base-address construction and terminal peer binding."""
+    transport_endpoint, endpoint_peer, errors = relay_native_quic_listener_endpoint(value)
+    if errors:
+        return None, errors
+    if not relay_native_peer_id(relay_peer):
+        return None, ["Rust relay record peer is not a valid donor-compatible PeerId"]
+    if endpoint_peer is not None and endpoint_peer != relay_peer:
+        return None, ["Rust relay endpoint terminal peer differs from record.peer_id"]
+    return transport_endpoint, []
 
 
 def rust_relay_command_target_errors(record: dict, relay_peer: str, relay_endpoint: str) -> list[str]:
@@ -809,9 +875,9 @@ def rust_relay_command_target_errors(record: dict, relay_peer: str, relay_endpoi
     if (
         not isinstance(listen_addrs, list)
         or not listen_addrs
-        or any(not nonempty_multiaddr(address) for address in listen_addrs)
+        or any(relay_native_quic_listener_endpoint(address)[0] is None for address in listen_addrs)
     ):
-        errors.append("Rust relay listener evidence lacks a valid non-empty multiaddr list")
+        errors.append("Rust relay listener evidence lacks a valid native QUIC listener list")
     elif not any(address == relay_endpoint for address in listen_addrs):
         errors.append("Rust relay listener evidence does not contain the exact recorded relay endpoint")
     if listener.get("peer_id") != relay_peer:
@@ -848,24 +914,24 @@ def validate_relay_client_evidence(result: dict, record: dict, _listener: Option
         client_peer = result.get("relay_reservation_client_peer_id")
         circuit_addr = result.get("relay_reservation_circuit_addr")
         relay_endpoint = record.get("addr")
-        transport_endpoint, endpoint_errors = relay_transport_endpoint(relay_endpoint, relay_peer)
+        transport_endpoint, endpoint_errors = relay_native_quic_transport_endpoint(relay_endpoint, relay_peer)
         expected_circuit_addr = (
             f"{transport_endpoint}/p2p/{relay_peer}/p2p-circuit/p2p/{client_peer}"
-            if nonempty_string(relay_peer)
-            and nonempty_string(client_peer)
+            if relay_native_peer_id(relay_peer)
+            and relay_native_peer_id(client_peer)
             and transport_endpoint is not None
             else None
         )
         errors = list(endpoint_errors)
-        if nonempty_string(relay_peer) and nonempty_string(relay_endpoint):
+        if relay_native_peer_id(relay_peer) and nonempty_string(relay_endpoint):
             errors.extend(rust_relay_command_target_errors(record, relay_peer, relay_endpoint))
         else:
-            errors.append("Rust relay record lacks a non-empty relay peer and endpoint")
+            errors.append("Rust relay record lacks a valid relay peer and endpoint")
         if not (
             result.get("relay_reservation_accepted") is True
-            and nonempty_string(relay_peer)
+            and relay_native_peer_id(relay_peer)
             and result.get("relay_reservation_relay_peer_id") == relay_peer
-            and nonempty_string(client_peer)
+            and relay_native_peer_id(client_peer)
             and circuit_addr == expected_circuit_addr
             and result.get("relay_reservation_renewal") is False
             and result.get("authenticated_remote_peer_id") == relay_peer
@@ -1418,7 +1484,8 @@ def semantic_fixture(scenario_id: str) -> tuple[dict, dict, Optional[dict]]:
 def rust_relay_reservation_fixture() -> tuple[dict, dict, Optional[dict]]:
     """Observed Rust relay-client event fields required for the reservation contract."""
     result, record, listener = semantic_fixture("relay_v2_client_transport")
-    relay_endpoint = "/ip4/127.0.0.1/udp/4001/quic-v1/p2p/listener-peer"
+    record["peer_id"] = RELAY_FIXTURE_RELAY_PEER_ID
+    relay_endpoint = f"/ip4/127.0.0.1/udp/4001/quic-v1/p2p/{RELAY_FIXTURE_RELAY_PEER_ID}"
     record.update({
         "addr": relay_endpoint,
         "listener_process": {
@@ -1440,10 +1507,10 @@ def rust_relay_reservation_fixture() -> tuple[dict, dict, Optional[dict]]:
         "authenticated_remote_peer_id": record["peer_id"],
         "relay_reservation_accepted": True,
         "relay_reservation_relay_peer_id": record["peer_id"],
-        "relay_reservation_client_peer_id": "rust-client-peer",
+        "relay_reservation_client_peer_id": RELAY_FIXTURE_CLIENT_PEER_ID,
         "relay_reservation_circuit_addr": (
             f"/ip4/127.0.0.1/udp/4001/quic-v1/p2p/{record['peer_id']}"
-            "/p2p-circuit/p2p/rust-client-peer"
+            f"/p2p-circuit/p2p/{RELAY_FIXTURE_CLIENT_PEER_ID}"
         ),
         "relay_reservation_renewal": False,
     })
@@ -1686,6 +1753,42 @@ def self_test() -> int:
     if validate_relay_client_evidence(rust_relay, relay_record, relay_listener):
         print("self-test failed: valid Rust relay reservation fixture was rejected", file=sys.stderr)
         return 1
+    peerless_endpoint = "/ip6/2001:db8::1/udp/65535/quic-v1"
+    transport_endpoint, endpoint_errors = relay_native_quic_transport_endpoint(
+        peerless_endpoint, RELAY_FIXTURE_RELAY_PEER_ID
+    )
+    if endpoint_errors or transport_endpoint != peerless_endpoint:
+        print("self-test failed: peer-less native QUIC relay endpoint was rejected", file=sys.stderr)
+        return 1
+    invalid_relay_endpoints = {
+        "invalid IPv4": (
+            f"/ip4/999.0.0.1/udp/4001/quic-v1/p2p/{RELAY_FIXTURE_RELAY_PEER_ID}"
+        ),
+        "non-canonical IPv6": (
+            f"/ip6/2001:0db8::1/udp/4001/quic-v1/p2p/{RELAY_FIXTURE_RELAY_PEER_ID}"
+        ),
+        "UDP port zero": (
+            f"/ip4/127.0.0.1/udp/0/quic-v1/p2p/{RELAY_FIXTURE_RELAY_PEER_ID}"
+        ),
+        "oversized UDP port": (
+            f"/ip4/127.0.0.1/udp/65536/quic-v1/p2p/{RELAY_FIXTURE_RELAY_PEER_ID}"
+        ),
+        "non-numeric UDP port": (
+            f"/ip4/127.0.0.1/udp/not-a-port/quic-v1/p2p/{RELAY_FIXTURE_RELAY_PEER_ID}"
+        ),
+        "non-canonical UDP port": (
+            f"/ip4/127.0.0.1/udp/04001/quic-v1/p2p/{RELAY_FIXTURE_RELAY_PEER_ID}"
+        ),
+        "invalid base58 PeerId": "/ip4/127.0.0.1/udp/4001/quic-v1/p2p/not-a-peer-id",
+        "invalid multihash PeerId": "/ip4/127.0.0.1/udp/4001/quic-v1/p2p/111",
+    }
+    for label, endpoint in invalid_relay_endpoints.items():
+        transport_endpoint, endpoint_errors = relay_native_quic_transport_endpoint(
+            endpoint, RELAY_FIXTURE_RELAY_PEER_ID
+        )
+        if transport_endpoint is not None or not endpoint_errors:
+            print(f"self-test failed: {label} relay endpoint was accepted", file=sys.stderr)
+            return 1
     for field in (
         "relay_reservation_accepted",
         "relay_reservation_relay_peer_id",
@@ -1701,12 +1804,12 @@ def self_test() -> int:
             print(f"self-test failed: Rust relay reservation accepted without {field}", file=sys.stderr)
             return 1
     rust_relay, relay_record, relay_listener = rust_relay_reservation_fixture()
-    rust_relay["relay_reservation_relay_peer_id"] = "wrong-relay"
+    rust_relay["relay_reservation_relay_peer_id"] = RELAY_FIXTURE_CLIENT_PEER_ID
     if not validate_relay_client_evidence(rust_relay, relay_record, relay_listener):
         print("self-test failed: Rust relay reservation accepted an uncorrelated relay peer", file=sys.stderr)
         return 1
     rust_relay, relay_record, relay_listener = rust_relay_reservation_fixture()
-    rust_relay["relay_reservation_client_peer_id"] = "wrong-client"
+    rust_relay["relay_reservation_client_peer_id"] = RELAY_FIXTURE_RELAY_PEER_ID
     if not validate_relay_client_evidence(rust_relay, relay_record, relay_listener):
         print("self-test failed: Rust relay reservation accepted an uncorrelated client peer", file=sys.stderr)
         return 1
@@ -1724,18 +1827,22 @@ def self_test() -> int:
         return 1
     rust_relay, relay_record, relay_listener = rust_relay_reservation_fixture()
     command = relay_record["result"]["attempts"][0]["command"]
-    command[command.index("--addr") + 1] = "/ip4/127.0.0.1/udp/4999/quic-v1/p2p/listener-peer"
+    command[command.index("--addr") + 1] = (
+        f"/ip4/127.0.0.1/udp/4999/quic-v1/p2p/{RELAY_FIXTURE_RELAY_PEER_ID}"
+    )
     if not validate_relay_client_evidence(rust_relay, relay_record, relay_listener):
         print("self-test failed: Rust relay reservation accepted a mismatched dial command target", file=sys.stderr)
         return 1
     rust_relay, relay_record, relay_listener = rust_relay_reservation_fixture()
     command = relay_record["result"]["attempts"][0]["command"]
-    command[command.index("--peer-id") + 1] = "wrong-relay-peer"
+    command[command.index("--peer-id") + 1] = RELAY_FIXTURE_CLIENT_PEER_ID
     if not validate_relay_client_evidence(rust_relay, relay_record, relay_listener):
         print("self-test failed: Rust relay reservation accepted a mismatched dial command peer", file=sys.stderr)
         return 1
     rust_relay, relay_record, relay_listener = rust_relay_reservation_fixture()
-    conflicting_endpoint = relay_record["addr"].replace("listener-peer", "other-relay-peer")
+    conflicting_endpoint = relay_record["addr"].replace(
+        RELAY_FIXTURE_RELAY_PEER_ID, RELAY_FIXTURE_CLIENT_PEER_ID
+    )
     relay_record["addr"] = conflicting_endpoint
     relay_record["listener_process"]["listen_addrs"] = [conflicting_endpoint]
     command = relay_record["result"]["attempts"][0]["command"]
