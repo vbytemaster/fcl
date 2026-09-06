@@ -1099,6 +1099,12 @@ set(
    CACHE PATH
    "Build directory created by the CMake-owned Stage 6 canonical runner promotion"
 )
+if(_forge_interop_multi_config)
+   set(
+      FORGE_P2P_STAGE6_PROMOTION_DIRECTORY
+      ${FORGE_P2P_STAGE6_PROMOTION_DIRECTORY}/$<CONFIG>
+   )
+endif()
 add_custom_target(
    test_forge_p2p_inventory
    COMMAND ${Python3_EXECUTABLE}

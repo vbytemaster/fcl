@@ -435,15 +435,28 @@ enabled mode, the reviewed `HEAD`, a clean tracked tree, fixture `build-info`,
 Python/binary path and SHA-256 provenance, and the manifest path/SHA-256.
 
 The artifact records raw dialer/listener commands, their binary bindings,
-effective enabled role/capability configuration, result payloads, and a relative
-SHA-256 evidence index. The checker parses each indexed JSON result and requires
-it to equal the corresponding raw payload (except runner-owned `result_file` and
+launcher execution inputs/results, result payloads, and a relative SHA-256
+evidence index. `effective_configuration` is only a checked projection of those
+commands and parsed endpoint results; it does not repeat manifest capability
+labels as authority. The checker parses each indexed JSON result and requires it
+to equal the corresponding raw payload (except runner-owned `result_file` and
 `attempts`), rejects failure text, non-JSON evidence, `/bin/false`, incomplete or
-provenance-only argv, and reused proof files. It validates enabled optional
-services and private PSK/Internet-policy dependencies before accepting a
-direction; native QUIC, native TCP/Yamux and private TCP/Yamux+pnet remain
-separate proofs. An optional capability is tested only through an enabled run and
-is never thereby claimed as default.
+provenance-only argv, and reused proof files.
+
+A future private TCP/Yamux+pnet fixture must pass the same existing absolute
+`--pnet-key-file` outside the runner artifact directory to both dialer and
+listener and use `--transport tcp-pnet`. The key bytes are neither serialized,
+logged nor added to the evidence index.
+Both endpoint result files must report `pnet_enabled=true`,
+`negotiated_pnet=true`, and one shared non-secret SHA-256 `pnet_fingerprint`.
+If a private AutoNAT scenario requires
+`reachability.private_internet_policy`, both commands must additionally pass
+`--private-egress-policy allow-internet`; both results must report that policy
+and `egress_policy_enforced=true`. The checker maps manifest dependencies to
+these concrete command/result proofs rather than trusting enabled-capability
+labels. Native QUIC, native TCP/Yamux and private TCP/Yamux+pnet remain separate
+proofs. An optional capability is tested only through an enabled run and is never
+thereby claimed as default.
 
 The SHA-256 index is tamper-evident, self-consistent local evidence only. It is
 not a signed remote attestation and does not claim malicious-artifact
@@ -462,6 +475,9 @@ There is no cache variable for replaying an externally supplied artifact:
 cmake -S . -B build/forge-p2p-stage6 -G Ninja
 cmake --build build/forge-p2p-stage6 --target test_forge_p2p_stage6_acceptance
 ```
+
+For a multi-config generator, CMake scopes the promotion directory by
+`$<CONFIG>` so independently built fixture/provenance outputs cannot collide.
 
 ### Stage 7: Official plugin and operational surface
 

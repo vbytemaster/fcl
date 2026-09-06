@@ -69,6 +69,11 @@ CAPABILITY_LISTENER_FEATURES = {
     "protocol.autonat_v2_service": "autonatv2",
     "relay.circuit_v2_service": "relay",
 }
+PRIVATE_NETWORK_TRANSPORT = "tcp-pnet"
+PRIVATE_NETWORK_PSK_DEPENDENCY = "security.private_network_psk"
+PRIVATE_EGRESS_POLICY_DEPENDENCY = "reachability.private_internet_policy"
+PRIVATE_EGRESS_POLICY_VALUE = "allow-internet"
+PRIVATE_PNET_RESULT_FIELDS = ("pnet_enabled", "negotiated_pnet", "pnet_fingerprint")
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -550,38 +555,106 @@ def validate_result_semantics(result: dict, record: dict) -> list[str]:
     return errors
 
 
-def validate_effective_configuration(record: dict, capability_id: str, expected_profile: str,
-                                     expected_stack: tuple[str, ...], expected_requires: tuple[str, ...]) -> list[str]:
+def launcher_execution_description(options: dict[str, str], payload: dict) -> dict[str, object]:
+    """Return the non-secret execution inputs/results that a raw record may repeat."""
+    description: dict[str, object] = {"transport": options.get("--transport")}
+    if "--pnet-key-file" in options:
+        description["pnet_key_file"] = options["--pnet-key-file"]
+    if "--private-egress-policy" in options:
+        description["private_egress_policy"] = options["--private-egress-policy"]
+    for field in PRIVATE_PNET_RESULT_FIELDS:
+        if field in payload:
+            description[field] = payload[field]
+    for field in ("private_egress_policy", "egress_policy_enforced"):
+        if field in payload:
+            description[field] = payload[field]
+    return description
+
+
+def validate_effective_configuration(record: dict, expected_profile: str,
+                                     expected_stack: tuple[str, ...], dial_options: dict[str, str],
+                                     listener_options: dict[str, str], dial_payload: dict,
+                                     listener_payload: Optional[dict]) -> list[str]:
+    """Ensure the summary is a projection of commands/results, never manifest authority."""
     configuration = record.get("effective_configuration")
-    if not isinstance(configuration, dict) or set(configuration) != {
-        "activation", "profile", "transport_stack", "requires_capabilities", "roles"
-    }:
-        return ["raw runner effective configuration has invalid schema"]
-    if (
-        configuration.get("activation") != "enabled"
-        or configuration.get("profile") != expected_profile
-        or configuration.get("transport_stack") != list(expected_stack)
-        or configuration.get("requires_capabilities") != list(expected_requires)
-    ):
-        return ["raw runner effective configuration differs from the enabled capability requirements"]
-    roles = configuration.get("roles")
-    if not isinstance(roles, dict) or set(roles) != {"dialer", "listener"}:
-        return ["raw runner effective configuration lacks dialer/listener roles"]
-    required_enabled = {capability_id, *expected_requires}
-    for name in ("dialer", "listener"):
-        role = roles.get(name)
-        if not isinstance(role, dict) or set(role) != {"implementation", "role", "enabled_capabilities"}:
-            return ["raw runner effective configuration role has invalid schema"]
-        if role.get("implementation") != record.get(name) or role.get("role") != name:
-            return ["raw runner effective configuration role differs from the raw direction"]
-        enabled = role.get("enabled_capabilities")
-        if not isinstance(enabled, list) or set(enabled) != required_enabled or len(enabled) != len(set(enabled)):
-            return ["raw runner effective configuration does not enable the capability and its dependencies"]
-    if expected_profile == "private_network" and "autonat_" in str(record.get("scenario")) and (
-        "reachability.private_internet_policy" not in expected_requires
-    ):
-        return ["private AutoNAT acceptance must require reachability.private_internet_policy"]
+    expected = {
+        "activation": "enabled",
+        "profile": expected_profile,
+        "transport_stack": list(expected_stack),
+        "dialer": launcher_execution_description(dial_options, dial_payload),
+        "listener": launcher_execution_description(listener_options, listener_payload or {}),
+    }
+    if configuration != expected:
+        return ["raw runner effective configuration does not match launcher inputs and result evidence"]
     return []
+
+
+def validate_private_network_proofs(capability_id: str, expected_requires: tuple[str, ...],
+                                    dial_options: dict[str, str], listener_options: dict[str, str],
+                                    dial_payload: dict, listener_payload: Optional[dict],
+                                    artifact_root: Path, indexed_evidence: dict[Path, str]) -> list[str]:
+    """Map private-profile dependencies to command and endpoint result proof."""
+    errors: list[str] = []
+    unmapped_dependencies = set(expected_requires) - {
+        PRIVATE_NETWORK_PSK_DEPENDENCY,
+        PRIVATE_EGRESS_POLICY_DEPENDENCY,
+    }
+    if unmapped_dependencies:
+        errors.append(
+            f"private network dependencies lack command/result proof mappings: {sorted(unmapped_dependencies)}"
+        )
+    if dial_options.get("--transport") != PRIVATE_NETWORK_TRANSPORT or (
+        listener_options.get("--transport") != PRIVATE_NETWORK_TRANSPORT
+    ):
+        errors.append("private network commands must use --transport tcp-pnet, not ordinary tcp")
+    dial_key = absolute_path(dial_options.get("--pnet-key-file"))
+    listener_key = absolute_path(listener_options.get("--pnet-key-file"))
+    if (
+        dial_key is None
+        or listener_key is None
+        or dial_key != listener_key
+        or not dial_key.is_file()
+    ):
+        errors.append("private network commands must reference the same existing --pnet-key-file")
+    else:
+        try:
+            dial_key.relative_to(artifact_root)
+        except ValueError:
+            pass
+        else:
+            errors.append("private-network key material must stay outside the artifact evidence directory")
+        if dial_key in indexed_evidence:
+            errors.append("private-network key material must not be serialized or hashed as artifact evidence")
+    for label, payload in (("dialer", dial_payload), ("listener", listener_payload)):
+        if not isinstance(payload, dict):
+            errors.append(f"private network {label} lacks a parsed result payload")
+            continue
+        if payload.get("pnet_enabled") is not True or payload.get("negotiated_pnet") is not True:
+            errors.append(f"private network {label} result does not confirm enabled PNET negotiation")
+        fingerprint = payload.get("pnet_fingerprint")
+        if not isinstance(fingerprint, str) or SHA256.fullmatch(fingerprint) is None:
+            errors.append(f"private network {label} result lacks a stable non-secret PNET fingerprint")
+    if isinstance(listener_payload, dict) and dial_payload.get("pnet_fingerprint") != listener_payload.get("pnet_fingerprint"):
+        errors.append("private network endpoints do not report the same PNET fingerprint")
+
+    requires_egress = PRIVATE_EGRESS_POLICY_DEPENDENCY in expected_requires
+    is_private_autonat = capability_id.startswith("protocol.autonat_")
+    if is_private_autonat and not requires_egress:
+        errors.append("private AutoNAT acceptance must require reachability.private_internet_policy")
+    if requires_egress:
+        for label, options, payload in (
+            ("dialer", dial_options, dial_payload),
+            ("listener", listener_options, listener_payload),
+        ):
+            if options.get("--private-egress-policy") != PRIVATE_EGRESS_POLICY_VALUE:
+                errors.append(f"private Internet policy requires {label} --private-egress-policy")
+                continue
+            if not isinstance(payload, dict) or (
+                payload.get("private_egress_policy") != PRIVATE_EGRESS_POLICY_VALUE
+                or payload.get("egress_policy_enforced") is not True
+            ):
+                errors.append(f"private Internet policy lacks {label} executable result evidence")
+    return errors
 
 
 def validate_successful_raw_record(
@@ -617,10 +690,6 @@ def validate_successful_raw_record(
         errors.append("raw runner acceptance scenario differs from the capability requirement")
     if record.get("scenario") != expected_runner_scenario.split("/", 1)[1]:
         errors.append("raw runner fixture scenario does not match runner_scenario_id")
-    errors.extend(validate_effective_configuration(
-        record, capability_id, expected_profile, expected_stack, expected_requires
-    ))
-
     result = record.get("result")
     if not isinstance(result, dict) or result.get("status") != "ok":
         errors.append("raw runner result does not report status=ok")
@@ -643,6 +712,7 @@ def validate_successful_raw_record(
         errors.append("raw runner result contains contradictory failure text")
     errors.extend(validate_result_semantics(result, record))
     claim_paths = {result_path}
+    dial_options: dict[str, str] = {}
     for attempt in attempts:
         if not isinstance(attempt, dict) or type(attempt.get("exit_code")) is not int or attempt["exit_code"] != 0:
             errors.append("raw runner command attempt did not exit with code 0")
@@ -657,7 +727,11 @@ def validate_successful_raw_record(
         options, command_errors = command_options(command, "dial")
         errors.extend(command_errors)
         required_options = {"--scenario", "--peer-id", "--addr", "--result-file", "--store-dir", "--transport"}
-        if set(options) - (required_options | {"--payload", "--target-peer-id"}) or not required_options <= set(options):
+        optional_options = {"--payload", "--target-peer-id"}
+        if expected_profile == "private_network":
+            required_options.add("--pnet-key-file")
+            optional_options.add("--private-egress-policy")
+        if set(options) - (required_options | optional_options) or not required_options <= set(options):
             errors.append("raw runner dial command has an invalid option schema")
         elif (
             options["--scenario"] != record.get("scenario")
@@ -668,12 +742,16 @@ def validate_successful_raw_record(
             or options["--transport"] != record.get("transport")
         ):
             errors.append("raw runner dial command does not match its recorded result")
+        else:
+            dial_options = options
         log_file = attempt.get("log_file")
         if not isinstance(log_file, str):
             errors.append("raw runner command attempt lacks a log file")
         else:
             claim_paths.add(Path(log_file).resolve())
 
+    listener_options: dict[str, str] = {}
+    listener_payload: Optional[dict] = None
     listener = record.get("listener_process")
     terminal = listener.get("terminal_status") if isinstance(listener, dict) else None
     listener_log = listener.get("log_file") if isinstance(listener, dict) else None
@@ -688,7 +766,11 @@ def validate_successful_raw_record(
             options, command_errors = command_options(command, "listen")
             errors.extend(command_errors)
             required_options = {"--ready-file", "--stop-file", "--store-dir", "--features", "--transport", "--scenario"}
-            if set(options) - (required_options | {"--result-file", "--seed-file", "--seed-peer-id", "--seed-addr", "--expected-messages"}) or not required_options <= set(options):
+            optional_options = {"--result-file", "--seed-file", "--seed-peer-id", "--seed-addr", "--expected-messages"}
+            if expected_profile == "private_network":
+                required_options.update({"--pnet-key-file", "--result-file"})
+                optional_options.add("--private-egress-policy")
+            if set(options) - (required_options | optional_options) or not required_options <= set(options):
                 errors.append("raw runner listener command has an invalid option schema")
             elif (
                 options["--scenario"] != record.get("scenario")
@@ -702,6 +784,8 @@ def validate_successful_raw_record(
                 )
             ):
                 errors.append("raw runner listener command does not match the recorded listener")
+            else:
+                listener_options = options
             expected_feature = CAPABILITY_LISTENER_FEATURES.get(capability_id)
             if expected_feature is not None and expected_feature not in options.get("--features", "").split(","):
                 errors.append("raw runner listener command does not enable the required optional service")
@@ -721,6 +805,27 @@ def validate_successful_raw_record(
                 if listener_payload is not None and listener_payload != record.get("listener_result"):
                     errors.append("raw runner listener result file does not match the recorded listener payload")
                 claim_paths.add(listener_result_path)
+
+    if expected_profile == "private_network":
+        errors.extend(validate_private_network_proofs(
+            capability_id,
+            expected_requires,
+            dial_options,
+            listener_options,
+            payload or {},
+            listener_payload,
+            artifact_root,
+            indexed_evidence,
+        ))
+    errors.extend(validate_effective_configuration(
+        record,
+        expected_profile,
+        expected_stack,
+        dial_options,
+        listener_options,
+        payload or {},
+        listener_payload,
+    ))
 
     for path in claim_paths:
         if path not in indexed_evidence:
@@ -898,17 +1003,27 @@ def validate(
     )
 
 
-def fixture_manifest(expected_status: str = "passed") -> dict[str, object]:
+def fixture_manifest(expected_status: str = "passed", capability_id: str = "test.protocol",
+                     profile: str = "native", requires: tuple[str, ...] = ()) -> dict[str, object]:
+    if profile == "native":
+        runner_scenario_id = "tcp_noise/test_scenario"
+        transport_stack = ["tcp", "yamux"]
+    elif profile == "private_network":
+        runner_scenario_id = "private_tcp_yamux_pnet/test_scenario"
+        transport_stack = ["tcp", "yamux", "pnet"]
+    else:
+        raise ValueError(f"unsupported fixture profile: {profile}")
     entry: dict[str, object] = {
         "scenarios": [
             {
                 "id": "test_scenario",
-                "runner_scenario_id": "tcp_noise/test_scenario",
-                "profile": "native",
-                "transport_stack": ["tcp", "yamux"],
+                "runner_scenario_id": runner_scenario_id,
+                "profile": profile,
+                "transport_stack": transport_stack,
                 "activation": "enabled",
                 "registration": "registered",
                 "source_case_id": "test.case",
+                "requires_capabilities": list(requires),
                 "required_directions": ["forge_to_go", "go_to_forge"],
                 "expected_status": expected_status,
             }
@@ -919,7 +1034,7 @@ def fixture_manifest(expected_status: str = "passed") -> dict[str, object]:
     return {
         "interop_acceptance_registry": {
             "artifact_schema": ARTIFACT_SCHEMA,
-            "capabilities": {"test.protocol": entry},
+            "capabilities": {capability_id: entry},
         }
     }
 
@@ -949,7 +1064,9 @@ def build_evidence_index(root: Path, artifacts: list[dict]) -> list[dict]:
     ]
 
 
-def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: str) -> None:
+def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: str,
+                   capability_id: str = "test.protocol", profile: str = "native",
+                   requires: tuple[str, ...] = ()) -> None:
     artifact_root = artifact_path.parent / "interop-run"
     artifact_root.mkdir(parents=True, exist_ok=True)
     donors_root = root / "donors"
@@ -962,6 +1079,25 @@ def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: s
     timestamp = max(time.time(), float(subprocess.check_output(
         ["git", "-C", str(root), "show", "-s", "--format=%ct", "HEAD"], text=True
     ).strip()))
+    if profile == "native":
+        runner_scenario_id = "tcp_noise/test_scenario"
+        transport_stack = ["tcp", "yamux"]
+        transport = "tcp"
+    elif profile == "private_network":
+        runner_scenario_id = "private_tcp_yamux_pnet/test_scenario"
+        transport_stack = ["tcp", "yamux", "pnet"]
+        transport = PRIVATE_NETWORK_TRANSPORT
+    else:
+        raise ValueError(f"unsupported fixture profile: {profile}")
+    pnet_key_file = root / "private-inputs" / "fixture.pnet.key"
+    if profile == "private_network":
+        pnet_key_file.parent.mkdir(exist_ok=True)
+        # The fixture key is intentionally not recorded, logged or indexed as evidence.
+        pnet_key_file.write_bytes(b"fixture-private-network-key")
+    private_egress = (
+        PRIVATE_EGRESS_POLICY_VALUE if PRIVATE_EGRESS_POLICY_DEPENDENCY in requires else None
+    )
+    listener_features = "ping,autonatv1" if capability_id.startswith("protocol.autonat_v1_") else "ping"
     artifacts: list[dict] = []
     for dialer, listener in (("forge", "go"), ("go", "forge")):
         stem = f"{dialer}-to-{listener}"
@@ -975,37 +1111,67 @@ def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: s
             "scenario": "test_scenario",
             "status": "ok",
         }
-        result_file.write_text(json.dumps(result_payload) + "\n")
         listener_payload = {"implementation": listener, "role": "listener", "status": "ok"}
+        if profile == "private_network":
+            result_payload.update({
+                "pnet_enabled": True,
+                "negotiated_pnet": True,
+                "pnet_fingerprint": "a" * 64,
+            })
+            listener_payload.update({
+                "pnet_enabled": True,
+                "negotiated_pnet": True,
+                "pnet_fingerprint": "a" * 64,
+            })
+        if private_egress is not None:
+            result_payload.update({
+                "private_egress_policy": private_egress,
+                "egress_policy_enforced": True,
+            })
+            listener_payload.update({
+                "private_egress_policy": private_egress,
+                "egress_policy_enforced": True,
+            })
+        result_file.write_text(json.dumps(result_payload) + "\n")
         listener_result_file.write_text(json.dumps(listener_payload) + "\n")
         command_log.write_text("dial finished\n")
         listener_log.write_text("listener stopped\n")
+        dial_command = [
+            str(binaries[dialer]), "dial", "--scenario", "test_scenario", "--peer-id", "peer",
+            "--addr", "/ip4/127.0.0.1/tcp/1", "--result-file", str(result_file),
+            "--store-dir", str(artifact_root / f"{stem}-dial-store"), "--transport", transport,
+        ]
+        listener_command = [
+            str(binaries[listener]), "listen", "--ready-file", str(artifact_root / f"{stem}-ready.json"),
+            "--stop-file", str(artifact_root / f"{stem}.stop"),
+            "--store-dir", str(artifact_root / f"{stem}-listen-store"), "--features", listener_features,
+            "--transport", transport, "--scenario", "test_scenario", "--result-file", str(listener_result_file),
+        ]
+        if profile == "private_network":
+            dial_command.extend(["--pnet-key-file", str(pnet_key_file)])
+            listener_command.extend(["--pnet-key-file", str(pnet_key_file)])
+        if private_egress is not None:
+            dial_command.extend(["--private-egress-policy", private_egress])
+            listener_command.extend(["--private-egress-policy", private_egress])
         artifacts.append({
             "dialer": dialer,
             "listener": listener,
             "scenario": "test_scenario",
-            "runner_scenario_id": "tcp_noise/test_scenario",
+            "runner_scenario_id": runner_scenario_id,
             "acceptance_scenario_id": "test_scenario",
-            "profile": "native",
-            "transport_stack": ["tcp", "yamux"],
-            "transport": "tcp",
+            "profile": profile,
+            "transport_stack": transport_stack,
+            "transport": transport,
             "effective_configuration": {
                 "activation": "enabled",
-                "profile": "native",
-                "transport_stack": ["tcp", "yamux"],
-                "requires_capabilities": [],
-                "roles": {
-                    "dialer": {
-                        "implementation": dialer,
-                        "role": "dialer",
-                        "enabled_capabilities": ["test.protocol"],
-                    },
-                    "listener": {
-                        "implementation": listener,
-                        "role": "listener",
-                        "enabled_capabilities": ["test.protocol"],
-                    },
-                },
+                "profile": profile,
+                "transport_stack": transport_stack,
+                "dialer": launcher_execution_description(
+                    dict(zip(dial_command[2::2], dial_command[3::2])), result_payload
+                ),
+                "listener": launcher_execution_description(
+                    dict(zip(listener_command[2::2], listener_command[3::2])), listener_payload
+                ),
             },
             "result": {
                 **result_payload,
@@ -1013,22 +1179,13 @@ def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: s
                 "attempts": [{
                     "kind": "dial",
                     "scenario_id": "test_scenario",
-                    "command": [
-                        str(binaries[dialer]), "dial", "--scenario", "test_scenario", "--peer-id", "peer",
-                        "--addr", "/ip4/127.0.0.1/tcp/1", "--result-file", str(result_file),
-                        "--store-dir", str(artifact_root / f"{stem}-dial-store"), "--transport", "tcp",
-                    ],
+                    "command": dial_command,
                     "log_file": str(command_log),
                     "exit_code": 0,
                 }],
             },
             "listener_process": {
-                "command": [
-                    str(binaries[listener]), "listen", "--ready-file", str(artifact_root / f"{stem}-ready.json"),
-                    "--stop-file", str(artifact_root / f"{stem}.stop"),
-                    "--store-dir", str(artifact_root / f"{stem}-listen-store"), "--features", "ping",
-                    "--transport", "tcp", "--scenario", "test_scenario", "--result-file", str(listener_result_file),
-                ],
+                "command": listener_command,
                 "log_file": str(listener_log),
                 "terminal_status": {"exit_code": 0, "termination": "graceful"},
             },
@@ -1094,12 +1251,39 @@ def git_call(root: Path, *args: str) -> None:
         raise RuntimeError(result.stderr.strip() or "git command failed")
 
 
-def expect_rejected(root: Path, manifest_path: Path, artifact_path: Path, head: str, label: str) -> bool:
+def expect_rejected(root: Path, manifest_path: Path, artifact_path: Path, head: str, label: str,
+                    expected_error: Optional[str] = None) -> bool:
     errors, _ = validate(root, manifest_path, artifact_path, head)
     if errors:
-        return True
+        if expected_error is None or any(expected_error in error for error in errors):
+            return True
+        print(
+            f"self-test failed: {label} did not report {expected_error!r}: {errors}",
+            file=sys.stderr,
+        )
+        return False
     print(f"self-test failed: {label} was accepted", file=sys.stderr)
     return False
+
+
+def replace_option(command: list[str], option: str, value: str) -> None:
+    index = command.index(option)
+    command[index + 1] = value
+
+
+def remove_option(command: list[str], option: str) -> None:
+    index = command.index(option)
+    del command[index:index + 2]
+
+
+def rewrite_result_evidence(record: dict) -> None:
+    result = record["result"]
+    Path(result["result_file"]).write_text(
+        json.dumps({key: value for key, value in result.items() if key not in {"result_file", "attempts"}}) + "\n"
+    )
+    listener_result_file = record.get("listener_result_file")
+    if isinstance(listener_result_file, str):
+        Path(listener_result_file).write_text(json.dumps(record["listener_result"]) + "\n")
 
 
 def self_test() -> int:
@@ -1110,7 +1294,7 @@ def self_test() -> int:
         artifact_path = root / "artifacts" / "interop-artifacts.json"
         runner_path.parent.mkdir(parents=True)
         runner_path.write_text("# fixture runner\n")
-        (root / ".gitignore").write_text("artifacts/\n__pycache__/\n")
+        (root / ".gitignore").write_text("artifacts/\nprivate-inputs/\nprivate-*.json\n__pycache__/\n")
         manifest_path.write_text(json.dumps(fixture_manifest()))
         try:
             git_call(root, "init", "-q")
@@ -1244,6 +1428,136 @@ def self_test() -> int:
         if not expect_rejected(root, manifest_path, artifact_path, head, "runner failures"):
             return 1
 
+        private_manifest_path = root / "private-manifest.json"
+        private_artifact_path = root / "artifacts" / "private" / "interop-artifacts.json"
+        private_requires = (PRIVATE_NETWORK_PSK_DEPENDENCY,)
+        private_manifest_path.write_text(json.dumps(fixture_manifest(
+            capability_id="test.private_protocol",
+            profile="private_network",
+            requires=private_requires,
+        )))
+        write_artifact(
+            root,
+            private_manifest_path,
+            private_artifact_path,
+            head,
+            capability_id="test.private_protocol",
+            profile="private_network",
+            requires=private_requires,
+        )
+        private_errors, private_limitations = validate(root, private_manifest_path, private_artifact_path, head)
+        if private_errors or private_limitations:
+            print("self-test failed: private-network launcher/result artifact was not accepted", file=sys.stderr)
+            return 1
+
+        artifact = load_json(private_artifact_path)
+        assert isinstance(artifact, dict)
+        for record in artifact["artifacts"]:
+            assert isinstance(record, dict)
+            record["transport"] = "tcp"
+            replace_option(record["result"]["attempts"][0]["command"], "--transport", "tcp")
+            replace_option(record["listener_process"]["command"], "--transport", "tcp")
+            record["effective_configuration"]["dialer"]["transport"] = "tcp"
+            record["effective_configuration"]["listener"]["transport"] = "tcp"
+        private_artifact_path.write_text(json.dumps(artifact))
+        if not expect_rejected(
+            root,
+            private_manifest_path,
+            private_artifact_path,
+            head,
+            "private profile over ordinary tcp",
+            "private network commands must use --transport tcp-pnet",
+        ):
+            return 1
+
+        write_artifact(
+            root,
+            private_manifest_path,
+            private_artifact_path,
+            head,
+            capability_id="test.private_protocol",
+            profile="private_network",
+            requires=private_requires,
+        )
+        artifact = load_json(private_artifact_path)
+        assert isinstance(artifact, dict)
+        for record in artifact["artifacts"]:
+            assert isinstance(record, dict)
+            remove_option(record["result"]["attempts"][0]["command"], "--pnet-key-file")
+            remove_option(record["listener_process"]["command"], "--pnet-key-file")
+            for endpoint in ("dialer", "listener"):
+                record["effective_configuration"][endpoint].pop("pnet_key_file")
+                for field in PRIVATE_PNET_RESULT_FIELDS:
+                    record["effective_configuration"][endpoint].pop(field)
+            for field in PRIVATE_PNET_RESULT_FIELDS:
+                record["result"].pop(field)
+                record["listener_result"].pop(field)
+            rewrite_result_evidence(record)
+        artifact["evidence_index"] = build_evidence_index(
+            Path(artifact["artifact_root"]).resolve(), artifact["artifacts"]
+        )
+        private_artifact_path.write_text(json.dumps(artifact))
+        if not expect_rejected(
+            root,
+            private_manifest_path,
+            private_artifact_path,
+            head,
+            "PNET profile label without PNET command/result proof",
+            "private network commands must reference the same existing --pnet-key-file",
+        ):
+            return 1
+
+        autonat_manifest_path = root / "private-autonat-manifest.json"
+        autonat_artifact_path = root / "artifacts" / "private-autonat" / "interop-artifacts.json"
+        autonat_requires = (PRIVATE_NETWORK_PSK_DEPENDENCY, PRIVATE_EGRESS_POLICY_DEPENDENCY)
+        autonat_manifest_path.write_text(json.dumps(fixture_manifest(
+            capability_id="protocol.autonat_v1_client",
+            profile="private_network",
+            requires=autonat_requires,
+        )))
+        write_artifact(
+            root,
+            autonat_manifest_path,
+            autonat_artifact_path,
+            head,
+            capability_id="protocol.autonat_v1_client",
+            profile="private_network",
+            requires=autonat_requires,
+        )
+        autonat_errors, autonat_limitations = validate(
+            root, autonat_manifest_path, autonat_artifact_path, head
+        )
+        if autonat_errors or autonat_limitations:
+            print("self-test failed: private AutoNAT launcher/result artifact was not accepted", file=sys.stderr)
+            return 1
+        artifact = load_json(autonat_artifact_path)
+        assert isinstance(artifact, dict)
+        for record in artifact["artifacts"]:
+            assert isinstance(record, dict)
+            remove_option(record["result"]["attempts"][0]["command"], "--private-egress-policy")
+            remove_option(record["listener_process"]["command"], "--private-egress-policy")
+            for endpoint in ("dialer", "listener"):
+                record["effective_configuration"][endpoint].pop("private_egress_policy")
+                record["effective_configuration"][endpoint].pop("egress_policy_enforced")
+            record["result"].pop("private_egress_policy")
+            record["result"].pop("egress_policy_enforced")
+            record["listener_result"].pop("private_egress_policy")
+            record["listener_result"].pop("egress_policy_enforced")
+            rewrite_result_evidence(record)
+        artifact["evidence_index"] = build_evidence_index(
+            Path(artifact["artifact_root"]).resolve(), artifact["artifacts"]
+        )
+        autonat_artifact_path.write_text(json.dumps(artifact))
+        if not expect_rejected(
+            root,
+            autonat_manifest_path,
+            autonat_artifact_path,
+            head,
+            "private AutoNAT without executable egress policy",
+            "private Internet policy requires dialer --private-egress-policy",
+        ):
+            return 1
+
         write_artifact(root, manifest_path, artifact_path, head)
         artifact = load_json(artifact_path)
         assert isinstance(artifact, dict)
@@ -1326,7 +1640,8 @@ def self_test() -> int:
             return 1
     print(
         "stage6 acceptance checker self-test ok: canonical argv, forged executables, missing, stale, "
-        "nonzero, failures, result parsing, evidence hashes/reuse, dirty tree, empty scenarios and limitations covered"
+        "nonzero, failures, result parsing, evidence hashes/reuse, private PNET/egress proofs, dirty tree, "
+        "empty scenarios and limitations covered"
     )
     return 0
 

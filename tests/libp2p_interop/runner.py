@@ -70,6 +70,10 @@ LOCKED_FORGE_FIXTURE_COMPILER = {
     "compiler_id": "Clang",
     "compiler_version": "22.1.8",
 }
+PRIVATE_NETWORK_TRANSPORT = "tcp-pnet"
+PRIVATE_EGRESS_POLICY_DEPENDENCY = "reachability.private_internet_policy"
+PRIVATE_EGRESS_POLICY_VALUE = "allow-internet"
+PRIVATE_PNET_RESULT_FIELDS = ("pnet_enabled", "negotiated_pnet", "pnet_fingerprint")
 
 
 def load_acceptance_configurations(path: Optional[str]) -> dict[str, dict]:
@@ -98,37 +102,48 @@ def load_acceptance_configurations(path: Optional[str]) -> dict[str, dict]:
                 or scenario_id in configurations
             ):
                 raise RuntimeError("acceptance manifest capability requirements are invalid")
-            configurations[scenario_id] = {
-                "capability": capability_id,
-                "requires_capabilities": list(requires),
-            }
+            configurations[scenario_id] = {"requires_capabilities": list(requires)}
     return configurations
 
 
-def effective_configuration(configurations: dict[str, dict], acceptance_scenario_id: str,
-                            dialer: str, listener: str, profile: str,
-                            transport_stack: tuple[str, ...]) -> dict:
-    configuration = configurations.get(acceptance_scenario_id, {})
-    capability = configuration.get("capability")
-    requires = configuration.get("requires_capabilities", [])
-    enabled = [capability, *requires] if isinstance(capability, str) else list(requires)
+def command_option_values(command: object) -> dict[str, str]:
+    if not isinstance(command, list) or len(command) < 2:
+        return {}
+    return {
+        command[index]: command[index + 1]
+        for index in range(2, len(command), 2)
+        if isinstance(command[index], str) and isinstance(command[index + 1], str)
+    }
+
+
+def launcher_execution_description(command: object, result: object) -> dict[str, object]:
+    """Keep only non-secret command inputs and result fields required by promotion."""
+    options = command_option_values(command)
+    description: dict[str, object] = {"transport": options.get("--transport")}
+    if "--pnet-key-file" in options:
+        description["pnet_key_file"] = options["--pnet-key-file"]
+    if "--private-egress-policy" in options:
+        description["private_egress_policy"] = options["--private-egress-policy"]
+    if isinstance(result, dict):
+        for field in PRIVATE_PNET_RESULT_FIELDS:
+            if field in result:
+                description[field] = result[field]
+        for field in ("private_egress_policy", "egress_policy_enforced"):
+            if field in result:
+                description[field] = result[field]
+    return description
+
+
+def effective_configuration(profile: str, transport_stack: tuple[str, ...], dial_result: dict,
+                            listener_command: list[str], listener_result: Optional[dict]) -> dict:
+    attempts = dial_result.get("attempts")
+    dial_command = attempts[-1].get("command") if isinstance(attempts, list) and attempts else None
     return {
         "activation": "enabled",
         "profile": profile,
         "transport_stack": list(transport_stack),
-        "requires_capabilities": list(requires),
-        "roles": {
-            "dialer": {
-                "implementation": dialer,
-                "role": "dialer",
-                "enabled_capabilities": enabled,
-            },
-            "listener": {
-                "implementation": listener,
-                "role": "listener",
-                "enabled_capabilities": enabled,
-            },
-        },
+        "dialer": launcher_execution_description(dial_command, dial_result),
+        "listener": launcher_execution_description(listener_command, listener_result),
     }
 
 
@@ -437,7 +452,9 @@ def attach_attempts(result: dict, attempts: list[dict]) -> dict:
 def start_listener(binary: Path, implementation: str, work: Path, scenario: Optional[str] = None,
                    result_file: Optional[Path] = None, seed_file: Optional[Path] = None,
                    expected_messages: Optional[int] = None, transport: str = "quic",
-                   seed_peer_id: Optional[str] = None, seed_addr: Optional[str] = None) -> Listener:
+                   seed_peer_id: Optional[str] = None, seed_addr: Optional[str] = None,
+                   pnet_key_file: Optional[Path] = None,
+                   private_egress_policy: Optional[str] = None) -> Listener:
     ready_file = work / f"{implementation}-ready.json"
     stop_file = work / f"{implementation}.stop"
     log_file = work / f"{implementation}.log"
@@ -458,6 +475,10 @@ def start_listener(binary: Path, implementation: str, work: Path, scenario: Opti
     ]
     if scenario is not None:
         command.extend(["--scenario", scenario])
+    if pnet_key_file is not None:
+        command.extend(["--pnet-key-file", str(pnet_key_file)])
+    if private_egress_policy is not None:
+        command.extend(["--private-egress-policy", private_egress_policy])
     if result_file is not None:
         command.extend(["--result-file", str(result_file)])
     if seed_file is not None:
@@ -513,7 +534,8 @@ def start_destination(binary: Path, implementation: str, relay_addr: str, relay_
 
 def run_dial(binary: Path, implementation: str, scenario: str, peer_id: str, addr: str, work: Path,
              payload: Optional[str] = None, transport: str = "quic", fresh_store_each_attempt: bool = False,
-             target_peer_id: Optional[str] = None) -> dict:
+             target_peer_id: Optional[str] = None, pnet_key_file: Optional[Path] = None,
+             private_egress_policy: Optional[str] = None) -> dict:
     payload_suffix = "" if payload is None else f"-{payload}"
     result_file = work / f"{implementation}-dial-{scenario}{payload_suffix}.json"
     log_file = work / f"{implementation}-dial-{scenario}{payload_suffix}.log"
@@ -538,6 +560,10 @@ def run_dial(binary: Path, implementation: str, scenario: str, peer_id: str, add
         command.extend(["--payload", payload])
     if target_peer_id is not None:
         command.extend(["--target-peer-id", target_peer_id])
+    if pnet_key_file is not None:
+        command.extend(["--pnet-key-file", str(pnet_key_file)])
+    if private_egress_policy is not None:
+        command.extend(["--private-egress-policy", private_egress_policy])
     try:
         reset_paths = (store_dir, result_file) if fresh_store_each_attempt else ()
         attempts = run_command_with_attempts(
@@ -1010,19 +1036,58 @@ def run_pair_with_transport(dialer_binary: Path, dialer: str, listener_binary: P
                             root: Path, transport: str, acceptance_profile: str,
                             transport_stack: tuple[str, ...], runner_scenario_id: str,
                             acceptance_scenario_id: str,
-                            acceptance_configurations: Optional[dict[str, dict]] = None) -> dict:
+                            acceptance_configurations: Optional[dict[str, dict]] = None,
+                            pnet_key_file: Optional[Path] = None) -> dict:
     work = root / f"{transport}-{dialer}-to-{listener}-{acceptance_scenario_id}"
     work.mkdir(parents=True, exist_ok=True)
+    configuration = (acceptance_configurations or {}).get(acceptance_scenario_id, {})
+    requires = configuration.get("requires_capabilities", [])
+    if not isinstance(requires, list):
+        raise RuntimeError("acceptance scenario capability requirements are invalid")
+    private_egress_policy = None
+    if acceptance_profile == "private_network":
+        if transport != PRIVATE_NETWORK_TRANSPORT or transport_stack != ("tcp", "yamux", "pnet"):
+            raise RuntimeError("private-network runner scenarios require the tcp-pnet transport stack")
+        if pnet_key_file is None or not pnet_key_file.is_file():
+            raise RuntimeError("private-network runner scenarios require a prepared --pnet-key-file")
+        pnet_key_file = pnet_key_file.resolve()
+        try:
+            pnet_key_file.relative_to(root.resolve())
+        except ValueError:
+            pass
+        else:
+            raise RuntimeError("private-network key material must stay outside the runner artifact directory")
+        if PRIVATE_EGRESS_POLICY_DEPENDENCY in requires:
+            private_egress_policy = PRIVATE_EGRESS_POLICY_VALUE
     listener_result = (
         work / f"{listener}-listen-{scenario}.json"
-        if scenario in PUBSUB_SCENARIOS or scenario in DHT_VALUE_SCENARIOS
+        if acceptance_profile == "private_network" or scenario in PUBSUB_SCENARIOS or scenario in DHT_VALUE_SCENARIOS
         else None
     )
-    server = start_listener(listener_binary, listener, work, scenario, listener_result, transport=transport)
+    server = start_listener(
+        listener_binary,
+        listener,
+        work,
+        scenario,
+        listener_result,
+        transport=transport,
+        pnet_key_file=pnet_key_file,
+        private_egress_policy=private_egress_policy,
+    )
     try:
         addr = server.ready["listen_addrs"][0]
         peer_id = server.ready["peer_id"]
-        result = run_dial(dialer_binary, dialer, scenario, peer_id, addr, work, transport=transport)
+        result = run_dial(
+            dialer_binary,
+            dialer,
+            scenario,
+            peer_id,
+            addr,
+            work,
+            transport=transport,
+            pnet_key_file=pnet_key_file,
+            private_egress_policy=private_egress_policy,
+        )
         if scenario == "identify" and dialer == "go" and listener == "forge":
             if result.get("signed_peer_record") is not True:
                 raise RuntimeError("Go libp2p did not receive Forge's signed Identify peer record")
@@ -1059,12 +1124,11 @@ def run_pair_with_transport(dialer_binary: Path, dialer: str, listener_binary: P
             "result": result,
             "listener_result": delivered,
             "effective_configuration": effective_configuration(
-                acceptance_configurations or {},
-                acceptance_scenario_id,
-                dialer,
-                listener,
                 acceptance_profile,
                 transport_stack,
+                result,
+                server.command,
+                delivered,
             ),
         }
         if transport == "tcp":

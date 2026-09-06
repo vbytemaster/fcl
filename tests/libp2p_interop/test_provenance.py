@@ -174,6 +174,10 @@ class InteropCMakeConfigurationTest(unittest.TestCase):
             source,
         )
         self.assertEqual(source.count("--build-dir ${FORGE_INTEROP_ARTIFACT_DIRECTORY}"), 3)
+        self.assertIn(
+            "set(\n      FORGE_P2P_STAGE6_PROMOTION_DIRECTORY\n      ${FORGE_P2P_STAGE6_PROMOTION_DIRECTORY}/$<CONFIG>\n   )",
+            source,
+        )
         self.assertIn("add_dependencies(forge_interop_fixture forge_interop_fixture_build_info)", source)
         self.assertNotIn("OBJECT_DEPENDS", source)
 
