@@ -124,11 +124,19 @@ def reject_nonfinite_json_constant(value: str) -> object:
     raise ValueError(f"non-finite JSON constant is not permitted: {value}")
 
 
+def parse_finite_json_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"non-finite JSON number is not permitted: {value}")
+    return parsed
+
+
 def load_json(path: Path) -> object:
     return json.loads(
         path.read_text(),
         object_pairs_hook=reject_duplicate_keys,
         parse_constant=reject_nonfinite_json_constant,
+        parse_float=parse_finite_json_float,
     )
 
 
@@ -759,9 +767,12 @@ def relay_native_quic_listener_endpoint(
     port = components[4]
     if not port or any(character < "0" or character > "9" for character in port):
         return None, None, ["Rust relay endpoint has a non-decimal UDP port"]
-    if not 1 <= int(port) <= 65535:
+    if len(port) > 5:
+        return None, None, ["Rust relay endpoint UDP port has more than five decimal digits"]
+    port_number = int(port)
+    if not 1 <= port_number <= 65535:
         return None, None, ["Rust relay endpoint UDP port is outside 1..65535"]
-    if str(int(port)) != port:
+    if str(port_number) != port:
         return None, None, ["Rust relay endpoint UDP port is not canonical"]
 
     peer_id = components[7] if len(components) == 8 else None
@@ -1843,6 +1854,9 @@ def self_test() -> int:
         "non-canonical UDP port": (
             f"/ip4/127.0.0.1/udp/04001/quic-v1/p2p/{RELAY_FIXTURE_RELAY_PEER_ID}"
         ),
+        "excessively long UDP port": (
+            f"/ip4/127.0.0.1/udp/{'9' * 4301}/quic-v1/p2p/{RELAY_FIXTURE_RELAY_PEER_ID}"
+        ),
         "invalid base58 PeerId": "/ip4/127.0.0.1/udp/4001/quic-v1/p2p/not-a-peer-id",
         "invalid multihash PeerId": "/ip4/127.0.0.1/udp/4001/quic-v1/p2p/111",
     }
@@ -1959,7 +1973,7 @@ def self_test() -> int:
 
     with tempfile.TemporaryDirectory() as directory:
         nonfinite_path = Path(directory) / "nonfinite.json"
-        for constant in ("NaN", "Infinity", "-Infinity"):
+        for constant in ("NaN", "Infinity", "-Infinity", "1e9999"):
             nonfinite_path.write_text(f'{{"value":{constant}}}')
             try:
                 load_json(nonfinite_path)
@@ -1999,12 +2013,34 @@ def self_test() -> int:
         if not expect_rejected(root, manifest_path, artifact_path, head, "NaN timestamp", "artifact cannot be read"):
             return 1
         write_artifact(root, manifest_path, artifact_path, "tcp_yamux", donors_root)
+        artifact_text = artifact_path.read_text()
+        artifact_path.write_text(
+            re.sub(r'("started_at_unix":)\s*[^,}]+', r'\g<1>1e9999', artifact_text, count=1)
+        )
+        if not expect_rejected(
+            root, manifest_path, artifact_path, head, "overflow timestamp", "artifact cannot be read"
+        ):
+            return 1
+        write_artifact(root, manifest_path, artifact_path, "tcp_yamux", donors_root)
         artifact = load_json(artifact_path)
         assert isinstance(artifact, dict)
         artifact["fixture_provenance"]["donor_revisions"]["go-libp2p"] = "0" * 40
         artifact_path.write_text(json.dumps(artifact))
         if not expect_rejected(
             root, manifest_path, artifact_path, head, "donor revision mismatch", "donor revisions"
+        ):
+            return 1
+
+        write_artifact(root, manifest_path, artifact_path, "tcp_yamux", donors_root)
+        artifact = load_json(artifact_path)
+        assert isinstance(artifact, dict)
+        result_file = Path(artifact["artifacts"][0]["result"]["result_file"])
+        result_file.write_text(
+            re.sub(r'("payload_bytes":)\s*[^,}]+', r'\g<1>1e9999', result_file.read_text(), count=1)
+        )
+        refresh_evidence_index(artifact_path)
+        if not expect_rejected(
+            root, manifest_path, artifact_path, head, "overflow evidence", "result file is not valid JSON"
         ):
             return 1
 
