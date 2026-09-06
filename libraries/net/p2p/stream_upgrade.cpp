@@ -732,7 +732,12 @@ finish_noise_outbound(forge::net::p2p::stream stream, const node::options& optio
       callbacks.secured(secure.peer);
    }
    if (callbacks.established) {
-      callbacks.established(secure.peer);
+      try {
+         callbacks.established(secure.peer);
+      } catch (...) {
+         secure.secure->request_cancel();
+         throw;
+      }
    }
    auto muxer_stream = secure_transport_stream(std::move(secure.secure));
    if (!secure.early_yamux) {
@@ -765,7 +770,12 @@ finish_noise_inbound(forge::net::p2p::stream stream, const node::options& option
       callbacks.secured(secure.peer);
    }
    if (callbacks.established) {
-      callbacks.established(secure.peer);
+      try {
+         callbacks.established(secure.peer);
+      } catch (...) {
+         secure.secure->request_cancel();
+         throw;
+      }
    }
    auto muxer_stream = secure_transport_stream(std::move(secure.secure));
    if (!secure.early_yamux) {

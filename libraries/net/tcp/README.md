@@ -82,8 +82,17 @@ auto tcp = co_await connector.async_connect_connection(remote);
 // Either keep using raw TCP bytes:
 co_await tcp.async_write(std::span<const std::uint8_t>{bytes});
 
-// Or hand the socket to a higher layer:
+// Or hand the socket to a higher layer when this connection has no owner lifetime:
 auto socket = std::move(tcp).release_socket();
+```
+
+When the connection carries an owner lifetime (for example, a native resource
+reservation), transfer it with the socket. The no-output overload rejects that
+handoff with `tcp::exceptions::invalid_options` before detaching the socket.
+
+```cpp
+std::shared_ptr<void> native_owner;
+auto socket = std::move(tcp).release_socket(native_owner);
 ```
 
 If no upgrade is needed, call `std::move(tcp).into_transport_stream()` or use

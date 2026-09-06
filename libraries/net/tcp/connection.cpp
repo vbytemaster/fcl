@@ -421,6 +421,10 @@ struct connection::impl final : std::enable_shared_from_this<connection::impl> {
       if (!valid()) {
          FORGE_THROW_EXCEPTION(exceptions::closed, "invalid tcp connection");
       }
+      if (!lifetime_out && lifetime) {
+         FORGE_THROW_EXCEPTION(exceptions::invalid_options,
+                               "tcp socket handoff with an owner lifetime requires a lifetime destination");
+      }
       auto current = detach_socket();
       if (lifetime_out) {
          *lifetime_out = std::move(lifetime);

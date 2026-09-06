@@ -821,7 +821,9 @@ struct recorded_gater_call {
 
 class recording_connection_gater final : public connection_gater {
  public:
-   explicit recording_connection_gater(std::optional<recorded_gater_stage> rejected = {}) : rejected_(rejected) {}
+   explicit recording_connection_gater(std::optional<recorded_gater_stage> rejected = {},
+                                       std::optional<peer_id> rejected_peer = {})
+       : rejected_(rejected), rejected_peer_(std::move(rejected_peer)) {}
 
    [[nodiscard]] std::vector<recorded_gater_stage> stages() const {
       auto lock = std::scoped_lock{mutex_};
@@ -885,11 +887,13 @@ class recording_connection_gater final : public connection_gater {
    [[nodiscard]] bool record(recorded_gater_stage stage, std::optional<peer_id> peer = {},
                              std::optional<connection_endpoints> endpoints = {}) noexcept {
       auto lock = std::scoped_lock{mutex_};
+      const auto rejected = rejected_ == stage && (!rejected_peer_ || peer == rejected_peer_);
       calls_.push_back(recorded_gater_call{.stage = stage, .peer = std::move(peer), .endpoints = std::move(endpoints)});
-      return rejected_ != stage;
+      return !rejected;
    }
 
    std::optional<recorded_gater_stage> rejected_;
+   std::optional<peer_id> rejected_peer_;
    mutable std::mutex mutex_;
    std::vector<recorded_gater_call> calls_;
 };
@@ -2488,6 +2492,52 @@ BOOST_AUTO_TEST_CASE(p2p_connection_gater_local_denials_are_typed_and_leave_no_c
          forge::asio::blocking::run(runtime, client.async_stop());
          forge::asio::blocking::run(runtime, server.async_stop());
       }
+   }
+}
+
+BOOST_AUTO_TEST_CASE(p2p_authenticated_peer_limit_rejects_direct_outbound_before_upgraded_for_tcp_and_quic) {
+   for (const auto transport : {endpoint::protocol_kind::tcp, endpoint::protocol_kind::quic_v1}) {
+      auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
+      auto client_gater = std::make_shared<recording_connection_gater>();
+      auto server_options = options_for(peer(199));
+      auto client_options = options_for(peer(200));
+      client_options.connection_gater = client_gater;
+      client_options.limits.resources.peer.max_outbound_connections = 0;
+      client_options.limits.resources.peer.max_connections = 0;
+      auto server = node{runtime, std::move(server_options)};
+      auto client = node{runtime, std::move(client_options)};
+
+      forge::asio::blocking::run(runtime, server.async_listen(transport == endpoint::protocol_kind::tcp
+                                                                  ? make_tcp_endpoint(0)
+                                                                  : make_quic_endpoint(0)));
+      const auto server_endpoint = require_endpoint_for(server.local_endpoints(), transport);
+      auto rejected = false;
+      try {
+         static_cast<void>(forge::asio::blocking::run(
+             runtime, client.async_connect(server_endpoint, node::connect_options{.expected_peer = server.local_peer()})));
+      } catch (const forge::exceptions::base& error) {
+         rejected = exceptions::code_of(error) == exceptions::code::backpressure_rejected;
+      }
+
+      BOOST_TEST(rejected);
+      check_gater_stages(client_gater->stages(),
+                         {recorded_gater_stage::peer_dial, recorded_gater_stage::address_dial,
+                          recorded_gater_stage::secured});
+      const auto descriptor_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+      while (client.diagnostics().resources.system.file_descriptors != 0U &&
+             std::chrono::steady_clock::now() < descriptor_deadline) {
+         wait_on_runtime(runtime, std::chrono::milliseconds{1}, "P2P rejected outbound session descriptor release");
+      }
+      const auto resources = client.diagnostics().resources;
+      BOOST_TEST(client.metrics().active_sessions == 0U);
+      BOOST_TEST(resources.transient.outbound_connections == 0U);
+      BOOST_TEST(resources.peers.outbound_connections == 0U);
+      BOOST_TEST(resources.system.outbound_connections == 0U);
+      BOOST_TEST(resources.system.file_descriptors == 0U);
+      BOOST_TEST(resources.denied_scope_migrations >= 1U);
+
+      forge::asio::blocking::run(runtime, client.async_stop());
+      forge::asio::blocking::run(runtime, server.async_stop());
    }
 }
 
@@ -9080,6 +9130,62 @@ BOOST_AUTO_TEST_CASE(p2p_relay_hop_and_stop_apply_connection_gater_without_inven
    forge::asio::blocking::run(runtime, target.async_stop());
    forge::asio::blocking::run(runtime, source.async_stop());
    forge::asio::blocking::run(runtime, relay_node.async_stop());
+}
+
+BOOST_AUTO_TEST_CASE(p2p_relay_address_gater_denial_prevents_hop_connect) {
+   auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 4}};
+   const auto relay_identity = make_test_certificate_identity("relay-gater-denial-relay");
+   const auto source_identity = make_test_certificate_identity("relay-gater-denial-source");
+   const auto target_identity = make_test_certificate_identity("relay-gater-denial-target");
+   auto relay_node = node{
+       runtime, options_for(relay_identity, capability_set{.bits = capabilities::direct_quic | capabilities::relay |
+                                                                   capabilities::relay_reservation})};
+   auto source_gater =
+       std::make_shared<recording_connection_gater>(recorded_gater_stage::address_dial, target_identity.peer);
+   auto source_options = options_for(source_identity, capability_set{.bits = capabilities::direct_quic});
+   source_options.connection_gater = source_gater;
+   source_options.path_policy.allow_direct = false;
+   source_options.path_policy.allow_hole_punch = false;
+   auto target_options = options_for(
+       target_identity, capability_set{.bits = capabilities::direct_quic | capabilities::relay_reservation});
+   auto source = node{runtime, std::move(source_options)};
+   auto target = node{runtime, std::move(target_options)};
+
+   const auto relay_endpoint = listen(relay_node, runtime);
+   (void)listen(target, runtime);
+   source.peers().learn_endpoint(
+       relay_node.local_peer(), relay_endpoint,
+       capability_set{.bits = capabilities::direct_quic | capabilities::relay | capabilities::relay_reservation});
+   target.peers().learn_endpoint(
+       relay_node.local_peer(), relay_endpoint,
+       capability_set{.bits = capabilities::direct_quic | capabilities::relay | capabilities::relay_reservation});
+   static_cast<void>(forge::asio::blocking::run(runtime, target.async_reserve_relay(relay_node.local_peer())));
+
+   auto rejected = false;
+   try {
+      static_cast<void>(forge::asio::blocking::run(
+          runtime, source.async_open_protocol_stream(target.local_peer(), builtins::echo, node::open_options{
+                                                                                   .allow_relay = true,
+                                                                                   .relay_peer = relay_node.local_peer(),
+                                                                                   .allow_hole_punch = false,
+                                                                               })));
+   } catch (const forge::exceptions::base& error) {
+      rejected = exceptions::code_of(error) == exceptions::code::connection_rejected;
+   }
+
+   BOOST_TEST(rejected);
+   check_gater_stages(source_gater->stages_for(target.local_peer()),
+                      {recorded_gater_stage::peer_dial, recorded_gater_stage::address_dial});
+   BOOST_TEST(relay_node.metrics().relays_opened == 0U);
+   BOOST_TEST(relay_node.metrics().active_relays == 0U);
+   BOOST_TEST(source.metrics().path_relay_opens == 0U);
+
+   forge::asio::blocking::run(runtime, target.async_stop());
+   forge::asio::blocking::run(runtime, source.async_stop());
+   forge::asio::blocking::run(runtime, relay_node.async_stop());
+   const auto resources = source.diagnostics().resources;
+   BOOST_TEST(resources.transient.outbound_connections == 0U);
+   BOOST_TEST(resources.peers.outbound_connections == 0U);
 }
 
 BOOST_AUTO_TEST_CASE(p2p_relay_duration_closes_circuit_and_releases_resources) {

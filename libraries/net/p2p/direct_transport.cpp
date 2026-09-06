@@ -140,10 +140,11 @@ detail::session_teardown::operation registry::teardown_operation() const {
 boost::asio::awaitable<connection> registry::async_connect(forge::net::p2p::endpoint endpoint,
                                                            const node::connect_options& options,
                                                            std::shared_ptr<cancellation_latch> cancellation,
-                                                           std::shared_ptr<void> native_lifetime) {
+                                                           std::shared_ptr<void> native_lifetime,
+                                                           authenticated_admission_handler authenticated) {
    auto& selected = profile_for(state_->profiles, endpoint);
    co_return co_await selected.async_connect(std::move(endpoint), options, std::move(cancellation),
-                                             std::move(native_lifetime));
+                                             std::move(native_lifetime), std::move(authenticated));
 }
 
 boost::asio::awaitable<connection> registry::async_accept(forge::net::p2p::endpoint endpoint) {

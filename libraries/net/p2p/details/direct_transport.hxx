@@ -23,6 +23,8 @@ class connection_gate;
 
 namespace forge::net::p2p::direct {
 
+using authenticated_admission_handler = std::function<void(const peer_id&)>;
+
 struct connection {
    peer_id peer;
    forge::net::transport::session session;
@@ -42,7 +44,7 @@ struct profile {
    std::function<boost::asio::awaitable<void>()> async_stop;
    std::function<boost::asio::awaitable<connection>(forge::net::p2p::endpoint, const node::connect_options&,
                                                     std::shared_ptr<forge::net::p2p::cancellation_latch>,
-                                                    std::shared_ptr<void>)>
+                                                    std::shared_ptr<void>, authenticated_admission_handler)>
        async_connect;
    std::function<boost::asio::awaitable<connection>(forge::net::p2p::endpoint)> async_accept;
 };
@@ -68,7 +70,7 @@ class registry {
    boost::asio::awaitable<connection>
    async_connect(forge::net::p2p::endpoint endpoint, const node::connect_options& options,
                  std::shared_ptr<forge::net::p2p::cancellation_latch> cancellation = {},
-                 std::shared_ptr<void> native_lifetime = {});
+                 std::shared_ptr<void> native_lifetime = {}, authenticated_admission_handler authenticated = {});
    boost::asio::awaitable<connection> async_accept(forge::net::p2p::endpoint endpoint);
 
  private:

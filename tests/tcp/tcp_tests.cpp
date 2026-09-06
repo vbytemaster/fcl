@@ -188,6 +188,13 @@ boost::asio::awaitable<void> tcp_connection_roundtrip_and_handoff() {
        co_await connector.async_connect_connection(release_listener.local_endpoint(), {}, release_lifetime);
    auto release_server = co_await std::move(release_accept);
    release_lifetime.reset();
+   BOOST_CHECK_THROW((void)std::move(release_client).release_socket(), forge::net::tcp::exceptions::invalid_options);
+   BOOST_CHECK(release_client.valid());
+   BOOST_CHECK(!released_lifetime_observer.expired());
+   const auto retained_payload = text_bytes("lifetime retained after rejected socket handoff");
+   co_await release_client.async_write(retained_payload);
+   auto retained = co_await release_server.async_read();
+   BOOST_CHECK_EQUAL_COLLECTIONS(retained.begin(), retained.end(), retained_payload.begin(), retained_payload.end());
    auto transferred_lifetime = std::shared_ptr<void>{};
    auto socket = std::move(release_client).release_socket(transferred_lifetime);
    BOOST_CHECK(socket.is_open());
@@ -195,6 +202,13 @@ boost::asio::awaitable<void> tcp_connection_roundtrip_and_handoff() {
    auto ignored = boost::system::error_code{};
    socket.close(ignored);
    transferred_lifetime.reset();
+   const auto release_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+   while (!released_lifetime_observer.expired() && std::chrono::steady_clock::now() < release_deadline) {
+      auto release_wait = boost::asio::steady_timer{executor};
+      release_wait.expires_after(std::chrono::milliseconds{1});
+      co_await release_wait.async_wait(boost::asio::use_awaitable);
+   }
+   BOOST_CHECK(released_lifetime_observer.expired());
    co_await release_server.async_close();
    co_await release_listener.async_close();
 }

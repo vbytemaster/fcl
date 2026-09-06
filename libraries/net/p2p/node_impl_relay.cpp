@@ -607,12 +607,17 @@ void node::impl::launch_relay_discovery_maintenance() {
    }
 }
 
-boost::asio::awaitable<upgraded_session> node::impl::open_relay_yamux(const peer_id& peer, const peer_id& relay_peer,
-                                                                      std::chrono::milliseconds timeout) {
+boost::asio::awaitable<upgraded_session>
+node::impl::open_relay_yamux(const peer_id& peer, const peer_id& relay_peer, std::chrono::milliseconds timeout,
+                             std::function<void(const peer_id&)> authenticated_admission) {
    const auto started = std::chrono::steady_clock::now();
    record_path_attempt(path::kind::relay);
    auto relay_session = co_await ensure_direct_session(relay_peer, timeout);
    try {
+      const auto& relay_endpoint = relay_transport_endpoint(*relay_session);
+      const auto local_endpoint = relay_circuit_endpoint(relay_endpoint, relay_peer, local);
+      const auto remote_endpoint = relay_circuit_endpoint(relay_endpoint, relay_peer, peer);
+      connection_gate->address_dial(peer, remote_endpoint);
       auto exchange = co_await detail::async_exchange_relay_hop(
           runtime.context(), remaining_timeout(started, timeout, "P2P relay protocol open"), "P2P relay protocol open",
           [this, relay_session](
@@ -635,10 +640,6 @@ boost::asio::awaitable<upgraded_session> node::impl::open_relay_yamux(const peer
       }
       record_path_open(path::kind::relay);
       auto stream = detail::stream_access::with_buffer(std::move(exchange.stream), std::move(exchange.buffered));
-      const auto& relay_endpoint = relay_transport_endpoint(*relay_session);
-      const auto local_endpoint = relay_circuit_endpoint(relay_endpoint, relay_peer, local);
-      const auto remote_endpoint = relay_circuit_endpoint(relay_endpoint, relay_peer, peer);
-      connection_gate->address_dial(peer, remote_endpoint);
       co_return co_await upgrade_relay_outbound_session(
           std::move(stream), options, identity, peer,
           upgrade_callbacks{
@@ -646,6 +647,7 @@ boost::asio::awaitable<upgraded_session> node::impl::open_relay_yamux(const peer
                   [gate = connection_gate, local_endpoint, remote_endpoint](const peer_id& authenticated_peer) {
                      gate->secured(connection_direction::outbound, authenticated_peer, local_endpoint, remote_endpoint);
                   },
+              .established = std::move(authenticated_admission),
               .upgraded =
                   [gate = connection_gate, local_endpoint, remote_endpoint](const peer_id& authenticated_peer) {
                      gate->upgraded(connection_direction::outbound, authenticated_peer, local_endpoint,
@@ -673,16 +675,21 @@ node::impl::ensure_relay_session(const peer_id& peer, const peer_id& relay_peer,
       ++metrics_value.connection_rejections;
       FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P pending outbound relay session limit reached");
    }
-   if (!reservation->establish(resource_manager::session_scope{
-           .peer = peer,
-           .direction = resource_manager::session_direction::outbound,
-       })) {
-      auto lock = std::scoped_lock{mutex};
-      ++metrics_value.backpressure_rejections;
-      ++metrics_value.connection_rejections;
-      FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P established outbound relay session limit reached");
-   }
-   auto upgraded = co_await open_relay_yamux(peer, relay_peer, timeout);
+   auto upgraded = co_await open_relay_yamux(
+       peer, relay_peer, timeout, [this, &reservation](const peer_id& authenticated_peer) {
+          if (!reservation->establish(resource_manager::session_scope{
+                  .peer = authenticated_peer,
+                  .direction = resource_manager::session_direction::outbound,
+              })) {
+             {
+                auto lock = std::scoped_lock{mutex};
+                ++metrics_value.backpressure_rejections;
+                ++metrics_value.connection_rejections;
+             }
+             FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected,
+                                   "P2P established outbound relay session limit reached");
+          }
+       });
    auto session = std::make_shared<session_state>();
    session->info = node::session_info{
        .remote_peer = std::move(upgraded.peer),

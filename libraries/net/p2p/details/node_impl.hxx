@@ -572,8 +572,9 @@ struct node::impl : std::enable_shared_from_this<impl> {
 
    void launch_relay_discovery_maintenance();
 
-   boost::asio::awaitable<upgraded_session> open_relay_yamux(const peer_id& peer, const peer_id& relay_peer,
-                                                             std::chrono::milliseconds timeout);
+   boost::asio::awaitable<upgraded_session>
+   open_relay_yamux(const peer_id& peer, const peer_id& relay_peer, std::chrono::milliseconds timeout,
+                    std::function<void(const peer_id&)> authenticated_admission);
 
    boost::asio::awaitable<std::shared_ptr<session_state>>
    ensure_relay_session(const peer_id& peer, const peer_id& relay_peer, std::chrono::milliseconds timeout);

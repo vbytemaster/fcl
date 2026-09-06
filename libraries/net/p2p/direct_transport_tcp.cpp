@@ -244,7 +244,8 @@ class tcp_profile final {
    boost::asio::awaitable<connection> async_connect(forge::net::p2p::endpoint endpoint,
                                                     const node::connect_options& options,
                                                     std::shared_ptr<cancellation_latch> cancellation,
-                                                    std::shared_ptr<void> native_lifetime) {
+                                                    std::shared_ptr<void> native_lifetime,
+                                                    authenticated_admission_handler authenticated) {
       if (!endpoint.is_direct_tcp()) {
          FORGE_THROW_EXCEPTION(exceptions::unsupported_protocol, "P2P endpoint is not a direct TCP endpoint");
       }
@@ -275,6 +276,7 @@ class tcp_profile final {
                      [gate = gate_, local_endpoint, remote_endpoint](const peer_id& peer) {
                         gate->secured(connection_direction::outbound, peer, local_endpoint, remote_endpoint);
                      },
+                 .established = std::move(authenticated),
                  .upgraded =
                      [gate = gate_, local_endpoint, remote_endpoint](const peer_id& peer) {
                         gate->upgraded(connection_direction::outbound, peer, local_endpoint, remote_endpoint);
@@ -302,8 +304,13 @@ class tcp_profile final {
          if (deadline.timed_out()) {
             throw_operation_timeout("P2P TCP direct connect");
          }
-         if (!cancel_current->finish()) {
-            FORGE_THROW_EXCEPTION(exceptions::canceled, "P2P TCP direct connect canceled");
+         if (cancel_current->stop_requested()) {
+            if (!cancel_current->finish()) {
+               FORGE_THROW_EXCEPTION(exceptions::canceled, "P2P TCP direct connect canceled");
+            }
+         } else {
+            cancel_current->request_stop();
+            static_cast<void>(cancel_current->finish());
          }
          rethrow_tcp_as_p2p(error);
       }
@@ -497,9 +504,10 @@ void register_tcp_profile(registry& value, forge::asio::runtime& runtime, const 
        .async_stop = [owned] { return owned->async_stop(); },
        .async_connect =
            [owned](forge::net::p2p::endpoint endpoint, const node::connect_options& options,
-                   std::shared_ptr<cancellation_latch> cancellation, std::shared_ptr<void> native_lifetime) {
+                   std::shared_ptr<cancellation_latch> cancellation, std::shared_ptr<void> native_lifetime,
+                   authenticated_admission_handler authenticated) {
               return owned->async_connect(std::move(endpoint), options, std::move(cancellation),
-                                          std::move(native_lifetime));
+                                          std::move(native_lifetime), std::move(authenticated));
            },
        .async_accept = [owned](forge::net::p2p::endpoint endpoint) { return owned->async_accept(std::move(endpoint)); },
    });
