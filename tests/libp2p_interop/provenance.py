@@ -3,14 +3,30 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import stat
 import struct
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import Optional
 
 
 WORKTREE_FINGERPRINT_FORMAT = b"forge-libp2p-interop-worktree-v2\0"
+DONOR_CHECKOUT_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+DONOR_REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
+
+# Fixture provenance has a deliberately smaller, named subset of the complete
+# donor pin map. Names are semantic fixture identities, not interchangeable
+# labels for a checkout that happens to have a canonical pin.
+FIXTURE_DONOR_DIRECTORIES = {
+    "go-libp2p": "go-libp2p",
+    "rust-libp2p": "rust-libp2p",
+    "go-kad": "go-libp2p-kad-dht",
+    "go-pubsub": "go-libp2p-pubsub",
+    "libp2p-specs": "libp2p-specs",
+}
 
 
 @dataclass(frozen=True)
@@ -62,6 +78,212 @@ def git_output(root: Path, *args: str) -> bytes:
         return subprocess.check_output(["git", "-C", str(root), *args])
     except subprocess.CalledProcessError as error:
         raise RuntimeError(f"Git command failed for {root}: {error}") from error
+
+
+def donor_revision_schema_errors(donor_revisions: object) -> list[str]:
+    """Return fail-closed errors for the canonical donor revision map."""
+    if not isinstance(donor_revisions, Mapping) or not donor_revisions:
+        return ["donor_revisions must be a non-empty object"]
+
+    errors: list[str] = []
+    for repository, revision in donor_revisions.items():
+        if not isinstance(repository, str) or not DONOR_CHECKOUT_KEY_PATTERN.fullmatch(repository):
+            errors.append(f"invalid donor repository name {repository!r}")
+            continue
+        if not isinstance(revision, str) or not DONOR_REVISION_PATTERN.fullmatch(revision):
+            errors.append(f"donor {repository}: revision must be a full lowercase commit SHA")
+    return errors
+
+
+def reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        value[key] = item
+    return value
+
+
+def load_canonical_donor_revisions(case_matrix_path: Path) -> dict[str, str]:
+    """Load the sole canonical donor pin map from the donor case matrix."""
+    try:
+        case_matrix = json.loads(
+            case_matrix_path.read_text(), object_pairs_hook=reject_duplicate_json_keys
+        )
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        raise RuntimeError(f"cannot load canonical donor revisions: {error}") from error
+    if not isinstance(case_matrix, Mapping):
+        raise RuntimeError("canonical donor case matrix must be an object")
+    donor_revisions = case_matrix.get("donor_revisions")
+    errors = donor_revision_schema_errors(donor_revisions)
+    if errors:
+        raise RuntimeError(f"canonical donor revisions are invalid: {'; '.join(errors)}")
+    assert isinstance(donor_revisions, Mapping)
+    return dict(donor_revisions)
+
+
+def fixture_donor_revision_bindings(
+    fixture_donors: object, canonical_donor_revisions: object
+) -> tuple[dict[str, str], list[str]]:
+    """Bind fixture-lock donor directories and commits to the canonical case-matrix pins."""
+    errors = donor_revision_schema_errors(canonical_donor_revisions)
+    if errors:
+        return {}, [f"canonical donor revisions are invalid: {error}" for error in errors]
+    if not isinstance(fixture_donors, list):
+        return {}, ["fixture lock donors must be an array"]
+
+    assert isinstance(canonical_donor_revisions, Mapping)
+    bindings: dict[str, str] = {}
+    seen_names: set[str] = set()
+    seen_directories: set[str] = set()
+    for donor in fixture_donors:
+        if not isinstance(donor, Mapping):
+            errors.append("fixture lock donor entry must be an object")
+            continue
+        name = donor.get("name")
+        directory = donor.get("directory")
+        commit = donor.get("commit")
+        tree = donor.get("tree")
+        if not isinstance(name, str) or name not in FIXTURE_DONOR_DIRECTORIES:
+            errors.append(f"fixture lock donor name is invalid: {name!r}")
+            continue
+        if name in seen_names:
+            errors.append(f"fixture lock donor name is duplicated: {name}")
+            continue
+        seen_names.add(name)
+        if not isinstance(directory, str) or not DONOR_CHECKOUT_KEY_PATTERN.fullmatch(directory):
+            errors.append(f"fixture lock donor directory is invalid: {directory!r}")
+            continue
+        if directory in seen_directories:
+            errors.append(f"fixture lock donor directory is duplicated: {directory}")
+            continue
+        seen_directories.add(directory)
+        expected_directory = FIXTURE_DONOR_DIRECTORIES[name]
+        if directory != expected_directory:
+            errors.append(
+                f"fixture lock donor {name}: directory must be {expected_directory}"
+            )
+            continue
+        if not isinstance(commit, str) or not DONOR_REVISION_PATTERN.fullmatch(commit):
+            errors.append(f"fixture lock donor {directory}: commit must be a full lowercase commit SHA")
+            continue
+        if not isinstance(tree, str) or not DONOR_REVISION_PATTERN.fullmatch(tree):
+            errors.append(f"fixture lock donor {directory}: tree must be a full lowercase tree SHA")
+            continue
+        canonical_commit = canonical_donor_revisions.get(directory)
+        if canonical_commit is None:
+            errors.append(f"fixture lock donor directory is not canonically pinned: {directory}")
+            continue
+        if commit != canonical_commit:
+            errors.append(
+                f"fixture lock donor {directory}: commit does not match canonical donor_cases revision"
+            )
+            continue
+        bindings[directory] = canonical_commit
+    if seen_names != set(FIXTURE_DONOR_DIRECTORIES):
+        errors.append("fixture lock donor names do not match the canonical fixture donor registry")
+    if seen_directories != set(FIXTURE_DONOR_DIRECTORIES.values()):
+        errors.append("fixture lock donor directories do not match the canonical fixture donor registry")
+    return bindings, errors
+
+
+def donor_checkout_head_errors(donors_root: Path, donor_revisions: object) -> list[str]:
+    """Return the existing donor-pin errors for unavailable or stale checkouts."""
+    schema_errors = donor_revision_schema_errors(donor_revisions)
+    if schema_errors:
+        return schema_errors
+
+    assert isinstance(donor_revisions, Mapping)
+    errors: list[str] = []
+    for repository, revision in donor_revisions.items():
+        assert isinstance(repository, str)
+        assert isinstance(revision, str)
+        repository_path = donors_root / repository
+        if not repository_path.is_dir():
+            errors.append(f"donor {repository}: repository is unavailable")
+            continue
+        try:
+            head = git_output(repository_path, "rev-parse", "HEAD").decode("ascii").strip()
+        except RuntimeError:
+            errors.append(f"donor {repository}: checkout does not match pinned revision")
+            continue
+        if head != revision:
+            errors.append(f"donor {repository}: checkout does not match pinned revision")
+    return errors
+
+
+def fixture_donor_checkout_errors(
+    donors_root: Path, fixture_donors: object, canonical_donor_revisions: object
+) -> list[str]:
+    """Verify fixture donor checkout HEADs and trees against canonical revisions."""
+    bindings, errors = fixture_donor_revision_bindings(fixture_donors, canonical_donor_revisions)
+    if errors:
+        return errors
+    errors.extend(donor_checkout_head_errors(donors_root, bindings))
+    assert isinstance(fixture_donors, list)
+    for donor in fixture_donors:
+        assert isinstance(donor, Mapping)
+        directory = donor["directory"]
+        tree = donor["tree"]
+        assert isinstance(directory, str)
+        assert isinstance(tree, str)
+        if directory not in bindings:
+            continue
+        checkout = donors_root / directory
+        try:
+            actual_tree = git_output(checkout, "rev-parse", f"{bindings[directory]}^{{tree}}")
+        except RuntimeError:
+            errors.append(f"fixture donor revision lookup failed for {directory}")
+            continue
+        if actual_tree.decode("ascii").strip() != tree:
+            errors.append(f"fixture donor tree mismatch: {directory}")
+    return errors
+
+
+def donor_source_object_errors(
+    donors_root: Path, donor_revisions: object, source: object
+) -> list[str]:
+    """Verify a donor evidence path as a blob in the exact pinned Git object tree."""
+    schema_errors = donor_revision_schema_errors(donor_revisions)
+    if schema_errors:
+        return schema_errors
+    if not isinstance(source, str) or not source or "\x00" in source:
+        return [f"donor source must be a non-empty path: {source!r}"]
+    relative = PurePosixPath(source)
+    if (
+        source.startswith("/")
+        or relative.is_absolute()
+        or len(relative.parts) < 3
+        or relative.parts[0] != "donors"
+        or ".." in relative.parts
+    ):
+        return [f"donor source must start with donors/<repo>/: {source}"]
+
+    assert isinstance(donor_revisions, Mapping)
+    repository = relative.parts[1]
+    revision = donor_revisions.get(repository)
+    if revision is None:
+        return [f"donor source repository is not pinned: {repository}"]
+    checkout = donors_root / repository
+    if not checkout.is_dir():
+        return [f"donor {repository}: repository is unavailable"]
+    object_name = f"{revision}:{'/'.join(relative.parts[2:])}"
+    exists = subprocess.run(
+        ["git", "-C", str(checkout), "cat-file", "-e", object_name],
+        capture_output=True,
+        check=False,
+    )
+    if exists.returncode != 0:
+        return [f"donor source is absent from pinned revision: {source}"]
+    object_type = subprocess.run(
+        ["git", "-C", str(checkout), "cat-file", "-t", object_name],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if object_type.returncode != 0 or object_type.stdout.strip() != "blob":
+        return [f"donor source is not a pinned blob: {source}"]
+    return []
 
 
 def safe_worktree_path(root: Path, relative: bytes) -> Path:
@@ -141,6 +363,53 @@ def append_worktree_path(digest: "hashlib._Hash", root: Path, relative: bytes) -
     digest.update(struct.pack(">I", stat.S_IFMT(metadata.st_mode)))
 
 
+def append_invalid_gitlink_path(digest: "hashlib._Hash", path: Path, relative: bytes) -> None:
+    """Fingerprint unexpected gitlink contents without following a nested repository."""
+    metadata = path.lstat()
+    digest.update(b"gitlink-path\0")
+    append_bytes(digest, relative)
+    if stat.S_ISLNK(metadata.st_mode):
+        digest.update(b"symlink\0")
+        append_bytes(digest, os.fsencode(os.readlink(path)))
+        return
+    if stat.S_ISREG(metadata.st_mode):
+        digest.update(b"file\0")
+        digest.update(struct.pack(">Q", metadata.st_size))
+        with path.open("rb") as value:
+            while chunk := value.read(1024 * 1024):
+                digest.update(chunk)
+        return
+    if stat.S_ISDIR(metadata.st_mode):
+        digest.update(b"directory\0")
+        for child in sorted(path.iterdir(), key=lambda value: os.fsencode(value.name)):
+            append_invalid_gitlink_path(digest, child, relative + b"/" + os.fsencode(child.name))
+        return
+    digest.update(b"other\0")
+    digest.update(struct.pack(">I", stat.S_IFMT(metadata.st_mode)))
+
+
+def initialized_submodule_root(path: Path) -> Optional[Path]:
+    """Return a valid nested repository root, never Git's enclosing superproject."""
+    marker = path / ".git"
+    try:
+        marker_metadata = marker.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    if stat.S_ISLNK(marker_metadata.st_mode) or not (
+        stat.S_ISREG(marker_metadata.st_mode) or stat.S_ISDIR(marker_metadata.st_mode)
+    ):
+        return None
+    try:
+        inside = git_output(path, "rev-parse", "--is-inside-work-tree").strip()
+        checked_out_root = Path(
+            git_output(path, "rev-parse", "--show-toplevel").decode("utf-8").strip()
+        ).resolve()
+    except RuntimeError:
+        return None
+    resolved = path.resolve()
+    return resolved if inside == b"true" and checked_out_root == resolved else None
+
+
 def append_submodule(digest: "hashlib._Hash", root: Path, relative: bytes, object_id: bytes,
                      ancestors: frozenset[Path]) -> bool:
     path = safe_worktree_path(root, relative)
@@ -151,20 +420,21 @@ def append_submodule(digest: "hashlib._Hash", root: Path, relative: bytes, objec
     try:
         metadata = path.lstat()
     except (FileNotFoundError, NotADirectoryError):
-        digest.update(b"missing\0")
-        return True
+        digest.update(b"uninitialized-missing\0")
+        return False
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
         digest.update(b"invalid\0")
         digest.update(struct.pack(">I", stat.S_IFMT(metadata.st_mode)))
         return True
-    try:
-        checked_out_root = Path(git_output(path, "rev-parse", "--show-toplevel").decode("utf-8").strip()).resolve()
-    except RuntimeError:
-        digest.update(b"uninitialized\0")
+    resolved = initialized_submodule_root(path)
+    if resolved is None:
+        children = tuple(path.iterdir())
+        if not children:
+            digest.update(b"uninitialized-empty\0")
+            return False
+        digest.update(b"invalid-non-repository\0")
+        append_invalid_gitlink_path(digest, path, relative)
         return True
-    resolved = path.resolve()
-    if checked_out_root != resolved:
-        raise RuntimeError(f"Git submodule root escapes its indexed path: {path}")
     if resolved in ancestors:
         raise RuntimeError(f"Git submodule recursion cycle: {resolved}")
     identity = worktree_identity(resolved, ancestors)

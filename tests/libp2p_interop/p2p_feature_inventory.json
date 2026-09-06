@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "claim_scope": "source_structure_and_declared_evidence_only",
+  "donor_capabilities": "p2p_donor_capabilities.json",
   "allowed_states": [ "live", "manual-only", "partial", "stub", "orphan", "unverified" ],
   "owners": {
     "net.p2p.node": {
@@ -188,58 +189,62 @@
     },
     "plugin.p2p.node": {
       "owner": "plugin.p2p.node",
-      "module_count": 4,
+      "module_count": 5,
       "modules": [
-        "forge.plugins.p2p.node.api", "forge.plugins.p2p.node.exceptions", "forge.plugins.p2p.node.plugin",
-        "forge.plugins.p2p.node.types"
+        "forge.plugins.p2p.node.api", "forge.plugins.p2p.node.descriptor",
+        "forge.plugins.p2p.node.exceptions", "forge.plugins.p2p.node.plugin", "forge.plugins.p2p.node.types"
       ],
       "headers": [],
       "module_features": {
         "forge.plugins.p2p.node.api": [ "plugin.node" ],
+        "forge.plugins.p2p.node.descriptor": [ "plugin.node" ],
         "forge.plugins.p2p.node.exceptions": [ "plugin.node" ],
         "forge.plugins.p2p.node.plugin": [ "plugin.node" ],
         "forge.plugins.p2p.node.types": [ "plugin.node" ]
       },
       "header_features": {},
-      "sha256": "863551d545acc451deab967c8bdf9c0da9495b21bf7106937ba41705196713dc",
+      "sha256": "62fae922193a4f6cdcf2fa6b16a12bd65a7be897fe739f2c6d52d883574a09b3",
       "feature_ids": [ "plugin.node" ]
     },
     "plugin.p2p.resolver": {
       "owner": "plugin.p2p.resolver",
-      "module_count": 5,
+      "module_count": 6,
       "modules": [
-        "forge.plugins.p2p.resolver.api", "forge.plugins.p2p.resolver.exceptions",
+        "forge.plugins.p2p.resolver.api", "forge.plugins.p2p.resolver.descriptor",
+        "forge.plugins.p2p.resolver.exceptions",
         "forge.plugins.p2p.resolver.managed_api", "forge.plugins.p2p.resolver.plugin",
         "forge.plugins.p2p.resolver.types"
       ],
       "headers": [],
       "module_features": {
         "forge.plugins.p2p.resolver.api": [ "plugin.resolver" ],
+        "forge.plugins.p2p.resolver.descriptor": [ "plugin.resolver" ],
         "forge.plugins.p2p.resolver.exceptions": [ "plugin.resolver" ],
         "forge.plugins.p2p.resolver.managed_api": [ "plugin.resolver" ],
         "forge.plugins.p2p.resolver.plugin": [ "plugin.resolver" ],
         "forge.plugins.p2p.resolver.types": [ "plugin.resolver" ]
       },
       "header_features": {},
-      "sha256": "b34848088f1db4f0cd8a76fd8e4b0d283d0609dd34d981a2b78f6b0bea187f4d",
+      "sha256": "9f8a28b5915845450d6ef9da0da12782265f05e581f4dc9b60ffded27b4b14f3",
       "feature_ids": [ "plugin.resolver" ]
     },
     "plugin.p2p.pubsub": {
       "owner": "plugin.p2p.pubsub",
-      "module_count": 4,
+      "module_count": 5,
       "modules": [
-        "forge.plugins.p2p.pubsub.api", "forge.plugins.p2p.pubsub.exceptions", "forge.plugins.p2p.pubsub.plugin",
-        "forge.plugins.p2p.pubsub.types"
+        "forge.plugins.p2p.pubsub.api", "forge.plugins.p2p.pubsub.descriptor",
+        "forge.plugins.p2p.pubsub.exceptions", "forge.plugins.p2p.pubsub.plugin", "forge.plugins.p2p.pubsub.types"
       ],
       "headers": [],
       "module_features": {
         "forge.plugins.p2p.pubsub.api": [ "plugin.pubsub" ],
+        "forge.plugins.p2p.pubsub.descriptor": [ "plugin.pubsub" ],
         "forge.plugins.p2p.pubsub.exceptions": [ "plugin.pubsub" ],
         "forge.plugins.p2p.pubsub.plugin": [ "plugin.pubsub" ],
         "forge.plugins.p2p.pubsub.types": [ "plugin.pubsub" ]
       },
       "header_features": {},
-      "sha256": "3a2691286c41a3781d99ed89e7184d5561c11c7d02a2954411962837cae78fe1",
+      "sha256": "749ead0ef8434d8245c8e45162de5f287f550c4bf8ca16701c6ec87180328921",
       "feature_ids": [ "plugin.pubsub" ]
     },
     "plugin.p2p.diagnostics": {
@@ -383,12 +388,12 @@
       "state": "manual-only",
       "owner": "net.p2p.node",
       "normal_activation": "inbound_or_explicit_caller",
-      "configuration": "built-in responder; no active liveness policy",
+      "configuration": "built-in responder and explicit caller; no node-owned periodic liveness policy",
       "resource_ownership": "one protocol stream and caller deadline",
       "persistence": "explicit RTT observations may update peer_store",
       "maintenance": "none",
       "diagnostics": "no maintained liveness view",
-      "intended_disposition": "integrate_optional_liveness_policy",
+      "intended_disposition": "integrate_node_owned_periodic_liveness_policy",
       "builtin_protocols": [ "ping" ],
       "capabilities": [],
       "evidence": {
@@ -452,12 +457,12 @@
       "state": "partial",
       "owner": "net.p2p.node",
       "normal_activation": "inbound_or_explicit_caller",
-      "configuration": "protocol IDs are advertised without an effective capability or observer policy",
+      "configuration": "v1/v2 protocol IDs and explicit probes exist without an effective reachability or private Internet-egress policy",
       "resource_ownership": "bounded probe streams and dial-back state",
       "persistence": "individual observations can update peer_store",
-      "maintenance": "no node-owned multi-observer reachability loop",
+      "maintenance": "no node-owned v1 reachability lifecycle, v2 address-evidence lifecycle or bounded reconciliation loop",
       "diagnostics": "no effective maintained reachability state",
-      "intended_disposition": "integrate_reachability_lifecycle",
+      "intended_disposition": "integrate_separate_v1_node_and_v2_address_reachability_lifecycles",
       "builtin_protocols": [ "autonat_v1", "autonat_v2_dial_request", "autonat_v2_dial_back" ],
       "capabilities": [ "autonat" ],
       "evidence": {
@@ -507,12 +512,12 @@
       "state": "partial",
       "owner": "net.p2p.node",
       "normal_activation": "relay_path_only",
-      "configuration": "path policy; no explicit per-peer attempt owner",
+      "configuration": "relay-path policy; no explicit per-peer coordinated-dial and port-reuse attempt owner",
       "resource_ownership": "relay session, synchronization stream and direct dial",
       "persistence": "none",
       "maintenance": "retry mechanics exist but helper ownership is split",
       "diagnostics": "path attempt metrics without one canonical state object",
-      "intended_disposition": "unify_private_attempt_state",
+      "intended_disposition": "unify_private_coordinated_dial_state_without_legacy_simultaneous_connect",
       "builtin_protocols": [ "dcutr" ],
       "capabilities": [ "hole_punching" ],
       "evidence": {
@@ -608,12 +613,12 @@
       "state": "partial",
       "owner": "net.p2p.node",
       "normal_activation": "node_lifecycle_over_connected_peers",
-      "configuration": "low-level node options and pubsub plugin facade",
+      "configuration": "low-level node options and pubsub plugin facade; Partial Messages is not implemented yet",
       "resource_ownership": "bounded message history, validation, mesh and heartbeat",
       "persistence": "none by protocol design",
       "maintenance": "heartbeat runs; topology and scoring are incomplete",
       "diagnostics": "pubsub metrics and plugin source snapshots",
-      "intended_disposition": "complete_scoring_and_topology",
+      "intended_disposition": "complete_scoring_topology_and_opt_in_partial_messages",
       "builtin_protocols": [ "meshsub_v11", "meshsub_v10" ],
       "capabilities": [ "pubsub" ],
       "evidence": {

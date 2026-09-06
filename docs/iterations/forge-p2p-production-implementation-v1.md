@@ -17,9 +17,23 @@ which every advertised protocol is either:
 
 Production means more than a compatible codec. The node must own bounded
 state, activation, maintenance, resource reservations, persistence,
-diagnostics and deterministic shutdown. The machine-readable inventory in
-`tests/libp2p_interop/p2p_feature_inventory.json` is the support-claim source of
-truth during this program.
+diagnostics and deterministic shutdown. Scope and implementation evidence have
+different machine-readable owners:
+
+- `tests/libp2p_interop/p2p_donor_capabilities.json` is the donor-first scope
+  manifest. It separately records support requirement, default activation,
+  Go/Rust interop applicability and the explicit roadmap decision for every
+  pinned-donor capability;
+- `tests/libp2p_interop/p2p_feature_inventory.json` records only Forge surfaces
+  that exist in the current tree and their actual evidence state.
+
+A roadmap entry is not an implementation claim. The inventory checker derives
+its expected Forge feature IDs from the donor-first manifest rather than from
+a local hardcoded allowlist. Each profile also carries an explicit capability
+scope lock, checked against the classified entries, so accidental removal or
+unassigned addition fails the gate. Semantic completeness still requires the
+recorded donor audit and independent review; a source checker cannot infer
+arbitrary protocol meaning from Go, Rust and specification text.
 
 ## 2. Invariants
 
@@ -55,10 +69,30 @@ release, diagnostics and applicable evidence are explicit. `mapped` in the
 donor matrix means that a donor case has a Forge test; it does not mean that the
 feature is activated or production-ready.
 
+Production readiness is profile-specific. Stage 8 may promote the native
+TCP/QUIC profile and the private-network profile only after all of their
+required manifest entries pass. Browser transports do not silently gate or
+inherit that claim: WebSocket is Stage 9, while WebTransport and WebRTC remain
+explicit future-profile decisions.
+
+`support_requirement` says whether a selected profile must support a
+capability. `default_activation` independently says whether a deployment gets
+it by default, requires an explicit opt-in, or cannot activate it. `interop_applicability`
+states whether a Go/Rust run is required, Go-only with an explicit Rust
+limitation, Rust-only with an explicit Go limitation, or not applicable.
+`decision` is the roadmap disposition. Thus an extension
+such as Partial Messages can be required Stage 6 support while still being
+opt-in at runtime; no field is inferred from another.
+
 ## 4. Stage 1: Support Claims And Inventory
 
 ### Scope
 
+- audit and enumerate the protocol, transport, discovery, security, resource
+  and host capabilities exposed by the pinned libp2p specs, Go and Rust donors;
+- assign every donor capability to a production profile and an explicit
+  delivery or rejection disposition, including capabilities not implemented by
+  Forge yet;
 - enumerate every built-in and transport-upgrade protocol ID, capability bit
   and public nested operational component;
 - classify every public P2P declaration through its exact owning module or
@@ -78,6 +112,14 @@ feature is activated or production-ready.
 ### Exit gate
 
 - source-only inventory check passes;
+- every donor capability belongs to a named profile, references pinned donor
+  sources and has explicit support requirement, activation, interop and
+  roadmap-decision semantics;
+- every profile scope lock exactly matches its classified capabilities, so
+  removing or adding an entry requires an explicit baseline update;
+- the donor capability manifest, donor fixture matrix and implementation
+  inventory reference each other, and every existing Forge feature is owned by
+  exactly one donor-capability entry;
 - every built-in/negotiated protocol, capability and tracked public nested
   component is covered exactly once;
 - every public P2P module belongs to exactly one canonical target and its
@@ -307,26 +349,219 @@ hints remain untrusted until authenticated connect and Identify. Stage 4 owns
 Kademlia bucket refresh, so Stage 5 consumes its results without duplicating
 that maintenance loop.
 
-### Stage 6: Reachability and path management
+### Stage 6: Donor parity, reachability and path management
 
-Maintain AutoNAT observations, effective reachability, AutoRelay candidates and
-reservations, and one per-peer DCUtR attempt state machine. Preserve relay
-fallback and prove reservation loss/renewal behavior.
+Stage 6 closes every required native/private-host gap discovered by the
+donor-first manifest except WebSocket. It is delivered as focused PRs rather
+than one transport monolith. The canonical order, dependencies and permitted
+capability owners are the exact machine-readable
+`stage_6_pr_registry` in `p2p_donor_capabilities.json`; it has no aliases or
+locally reordered variants. The roadmap, chrono and crypto prerequisite PRs
+own no capability entry.
 
-### Stage 7: GossipSub and plugin surface
+0. `forge-p2p-stage6-roadmap-v1`: freeze the four-field manifest, donor evidence,
+   profile locks, exact PR ownership and acceptance matrix; no runtime code;
+1. `forge-chrono-v1`: add only reusable `forge_chrono` algorithms for
+   deadlines, expiry, backoff and jitter. It owns no clock, scheduler, thread or
+   P2P lifecycle;
+2. `forge-p2p-host-protection-v1`: staged connection gater plus memory, file
+   descriptor, transient and service resource scopes;
+3. `forge-crypto-xsalsa20-v1`: add the crypto boundary required by private
+   transport protection, with pinned `libsodium` discovery and tests;
+4. `forge-p2p-private-network-v1`: TCP/Yamux plus a transport PSK layer before
+   the normal secure channel, with no `/pnet` protocol ID, QUIC, Relay or DCUtR;
+   AutoNAT and UPnP require one explicit Internet-egress policy;
+5. `forge-p2p-address-resolution-v1`: `/dnsaddr`, bounded recursive
+   resolution, Happy Eyeballs, IPv6 black-hole suppression for native/private
+   profiles and UDP black-hole suppression for the native profile over the
+   `net_dns` boundary; this PR requires pinned `c-ares` discovery and tests;
+6. `forge-p2p-reachability-v1`: observed-address confidence and expiry,
+   host-local node-level AutoNAT v1 lifecycle and address-level AutoNAT v2
+   evidence, opt-in bounded wire service roles, effective reachability,
+   periodic Ping liveness distinct from the current Ping wire protocol and typed
+   host-state events;
+7. `forge-p2p-mdns-v1`: optional public mDNS with Go/Rust interop, plus the
+   fingerprinted private-network service namespace with its documented Rust
+   limitation;
+8. `forge-p2p-nat-mapping-v1`: optional native UPnP mapping ownership, renewal, loss
+   and confirmed external-address publication; private profiles use it only
+   through the explicit Internet-egress policy;
+9. `forge-p2p-autorelay-v1`: verified relay candidates, bounded reservations,
+   renewal/replacement and Identify Push of circuit addresses are host-local
+   orchestration; the public Relay v2 service is a separately configured,
+   bounded Go/Rust service-client role;
+10. `forge-p2p-path-management-v1`: one per-peer DCUtR/coordinated-dial state,
+   modern port reuse, direct upgrade, backoff, cancellation, relay fallback and
+   Go TLS/Noise inlined muxer negotiation. Forge-Rust keeps the pinned donor
+   fallback and does not claim inline support; `/libp2p/simultaneous-connect`
+   stays excluded;
+11. `forge-p2p-gossipsub-scoring-v1`: donor-consistent scoring, mesh repair and
+   v1.0 fallback proof;
+12. `forge-p2p-gossipsub-extensions-v1`: v1.2 `IDONTWANT`, v1.3 extension
+    support where one first-RPC advertisement is sent, unknown extensions are
+    ignored and capability matching decides use, plus opt-in Partial Messages
+    with Go/Rust interop evidence.
 
-Complete donor-consistent scoring, decay, thresholds, mesh selection,
-opportunistic grafting and score retention. The pubsub plugin remains a narrow
-facade over node-owned GossipSub and topology. GossipSub v1.0 fallback needs a
-fixture that forces v1.0 negotiation; successful v1.1 interop is not evidence
-for the fallback protocol.
+The existing DHT, topology and transport services are reused. mDNS, DNSAddr,
+AutoNAT, AutoRelay and path upgrades feed the same topology manager; they do
+not create parallel discovery or dialing loops. Typed events report state
+changes without turning diagnostics into a control API.
+
+Private-network and address-resolution PRs both depend on host protection
+because they introduce bounded resolver, dial and mapping work. Path management
+depends on address resolution because coordinated attempts consume normalized
+candidate addresses. Reachability deliberately has no direct address-resolution
+dependency: Ping, AutoNAT and observed-address evidence consume configured or
+Identify-observed endpoints and do not resolve `/dnsaddr`.
+
+The runtime PRs use `create-library` ownership. They may establish raw-node
+typed options, but `plugins.p2p.node` schema and configuration mapping wait for
+Stage 7, after those contracts are stable. `c-ares` and `libsodium` are explicit
+build/test prerequisites of their named PRs, not incidental transitive
+dependencies.
+
+Stage 6 is complete only when the manifest has no `stage_6` entry,
+each delivered capability has an implementation feature/evidence mapping, and
+live Go/Rust tests cover every standard protocol or negotiation behavior that
+the profile advertises. Registered donor fixtures are test declarations, not
+passing evidence. The source checker validates only registry structure and
+current runner registrations; it never emits an execution PASS. A standalone
+artifact check can report only local `CONSISTENT`/`NOT_RUN`/`FAILED` status, not
+promotion. The CMake promotion target owns the canonical runner invocation and,
+in that same process, writes a local execution receipt with the subprocess exit
+code and immediately validates the exact artifact it produced. It uses the
+current resolved `sys.executable`, the exact canonical runner flags and roots,
+enabled mode, the reviewed `HEAD`, a clean tracked tree, fixture `build-info`,
+Python/binary path and SHA-256 provenance, and the manifest path/SHA-256.
+
+The artifact records raw dialer/listener commands, their binary bindings,
+launcher execution inputs/results, result payloads, and a relative SHA-256
+evidence index. `effective_configuration` is only a checked projection of those
+commands and parsed endpoint results; it does not repeat manifest capability
+labels as authority. The checker parses each indexed JSON result and requires it
+to equal the corresponding raw payload (except runner-owned `result_file` and
+`attempts`), rejects failure text, non-JSON evidence, `/bin/false`, incomplete or
+provenance-only argv, and reused proof files.
+
+A future PR4 private TCP/Yamux+pnet fixture must pass the same absolute
+`--pnet-key-file` outside the runner artifact directory to both dialer and
+listener and use `--transport tcp-pnet`. The key bytes are neither serialized,
+logged nor added to the evidence index.
+Both endpoint result files must report `pnet_enabled=true`,
+`negotiated_pnet=true`, and one shared non-secret `pnet_fingerprint`. Its exact
+value is `SHA-256("forge-p2p-stage6-pnet-fingerprint-v1" || 0x00 || PSK-file-bytes)`;
+the PR4 runner and its newly registered validator must independently recompute
+it from the configured file without serializing, logging or indexing the PSK
+bytes. PR0 does not install a PNET validator or synthetic control artifact.
+The root PNET scenario additionally needs one same-key positive run and two
+separately indexed control executions: missing key and mismatched key. Each
+control binds its launcher command, log and result to the expected peer and
+must show one attempted connection, zero established connections and zero
+Identify/application streams with rejection before Identify. The mismatched-key
+fixture key also remains outside the artifact directory and evidence index.
+If a future private AutoNAT scenario requires
+`reachability.private_internet_policy`, both commands must additionally pass
+`--private-egress-policy allow-internet`; both results must report that policy
+and `egress_policy_enforced=true`, while the dialer reports a successful actual
+dialback and the listener reports its receipt. A separate successful
+`--private-egress-policy deny-external` control must emit a hashed result with
+`status=rejected`, `external_dial_attempted=false` and
+`rejection_reason=private_egress_policy`; it never serializes PSK bytes. The
+implementing PR maps manifest dependencies to these concrete command/result
+proofs rather than trusting enabled-capability labels. Native QUIC, native
+TCP/Yamux and private TCP/Yamux+pnet remain separate proofs. An optional
+capability is tested only through an enabled run and is never thereby claimed
+as default.
+
+The SHA-256 index is tamper-evident, self-consistent local evidence only. It is
+not a signed remote attestation and does not claim malicious-artifact
+unforgeability; the promotion authority is the CMake-owned execution and its
+immediate validation, not external artifact replay.
+Every donor acceptance scenario, including a planned scenario, has one closed,
+exact contract name:
+`forge.p2p.evidence.<scenario-id>.v1`. The manifest's `evidence_contracts`
+registry must cover those values exactly, and the paired inventory and
+acceptance checkers reject missing, unknown or reused names. Only a
+`registration: registered` contract maps to an executable semantic validator;
+a planned contract deliberately has no validator and blocks promotion until its
+implementing PR supplies the real runner, observed runtime schema, negative
+controls and donor evidence. `status=ok`, enabled-capability labels or a
+scenario label alone cannot promote a result. Current runner-backed cases
+validate emitted Ping, Identify, TCP/Yamux endpoint state and echo, DHT, Rendezvous and
+implementation-specific Relay reservation/open fields. Merely enabling a
+listener feature is not execution evidence. The future PR owns the exact
+runtime schema and negative controls for its contract: correlated security/muxer
+transcripts; AutoNAT probe/dialback allow and deny evidence; relay/DCUtR paths;
+discovery no-dial controls; and correlated DHT, Rendezvous, GossipSub,
+port-reuse and fragment evidence. Until that PR registers an observed runner
+schema and separately indexed command/result/log evidence, its declared
+contract ID is promotion-blocking; source labels are not behavior proof.
+The native Go TLS and Rust fixed-ALPN TLS fallback inline-muxer contracts are
+also exact TLS contracts, so their future launcher mapping is `tcp-tls`; the
+private-profile variants remain `tcp-pnet` and need their own PR4 proof.
+For current native scenarios, the command mapping is only a launcher check.
+`quic_v1_transport` additionally requires the endpoint result to report the
+observed `/quic-v1` transport, the authenticated remote peer ID and the Identify
+proof. `tcp_yamux` requires endpoint-emitted `negotiated_transport=tcp`,
+`negotiated_security=/noise`, `negotiated_muxer=/yamux/1.0.0`, the authenticated
+remote peer ID and a completed echo. `multistream_select`, `noise_identity` and `tls_identity` require an
+endpoint-emitted ordered multistream/security/Yamux/application transcript and
+the exact negotiated security and muxer fields in that result; runner-owned
+record fields cannot satisfy either requirement. Go can observe its connection
+security/muxer state and QUIC peer/transport state, while the current Rust Swarm
+public event surface exposes the authenticated peer and remote multiaddr but not
+the selected Noise/TLS/Yamux upgrade phases. Those missing endpoint fields are a
+specific promotion blocker, not a license to emit values derived from fixture
+CLI options. The current Forge TCP fixture has the same transcript requirement
+before a current TCP security case can be promoted.
+`kademlia_amino` likewise requires the exact `/ipfs/kad/1.0.0` result plus
+provider, independent querier and returned-provider equality, a provider address
+count, and positive protocol-stream and query deltas. A `provider_count` alone
+is only registration-path data and is rejected.
+`limited` is valid only for a registry-classified limitation and
+emits `PASS_WITH_DOCUMENTED_LIMITATIONS`; all other directions use the schema's
+`passing_status`. Missing, stale or incomplete artifacts are `NOT_RUN`, never a
+passing result. The inventory checker remains the paired source-manifest gate.
+`test_forge_p2p_inventory` runs only source validation and the checker self-test;
+PR0 does not require a live artifact. Promotion is explicit: it runs the runner
+with live execution enabled and preserves a nonzero runner exit as `FAILED`.
+Every checker error after that invocation is also `FAILED`, never `NOT_RUN`.
+There is no cache variable for replaying an externally supplied artifact:
+
+```bash
+cmake -S . -B build/forge-p2p-stage6 -G Ninja
+cmake --build build/forge-p2p-stage6 --target test_forge_p2p_stage6_acceptance
+```
+
+For a multi-config generator, CMake scopes the promotion directory by
+`$<CONFIG>` so independently built fixture/provenance outputs cannot collide.
+Within that configured base, the wrapper creates one fresh random invocation
+directory for every promotion, binds its receipt to that directory and prints the
+preserved evidence path; it never reuses a stale shared artifact path.
+
+### Stage 7: Official plugin and operational surface
+
+Expose the complete validated Stage 6 configuration, host/protocol metrics and read-only diagnostics
+through the official plugins. Plugins remain dependency/configuration adapters:
+they may not own mDNS, NAT, relay, dialing, GossipSub or resource-maintenance
+loops. Programmatic nodes and plugin-created nodes must have lifecycle parity.
 
 ### Stage 8: Production proof
 
 Run restart, churn, scale, hostile-peer, bounded-memory and long-duration tests
 through both the raw node and official plugins, followed by live Go and Rust
-interop. Only then may inventory entries be promoted to `live` and Content
-Swarm resume on the hardened substrate.
+interop. Only then may native and private-network inventory entries be promoted
+to `live` and Content Swarm resume on the hardened substrate. This promotion
+does not claim browser transport support.
+
+### Stage 9: P2P WebSocket and browser transport profile
+
+Implement donor-compatible `/ws` and `/wss` dial/listen behavior, secure upgrade,
+resource accounting, proxy/backpressure handling, explicit WSS certificate
+ownership/AutoTLS policy and Go/Rust interoperability.
+Only then may Forge advertise the WebSocket browser-transport profile.
+WebTransport and WebRTC remain separately classified future capabilities and
+cannot be inferred from WebSocket support.
 
 ## 9. Delivery Discipline
 

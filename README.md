@@ -195,7 +195,7 @@ registry.register_plugin(forge::plugins::crypto::secrets::descriptor());
 | [net/yamux](libraries/net/yamux/README.md) | `forge_net_yamux` | Yamux multiplexed sessions over a transport stream. | `forge_net_transport`, Boost.Asio. |
 | [net/quic](libraries/net/quic/README.md) | `forge_net_quic` | QUIC endpoint, listener, connector, framed streams. | ngtcp2, OpenSSL 3.0+, Boost.Asio. |
 | [multiformats](libraries/multiformats/README.md) | `forge_multiformats` | libp2p-compatible varint, multicodec, multihash, multibase and multiaddr. | `forge_codec_base32`, `forge_codec_base58`, `forge_crypto_digest`, `forge_exceptions`. |
-| [net/p2p](libraries/net/p2p/README.md) | `forge_net_p2p` | Peer identity, sessions, discovery, relay, DHT, rendezvous and GossipSub. | `forge_net_transport`, `forge_multiformats`, `forge_net_quic`, `forge_net_yamux`. |
+| [net/p2p](libraries/net/p2p/README.md) | `forge_net_p2p` | Peer identity, sessions, wire Ping, discovery, relay, DHT, rendezvous and GossipSub; host-local reachability policy is a separate Stage 6 surface. | `forge_net_transport`, `forge_multiformats`, `forge_net_quic`, `forge_net_yamux`. |
 | [db/ids](libraries/db/ids/README.md) | `forge_db_ids` | Compact database object IDs and guest-safe typed ID bindings. | `forge_raw`, `forge_variant`, `forge_exceptions`. |
 | [db/core](libraries/db/core/README.md) | `forge_db_core` | Shared record driver, transaction and snapshot contract. | Boost.Asio, `forge_exceptions`. |
 | [db/object](libraries/db/object/README.md) | `forge_db_object` | Typed object/index store over the shared DB driver. | Boost.Asio, `forge_db_core`, `forge_db_ids`, `forge_raw`, `forge_exceptions`. |
@@ -236,6 +236,7 @@ components above without installing the guest sysroot; only `tooling_abi` and
 - [docs/runtime/asio-app.md](docs/runtime/asio-app.md) — runtime, scheduler and async app lifecycle.
 - [docs/web/http-websocket.md](docs/web/http-websocket.md) — HTTP/WebSocket layering.
 - [docs/network/quic-p2p.md](docs/network/quic-p2p.md) — QUIC and P2P model.
+- [docs/iterations/forge-p2p-production-implementation-v1.md](docs/iterations/forge-p2p-production-implementation-v1.md) — Stage 6 P2P ownership and canonical runner acceptance promotion.
 - [docs/blueprints/blockchain-constructor/README.md](docs/blueprints/blockchain-constructor/README.md) — planning map for FORGE as a neutral constructor substrate.
 - [docs/tui/notcurses-component-library.md](docs/tui/notcurses-component-library.md) — TUI abstraction over Notcurses.
 - [docs/codecs/json-yaml-glaze.md](docs/codecs/json-yaml-glaze.md) — JSON/YAML codec boundary.

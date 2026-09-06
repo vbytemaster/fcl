@@ -3,6 +3,7 @@
   "status_scope": "donor_case_coverage_only",
   "execution_scope": "registered_optional_tests_not_current_results",
   "production_inventory": "p2p_feature_inventory.json",
+  "capability_inventory": "p2p_donor_capabilities.json",
   "donor_revisions": {
     "libp2p-specs": "6b6203ee6f62938ce67efdb33498173f475851c0",
     "multiaddr": "8f9c2eeff8a50276660c0d93fe5939540ee52110",
@@ -76,10 +77,10 @@
       "id": "autonatv2.dial_request_response_nonce",
       "protocol": "AutoNAT v2",
       "source": "donors/libp2p-specs/autonat/autonat-v2.md",
-      "donor": "go-libp2p/p2p/protocol/autonatv2/autonat_test.go TestClientRequest/TestClientDataRequest",
+      "donor": "Go AutoNAT v2 client tests and Rust AutoNAT v2 client behavior",
       "donor_file":
-          [ "donors/libp2p-specs/autonat/autonat-v2.md", "donors/go-libp2p/p2p/protocol/autonatv2/autonat_test.go" ],
-      "donor_case": [ "TestClientRequest", "TestClientDataRequest", "nonce validation" ],
+          [ "donors/libp2p-specs/autonat/autonat-v2.md", "donors/go-libp2p/p2p/protocol/autonatv2/autonat_test.go", "donors/rust-libp2p/protocols/autonat/src/v2/client.rs" ],
+      "donor_case": [ "TestClientRequest", "TestClientDataRequest", "Rust v2 client behavior", "nonce validation" ],
       "mapping_state": "mapped",
       "forge_tests": [
         "test_forge_quic_p2p p2p_libp2p_autonat_v2_codec_covers_nonce_data_and_statuses",
@@ -91,7 +92,22 @@
           "profile": "quic_base",
           "scenario": "autonatv2"
         }
-      ]
+      ],
+      "known_gap": "The registered Forge scenario is a declared interop target, not a current passing Go/Rust result; execute it on the reviewed head before promotion."
+    },
+    {
+      "id": "mdns.private_fingerprinted_rust_limitation",
+      "protocol": "Private mDNS",
+      "source": "donors/go-libp2p/p2p/discovery/mdns/mdns.go and donors/rust-libp2p/protocols/mdns/src/lib.rs",
+      "donor": "Go private fingerprinted mDNS service naming and Rust standard mDNS behavior",
+      "donor_file": [
+        "donors/go-libp2p/p2p/discovery/mdns/mdns.go",
+        "donors/rust-libp2p/protocols/mdns/src/lib.rs"
+      ],
+      "donor_case": [ "Go fingerprinted service name", "Rust standard mDNS service limitation" ],
+      "mapping_state": "unsupported",
+      "forge_tests": [],
+      "known_gap": "The pinned Rust donor has no equivalent private fingerprinted service configuration. This is a limitation case, not a registered bilateral live result."
     },
     {
       "id": "autonatv2.malformed_and_oversized",
@@ -198,6 +214,29 @@
       ]
     },
     {
+      "id": "connections.coordinated_dial_port_reuse",
+      "protocol": "Coordinated Direct Dial and TCP Port Reuse",
+      "source": "donors/libp2p-specs/connections/simopen.md and pinned Go/Rust swarm and TCP transport paths",
+      "donor": "go-libp2p swarm direct dialing plus rust-libp2p DialOpts, connection pool and TCP transport port-reuse mechanics",
+      "donor_file": [
+        "donors/libp2p-specs/connections/simopen.md",
+        "donors/go-libp2p/p2p/net/swarm/swarm_dial.go",
+        "donors/go-libp2p/p2p/net/swarm/dial_worker.go",
+        "donors/go-libp2p/p2p/transport/tcp/tcp.go",
+        "donors/rust-libp2p/swarm/src/connection/pool.rs",
+        "donors/rust-libp2p/swarm/src/dial_opts.rs",
+        "donors/rust-libp2p/transports/tcp/src/lib.rs"
+      ],
+      "donor_case": [
+        "direct dial coordination without legacy simultaneous-connect negotiation",
+        "DialOpts role and address selection",
+        "TCP transport local-port reuse"
+      ],
+      "mapping_state": "unsupported",
+      "forge_tests": [],
+      "known_gap": "Stage 6 has no runtime fixture control for concurrent port reuse yet. This donor trace is source-only and does not establish an interop result."
+    },
+    {
       "id": "resource.peer_protocol_dial_scopes",
       "protocol": "Resource Manager",
       "source": "go-libp2p resource-manager wrapping tests",
@@ -300,7 +339,9 @@
       "donor": "live fixtures launched by tests/libp2p_interop/runner.py",
       "donor_file": [
         "donors/go-libp2p/p2p/protocol/ping/ping_test.go", "donors/go-libp2p/p2p/protocol/identify/id_test.go",
-        "donors/rust-libp2p/protocols/ping/tests/ping.rs", "donors/rust-libp2p/protocols/identify/tests/smoke.rs"
+        "donors/go-libp2p/p2p/protocol/autonatv2/client.go",
+        "donors/rust-libp2p/protocols/ping/tests/ping.rs", "donors/rust-libp2p/protocols/identify/tests/smoke.rs",
+        "donors/rust-libp2p/protocols/autonat/src/v2/client.rs"
       ],
       "donor_case": [ "Ping", "Identify", "AutoNAT v2", "Relay reserve" ],
       "mapping_state": "mapped",
@@ -325,7 +366,8 @@
           "profile": "quic_base",
           "scenario": "relay_reserve"
         }
-      ]
+      ],
+      "known_gap": "Listed live scenarios are registered optional evidence only, not PASS results. Their exact runner executions remain required for the corresponding support claim."
     },
     {
       "id": "transport.tcp_noise_yamux_direct",
@@ -383,7 +425,8 @@
       "donor_case": [
         "TLS security negotiation", "libp2p certificate extension verification",
         "missing certificate identity extension rejection", "Peer ID verification", "ALPN Yamux negotiation",
-        "fallback post-TLS mux negotiation", "Ping over TCP TLS", "Identify over TCP TLS"
+        "Forge-Go TLS/Noise inlined muxer target", "Forge-Rust fallback post-TLS mux negotiation",
+        "Ping over TCP TLS", "Identify over TCP TLS"
       ],
       "mapping_state": "mapped",
       "forge_tests": [
@@ -411,7 +454,7 @@
           "scenario": "echo"
         }
       ],
-      "known_gap": "`/ws` and `/wss` have parse/store coverage only; no dial/listen live scenario is claimed."
+      "known_gap": "Forge-Go inline muxer is a registered target; the pinned Rust donor and Forge-Rust path use fallback post-TLS mux negotiation. No registration is a PASS without the exact-head artifact. `/ws` and `/wss` have parse/store coverage only."
     },
     {
       "id": "p2p.host_multi_transport_orchestration",

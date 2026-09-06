@@ -116,12 +116,16 @@ network mechanics and their maintenance:
 
 - bootstrap connection maintenance;
 - Identify and Identify Push;
+- observed-address confidence, AutoNAT and effective reachability;
+- mDNS and DNSAddr discovery/resolution;
 - DHT routing refresh and provider-record maintenance;
 - Rendezvous registration/discovery refresh;
 - Peer Exchange scheduling;
-- AutoNAT probing and reachability state;
+- optional UPnP mapping renewal and loss detection;
 - AutoRelay candidate selection and reservation renewal;
 - DCUtR attempts and relay fallback;
+- adaptive dial ordering and UDP/IPv6 black-hole suppression;
+- staged connection gating and scoped host resource accounting;
 - connection watermarks, scoring, liveness sampling and GossipSub heartbeat.
 
 `plugins.p2p.node` is an application adapter. It decodes configuration, prepares
@@ -137,10 +141,14 @@ mechanics for the caller-controlled registration lifetime. The caller must be
 able to withdraw or release that registration when content is no longer
 available. Products continue to own authorization and network membership.
 
-## 4. Complete Current-State Matrix
+## 4. Original Hardening Baseline Matrix
 
-The following matrix separates working protocol substrate from operational
-production behavior. It is the baseline backlog for this hardening program.
+The following matrix records the audit state before Stages 2-5. It separates
+the then-working protocol substrate from missing operational production
+behavior and remains the accepted historical backlog, not a current support
+snapshot. Current implementation claims are owned by
+`tests/libp2p_interop/p2p_feature_inventory.json` and the implementation
+roadmap.
 
 | Area | Current state | Confirmed problem | Required disposition |
 |---|---|---|---|
@@ -154,7 +162,7 @@ production behavior. It is the baseline backlog for this hardening program.
 | Identify | `manual-only`, `partial` | Inbound handlers work, but ordinary session establishment does not initiate Identify. New sessions initially copy local capabilities as if they were remote capabilities. | Identify every new session, verify and persist remote facts, emit Identify Push on local changes. |
 | Peer Exchange | `manual-only` | Inbound response and explicit request work, but node never schedules outbound exchange. | Integrate bounded exchange into topology maintenance. |
 | Rendezvous | `manual-only`, `partial` | Registration and discovery work only when explicitly called; there is no renewal/discovery lifecycle. | Add role configuration, registration lifetime and refresh loop. |
-| AutoNAT | `manual-only`, `partial` | Handler and explicit probe exist, but node does not maintain reachability observations. | Add bounded multi-observer policy and effective reachability state. |
+| AutoNAT | `manual-only`, `partial` | v1/v2 handlers and explicit probes exist, but no node owns v1 reachability lifecycle, v2 address evidence or their bounded reconciliation. | Add separate v1 node-level and v2 address-level policies with one effective reachability projection. |
 | Relay and AutoRelay | `partial` | Relay mechanics and AutoRelay loop are live, but candidate supply is starved by missing Identify/discovery lifecycle. | Feed verified topology into existing reservation management. |
 | DCUtR hole punching | `partial` | Operational DCUtR code exists separately from the public `hole_punch::attempt` state object, which is only unit-tested. Per-peer attempt ownership is not represented by that helper. | Establish one private per-peer attempt state machine; integrate it or delete the orphan class. |
 | Ping | `manual-only` | Responder and explicit RTT query work; no optional liveness policy updates health/backoff state. | Add bounded configurable sampling or document responder-only mode explicitly. |
@@ -170,7 +178,62 @@ production behavior. It is the baseline backlog for this hardening program.
 | Official `plugins.p2p.node` | `partial` | Does not configure DHT/Rendezvous/AutoNAT roles or persistent storage and duplicates bootstrap maintenance. | Reduce to configuration/dependency adapter over complete node lifecycle. |
 | Diagnostics | `partial` | Snapshots exist, but control loops use projections and missing protocol lifecycle leaves health ambiguous. | Keep diagnostics read-only and expose effective mode, state, limits and degradation causes. |
 
-### 4.1 Routing Table And Peer Store Are Different Components
+### 4.1 Donor-First Completeness And Production Profiles
+
+The historical baseline matrix above cannot prove completeness by itself: it
+only lists surfaces already noticed in Forge at the start of hardening. The
+current implementation state lives in the machine-readable feature inventory.
+The authoritative reviewed scope catalog is
+`tests/libp2p_interop/p2p_donor_capabilities.json`. It is pinned to the same
+libp2p specs, Go and Rust revisions as the fixture matrix and must classify
+every donor capability before implementation support is evaluated.
+
+Each profile duplicates its reviewed capability IDs as a scope lock. The gate
+compares that lock with the entries, validates donor paths against pinned
+checkouts when available and maps every existing Forge feature exactly once.
+This catches accidental omission and drift; semantic completeness remains a
+donor-audit and independent-review responsibility because source text cannot be
+classified mechanically without reimplementing the donor architecture.
+
+Forge uses explicit production profiles rather than claiming every donor crate:
+
+| Profile | Production boundary | Gate |
+|---|---|---|
+| Native | TCP/Yamux and QUIC, secure identity, adaptive dialing, autonomous discovery/routing, reachability, relay/path management, bounded resources and GossipSub | Stage 8 |
+| Private network | TCP/Yamux plus a transport PSK layer before the normal secure channel, autonomous routing/pubsub and a fingerprinted mDNS namespace | Stage 8 |
+| Browser transport | WebSocket `/ws` and `/wss` first; WebTransport and WebRTC require separate decisions | Stage 9 and later |
+| Experimental/legacy | HTTP transport, Fetch, UDS, Perf, Floodsub, Mplex, plaintext, SECIO and Relay v1 are explicitly deferred, application-owned, test-only or rejected | Never implied by native readiness |
+
+The private-network profile is not an alias for every native transport. Its
+scope lock deliberately selects TCP/Yamux plus routing, discovery and pubsub
+under the PSK transport layer; QUIC, Circuit Relay and DCUtR are excluded until
+a donor-backed PSK-compatible design exists. AutoNAT and UPnP require one
+explicit private-profile Internet-egress policy. Stage 8 evaluates that explicit
+profile rather than inheriting unsupported native paths.
+
+The first donor-first audit found these missing or incomplete host mechanisms:
+
+| Capability | Why it matters | Delivery |
+|---|---|---|
+| mDNS | Public mDNS has Go/Rust interop; private fingerprinted mDNS is Go-compatible and carries an explicit Rust limitation. | Stage 6, `forge-p2p-mdns-v1` |
+| DNSAddr | Resolves TXT records containing complete peer multiaddrs; ordinary DNS host lookup is not equivalent. | Stage 6, `forge-p2p-address-resolution-v1` |
+| Observed-address manager | Requires independent observations, confidence and expiry before publishing an external address. | Stage 6, `forge-p2p-reachability-v1` |
+| UPnP | Optionally owns native NAT mappings and their renewal/loss lifecycle; private use requires explicit Internet egress. | Stage 6, `forge-p2p-nat-mapping-v1` |
+| Private network PSK | Isolates a deployment through a transport PSK layer before the normal secure-channel handshake; it is not a negotiated protocol ID. | Stage 6, `forge-p2p-private-network-v1` |
+| Connection gater | Rejects at peer dial, address dial, accept, secured identity and upgraded-connection stages. | Stage 6, `forge-p2p-host-protection-v1` |
+| Full resource scopes | Bounds memory, file descriptors, transient work and services in addition to sessions/streams/bytes. | Stage 6, `forge-p2p-host-protection-v1` |
+| Adaptive dialing | Happy Eyeballs and UDP/IPv6 black-hole state avoid serial latency and repeated known-bad paths. | Stage 6, `forge-p2p-address-resolution-v1` |
+| Typed host events | Exposes address, connection, reachability and path changes without polling diagnostics as control state. | Stage 6, `forge-p2p-reachability-v1` |
+| Modern GossipSub | Scoring/mesh repair and v1.0 fallback are separate from v1.2/v1.3/Partial Messages extensions. | Stage 6, `forge-p2p-gossipsub-scoring-v1` then `forge-p2p-gossipsub-extensions-v1` |
+| P2P WebSocket | Enables proxy/browser-compatible `/ws` and `/wss` transport. Parsing a multiaddr is not transport support. | Stage 9, `forge-p2p-websocket-v1` |
+
+WebTransport, WebRTC, HTTP transport and other active/working drafts remain
+visible in the manifest even when they do not gate the native profile. Legacy
+protocols are rejected explicitly. Adding a new donor revision or support claim
+therefore requires reclassification instead of silently expanding or shrinking
+the meaning of "production libp2p".
+
+### 4.2 Routing Table And Peer Store Are Different Components
 
 The Kademlia routing table is mandatory whenever DHT client or server mode is
 enabled. It is the bounded, continuously maintained operational view used to
@@ -527,8 +590,9 @@ therefore work mainly in focused raw-node/interoperability tests.
 
 Required outcome:
 
-- configure trusted AutoNAT observers and a bounded re-probe policy through
-  node options;
+- configure trusted AutoNAT observers and bounded re-probe policy through node
+  options, keeping v1 node-level reachability separate from v2 address-level
+  evidence;
 - aggregate observations instead of trusting one peer;
 - publish effective public/private/unknown reachability in diagnostics;
 - feed verified relay-capable peers into the existing AutoRelay loop;
@@ -670,7 +734,7 @@ corresponding Forge facility exists.
 
 ## 8. Implementation Program
 
-### Phase 0: Support-Claim Freeze And Inventory
+### Stage 1: Support-Claim Freeze And Inventory
 
 - freeze new P2P and Swarm features;
 - classify every public P2P type, method, option, capability and protocol using
@@ -681,14 +745,14 @@ corresponding Forge facility exists.
   capabilities and public implementation components;
 - decide the supported DHT value-record scope before further DHT work.
 
-### Phase 1: Peer State Foundation
+### Stage 2: Peer State Foundation
 
 - replace direct RocksDB ownership with the ObjectDB persistence adapter;
 - introduce bounded in-memory peer directory and routing candidates;
 - make hydration, expiry, persistence queues and shutdown bounded;
 - add secure identity-source delivery and production plugin startup.
 
-### Phase 2: Host Lifecycle And Resource Ownership
+### Stage 3: Host Lifecycle And Resource Ownership
 
 - establish one node-owned start, maintenance, stop and join lifecycle;
 - move bootstrap maintenance out of the plugin;
@@ -697,7 +761,7 @@ corresponding Forge facility exists.
   ownership;
 - expose and diagnose effective resource policy.
 
-### Phase 3: Production Kademlia
+### Stage 4: Production Kademlia
 
 - replace the flat orphan routing table with bounded donor-consistent routing
   state;
@@ -706,37 +770,127 @@ corresponding Forge facility exists.
 - add provider registration lifetime, republish, withdrawal and expiry;
 - implement or explicitly remove generic value-record support.
 
-### Phase 4: Unified Topology Discovery
+### Stage 5: Unified Topology Discovery
 
 - make DHT, Rendezvous and Peer Exchange feed one scored topology manager;
 - maintain peer low/target/high watermarks with bounded dialing;
 - expire stale observations and preserve protected peers;
 - prove discovery beyond bootstrap through raw node and official plugin.
 
-### Phase 5: Reachability And Path Management
+### Stage 6: Donor Parity, Reachability And Path Management
 
-- integrate multi-observer AutoNAT and effective reachability state;
-- feed verified relay candidates into AutoRelay;
-- unify DCUtR attempt ownership and remove the orphan attempt implementation;
-- prove direct, relayed, renewal, fallback and hole-punched paths.
+- build one observed-address/effective-reachability service from independent
+  Identify, host-local v1 node-level and v2 address-level AutoNAT observations,
+  expiry and bounded periodic Ping liveness; Ping and AutoNAT client/service
+  wire roles retain independent Go/Rust gates;
+- add public Go/Rust mDNS, private fingerprinted mDNS with its Rust limitation,
+  and DNSAddr discovery without parallel topology loops;
+- add the PSK transport layer as an explicit TCP/Yamux private profile, with no
+  negotiated `/pnet` ID, QUIC, Relay or DCUtR; AutoNAT and UPnP need explicit
+  private-profile Internet egress;
+- add Happy Eyeballs, IPv6 black-hole state for native/private profiles, UDP
+  black-hole state for the native profile and typed host-state events;
+- preserve Circuit Relay v2 client/transport semantics, keep AutoRelay candidate
+  and reservation orchestration host-local, prove the opt-in public Relay v2
+  service as a Go/Rust service-client role, and unify
+  DCUtR/coordinated-dial-and-port-reuse ownership while preserving relay
+  fallback; reject deprecated `/libp2p/simultaneous-connect` negotiation;
+- add staged connection gating and memory, file descriptor, transient and
+  service resource scopes;
+- complete GossipSub scoring, thresholds, decay, mesh diversity, v1.0 fallback,
+  v1.2 and v1.3 first-RPC extension advertisement, unknown-extension ignore and
+  capability matching, plus opt-in Partial Messages implementation;
+- deliver only these 13 focused implementation PRs, with no new plugin-owned
+  network loops, ordered as PR0 through PR12:
+  `forge-p2p-stage6-roadmap-v1`, `forge-chrono-v1`,
+  `forge-p2p-host-protection-v1`, `forge-crypto-xsalsa20-v1`,
+  `forge-p2p-private-network-v1`, `forge-p2p-address-resolution-v1`,
+  `forge-p2p-reachability-v1`, `forge-p2p-mdns-v1`,
+  `forge-p2p-nat-mapping-v1`, `forge-p2p-autorelay-v1`,
+  `forge-p2p-path-management-v1`, `forge-p2p-gossipsub-scoring-v1` and
+  `forge-p2p-gossipsub-extensions-v1`.
 
-### Phase 6: GossipSub Hardening
+The exact order, dependency DAG and permitted capability owners are locked by
+`stage_6_pr_registry` in `p2p_donor_capabilities.json`; the roadmap, chrono and
+crypto prerequisite PRs deliberately own no capability entries. The
+`interop_acceptance_registry` is source-only registration. It cannot produce an
+execution PASS: the CMake promotion target launches the canonical enabled runner
+and immediately validates the exact artifact from that invocation, including
+clean exact-`HEAD`, manifest, runner argv/roots, tool and binary provenance,
+effective enabled roles and capability dependencies. Native QUIC, native
+TCP/Yamux and private TCP/Yamux+pnet are separate evidence scopes; an enabled
+optional run is not a default-activation claim. An absent or stale provenance is
+`NOT_RUN`; a canonical runner nonzero exit or recorded failure is `FAILED`.
+`limited` is allowed only for a registry-classified limitation and yields
+`PASS_WITH_DOCUMENTED_LIMITATIONS`. SHA-256 evidence is tamper-evident local
+consistency evidence, not signed remote attestation or malicious-artifact
+unforgeability. The inventory checker remains the paired source-manifest gate;
+PR0 itself remains source-only. Every donor acceptance scenario names one
+closed `forge.p2p.evidence.<scenario-id>.v1` contract in the manifest registry.
+The inventory checker requires exact, unique coverage, and the acceptance
+checker has a semantic validator for every registered contract: a status,
+activation or capability label alone cannot establish PASS. Private consumers
+must name the PSK capability except the root PNET scenario; private AutoNAT
+also requires allow-dialback evidence plus an independently hashed deny-egress
+control proving rejection without an external dial.
+The acceptance checker derives `--transport` from the manifest contract rather
+than raw artifact metadata: native QUIC is `quic`, native TCP/Yamux is `tcp`
+except the exact TLS contract's `tcp-tls`, and private TCP/Yamux+pnet is
+`tcp-pnet` for both endpoints. The PNET root also requires indexed missing-key
+and mismatched-key controls that reject before Identify/application streams.
+Future contract schemas require correlated wire fields and separately indexed
+negative controls; they block promotion until the canonical runner and fixtures
+emit those execution controls. A manifest label, activation flag or source-only
+registration cannot establish behavior.
+The current native contracts use the same rule: launcher `--transport` is not
+endpoint proof. QUIC promotion requires an observed `/quic-v1` connection, its
+authenticated remote peer ID and Identify evidence. Current multistream, Noise
+and TLS promotion requires a result-owned ordered upgrade transcript and exact
+security/muxer selections. Rust's current public Swarm events expose peer and
+remote multiaddr but not the selected security/muxer phases, so that absence is
+promotion-blocking rather than a reason to copy requested CLI configuration into
+the result. Current Kademlia promotion requires a correlated Amino provider,
+independent querier, returned peer, address, stream and query proof; a provider
+count does not establish wire behavior.
 
-- complete scoring, thresholds, decay, outbound diversity and opportunistic
-  grafting;
-- integrate discovered topology without coupling GossipSub to a storage or
-  discovery backend;
-- pass adversarial and topology-repair suites.
+The manifest's inline-muxer evidence names Go TLS and Noise support plus the
+pinned Rust TLS fixed-ALPN and Noise extension/fallback paths. Its GossipSub
+v1.3 evidence names Go `extensions.go` first-RPC behavior and Rust
+`behaviour.rs` advertisement handling in addition to codec/spec sources.
+The coordinated port-reuse trace additionally pins Rust
+`swarm/src/dial_opts.rs` and `transports/tcp/src/lib.rs` alongside the existing
+connection-pool and Go direct-dial sources; it remains source-only until its
+concurrent fixture/control exists.
 
-### Phase 7: Official Plugin And Operational Surface
+Private-network and address-resolution depend on host protection; path
+management also depends on address resolution. Reachability has no direct
+address-resolution dependency because AutoNAT, Ping and observed-address policy
+operate on configured or Identify-observed endpoints and do not resolve
+`/dnsaddr`. In the private profile, every AutoNAT lifecycle/client/service role
+and UPnP depends on the Forge-owned Internet-egress policy; native roles do not.
+Private fingerprinted mDNS and that egress policy are Forge extensions informed
+by donor patterns and limitations, not donor-spec claims. Rendezvous is
+Rust-supported with an explicit Go limitation: no
+official Go rendezvous behaviour donor is pinned, so it cannot be presented as
+Go-compatible.
 
-- expose complete validated production configuration without duplicating node
-  records;
+`forge_chrono` remains algorithms-only: it supplies deadline, expiry, backoff
+and jitter calculations but owns no clock, scheduler or P2P lifecycle.
+`forge-crypto-xsalsa20-v1` requires pinned `libsodium`; address resolution over
+`net_dns` requires pinned `c-ares`. Those dependency checks and focused tests
+belong to their runtime PRs. Official plugin configuration mapping is Stage 7
+work after the raw-node contracts are stable.
+
+### Stage 7: Official Plugin And Operational Surface
+
+- expose complete validated production configuration and host/protocol metrics
+  without duplicating node records;
+- map the validated Stage 6 raw-node options into official plugin configuration;
 - remove all plugin-owned network maintenance;
 - expose narrow typed contributions and read-only diagnostics;
 - prove configuration, restart and shutdown parity with programmatic nodes.
 
-### Phase 8: Production Proof And Release Gate
+### Stage 8: Native Production Proof And Release Gate
 
 - run scale, churn, cancellation, malformed-input and resource-exhaustion
   suites;
@@ -746,8 +900,22 @@ corresponding Forge facility exists.
 - update support documentation only from passed evidence;
 - declare `forge_net_p2p` production-ready before resuming Content Swarm.
 
+The declaration applies only to the native TCP/QUIC and private-network
+profiles whose required manifest entries pass. It does not imply browser
+transport support.
+
+### Stage 9: P2P WebSocket And Browser Transport
+
+- implement `/ws` and `/wss` dial/listen, secure upgrade, proxy/backpressure
+  behavior, resource ownership, explicit WSS certificate/AutoTLS policy and
+  deterministic shutdown;
+- prove Go and Rust transport interoperability rather than relying on
+  multiaddr parse fixtures;
+- keep WebTransport and WebRTC as separately planned future-profile work until
+  their own contracts and evidence are approved.
+
 The earlier high-level order is therefore replaced by these dependency-ordered
-phases. Each phase should be delivered as one or more focused PRs; a phase is
+stages. Each stage should be delivered as one or more focused PRs; a stage is
 complete only after its exact-head review and evidence gates pass.
 
 ## 9. Production Acceptance Gates
@@ -766,6 +934,17 @@ complete only after its exact-head review and evidence gates pass.
   delegates lifecycle to that node behavior.
 - Three nodes given only bootstrap entry points discover and connect to each
   other within bounded time.
+- Nodes on one LAN discover each other through mDNS without bootstrap or
+  Internet access, including the fingerprinted private-network namespace.
+- DNSAddr expansion is bounded, cycle-safe and feeds the same authenticated
+  topology path as configured multiaddrs.
+- External addresses are advertised only after configured-listen, signed,
+  independently observed or owned NAT-mapping evidence reaches its policy.
+- Private-network nodes reject a mismatched or absent transport PSK before
+  normal secure-channel negotiation and never negotiate a `/pnet` protocol ID.
+- Happy Eyeballs, native/private IPv6 black-hole state and native UDP
+  black-hole state improve path selection without permanently suppressing
+  recovered transports.
 - A restarted node restores valid peer/discovery state and safely expires stale
   records.
 - Peer persistence passes the same reopen and transaction fixtures over MDBX and
@@ -787,6 +966,11 @@ complete only after its exact-head review and evidence gates pass.
 - Remote session capabilities match the peer's actual advertised protocols.
 - Public and private reachability lead to the expected direct, relay and DCUtR
   paths.
+- Connection gating and memory, file descriptor, transient and service scopes
+  reject work before unbounded allocation and release reservations on every
+  terminal path.
+- GossipSub scoring and mesh repair pass v1.0 fallback and advertised
+  v1.2/v1.3 negotiation fixtures, including opt-in Partial Messages behavior.
 - Loss of bootstrap, relay or a discovered peer repairs topology without an
   unbounded retry/task/memory increase.
 - GossipSub continues delivery after bootstrap loss when other mesh peers remain.
@@ -800,7 +984,11 @@ complete only after its exact-head review and evidence gates pass.
 - Bootstrap and discovery maintenance do not construct full diagnostics
   snapshots or perform unbounded work per tick.
 - Diagnostics identify disabled, idle, degraded and healthy discovery states.
-- Live Go/Rust libp2p interoperability remains green for every enabled protocol.
+- Live libp2p interoperability remains green for every enabled and applicable
+  direction, proven by the CMake-owned exact-`HEAD` runner invocation and its
+  immediate artifact validation rather than case registration, artifact replay
+  or a source-inventory result; documented Go/Rust limitations do not become
+  bilateral claims.
 - The implementation inventory contains no `stub`, `orphan`, unintended
   `manual-only`, `partial` or `unverified` production surface.
 

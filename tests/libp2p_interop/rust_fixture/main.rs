@@ -90,6 +90,66 @@ struct RendezvousLifecycleEvidence {
     final_registration_count: usize,
 }
 
+#[derive(Debug)]
+struct RelayReservationEvidence {
+    accepted: bool,
+    relay_peer_id: String,
+    client_peer_id: String,
+    circuit_addr: String,
+    renewal: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RelayAddressError {
+    TerminalPeerMismatch,
+}
+
+impl RelayAddressError {
+    fn status_code(&self) -> &'static str {
+        match self {
+            Self::TerminalPeerMismatch => "relay_endpoint_peer_mismatch",
+        }
+    }
+}
+
+impl std::fmt::Display for RelayAddressError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TerminalPeerMismatch => {
+                formatter.write_str("relay endpoint terminal peer does not match requested peer")
+            }
+        }
+    }
+}
+
+impl Error for RelayAddressError {}
+
+#[derive(Debug, Default)]
+struct RelayReservationProgress {
+    accepted_renewal: Option<bool>,
+    circuit_addr: Option<String>,
+}
+
+impl RelayReservationProgress {
+    fn record_acceptance(&mut self, renewal: bool) {
+        self.accepted_renewal = Some(renewal);
+    }
+
+    fn record_circuit_addr(&mut self, circuit_addr: String) {
+        self.circuit_addr = Some(circuit_addr);
+    }
+
+    fn complete(&mut self) -> Option<(bool, String)> {
+        if self.accepted_renewal.is_none() || self.circuit_addr.is_none() {
+            return None;
+        }
+        Some((
+            self.accepted_renewal.take().expect("checked above"),
+            self.circuit_addr.take().expect("checked above"),
+        ))
+    }
+}
+
 const RENDEZVOUS_LIFECYCLE_MIN_TTL_SECONDS: u64 = 2;
 const RENDEZVOUS_LIFECYCLE_MAX_TTL_SECONDS: u64 = 3;
 const RENDEZVOUS_LIFECYCLE_TIMING_MARGIN: Duration = Duration::from_millis(200);
@@ -294,6 +354,83 @@ fn transport_addr(mut address: Multiaddr) -> Multiaddr {
         let _ = address.pop();
     }
     address
+}
+
+fn relay_transport_addr(
+    mut address: Multiaddr,
+    relay_peer: PeerId,
+) -> Result<Multiaddr, RelayAddressError> {
+    if let Some(Protocol::P2p(endpoint_peer)) = address.iter().last() {
+        if endpoint_peer != relay_peer {
+            return Err(RelayAddressError::TerminalPeerMismatch);
+        }
+        let _ = address.pop();
+    }
+    Ok(address)
+}
+
+fn observed_quic_transport(endpoint: &libp2p::core::ConnectedPoint) -> Option<&'static str> {
+    endpoint
+        .get_remote_address()
+        .iter()
+        .any(|protocol| matches!(protocol, Protocol::QuicV1))
+        .then_some("/quic-v1")
+}
+
+async fn reserve_relay_address(
+    swarm: &mut libp2p::Swarm<Behaviour>,
+    relay_peer: PeerId,
+    relay_addr: Multiaddr,
+) -> Result<RelayReservationEvidence, Box<dyn Error>> {
+    let client_peer = *swarm.local_peer_id();
+    let base_circuit_addr = relay_addr
+        .with(Protocol::P2p(relay_peer))
+        .with(Protocol::P2pCircuit);
+    let expected_circuit_addr = base_circuit_addr.clone().with(Protocol::P2p(client_peer));
+    let relay_listener_id = swarm.listen_on(base_circuit_addr)?;
+    let mut progress = RelayReservationProgress::default();
+    let deadline = tokio::time::sleep(Duration::from_secs(20));
+    tokio::pin!(deadline);
+
+    loop {
+        tokio::select! {
+            _ = &mut deadline => {
+                return Err("timed out waiting for relay reservation acceptance and circuit address".into());
+            }
+            event = swarm.select_next_some() => match event {
+                SwarmEvent::NewListenAddr { listener_id, address, .. }
+                    if listener_id == relay_listener_id && address == expected_circuit_addr =>
+                {
+                    swarm.add_external_address(address.clone());
+                    progress.record_circuit_addr(address.to_string());
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::RelayClient(
+                    relay::client::Event::ReservationReqAccepted {
+                        relay_peer_id,
+                        renewal,
+                        ..
+                    },
+                )) if relay_peer_id == relay_peer => {
+                    if renewal {
+                        return Err("initial relay reservation unexpectedly reported renewal=true".into());
+                    }
+                    progress.record_acceptance(renewal);
+                }
+                other => {
+                    eprintln!("rust relay reservation event: {other:?}");
+                }
+            },
+        }
+        if let Some((renewal, circuit_addr)) = progress.complete() {
+            return Ok(RelayReservationEvidence {
+                accepted: true,
+                relay_peer_id: relay_peer.to_string(),
+                client_peer_id: client_peer.to_string(),
+                circuit_addr,
+                renewal,
+            });
+        }
+    }
 }
 
 async fn read_frame<S>(stream: &mut S) -> Result<Vec<u8>, Box<dyn Error>>
@@ -1540,6 +1677,26 @@ async fn dial(opts: Options) -> Result<(), Box<dyn Error>> {
     let mut swarm = new_swarm(&opts.transport, &opts.scenario).await?;
     let remote_peer: PeerId = opts.peer_id.parse()?;
     let remote: Multiaddr = opts.addr.parse()?;
+    let relay_transport = if opts.scenario == "relay_reserve" {
+        match relay_transport_addr(remote.clone(), remote_peer) {
+            Ok(address) => Some(address),
+            Err(error) => {
+                write_json(
+                    &opts.result_file,
+                    json!({
+                        "implementation": "rust",
+                        "role": "dialer",
+                        "scenario": opts.scenario,
+                        "status": "rejected",
+                        "error_code": error.status_code(),
+                    }),
+                )?;
+                return Err(error.into());
+            }
+        }
+    } else {
+        None
+    };
     if opts.scenario == "gossipsub_publish" {
         let topic = gossipsub::IdentTopic::new(PUBSUB_TOPIC);
         swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
@@ -1550,11 +1707,17 @@ async fn dial(opts: Options) -> Result<(), Box<dyn Error>> {
     let mut ping_ok = false;
     let mut identify_count = 0usize;
     let mut identify_signed_record = false;
+    let mut authenticated_remote_peer_id = None;
+    let mut negotiated_transport = None;
     while started.elapsed() < Duration::from_secs(20) {
         match swarm.select_next_some().await {
-            SwarmEvent::ConnectionEstablished { peer_id, .. } if peer_id == remote_peer => {
+            SwarmEvent::ConnectionEstablished {
+                peer_id, endpoint, ..
+            } if peer_id == remote_peer => {
                 eprintln!("rust-dial connected: {peer_id}");
                 connected = true;
+                authenticated_remote_peer_id = Some(peer_id.to_string());
+                negotiated_transport = observed_quic_transport(&endpoint);
                 swarm
                     .behaviour_mut()
                     .kad
@@ -1608,8 +1771,29 @@ async fn dial(opts: Options) -> Result<(), Box<dyn Error>> {
             open_required_stream(&mut swarm, remote_peer, "/libp2p/autonat/2/dial-request").await?;
         }
         "relay_reserve" => {
-            open_required_stream(&mut swarm, remote_peer, "/libp2p/circuit/relay/0.2.0/hop")
-                .await?;
+            let reservation = reserve_relay_address(
+                &mut swarm,
+                remote_peer,
+                relay_transport.ok_or("relay transport address was not prepared")?,
+            )
+            .await?;
+            write_json(
+                &opts.result_file,
+                json!({
+                    "implementation": "rust",
+                    "role": "dialer",
+                    "scenario": opts.scenario,
+                    "status": "ok",
+                    "negotiated_transport": negotiated_transport,
+                    "authenticated_remote_peer_id": authenticated_remote_peer_id,
+                    "relay_reservation_accepted": reservation.accepted,
+                    "relay_reservation_relay_peer_id": reservation.relay_peer_id,
+                    "relay_reservation_client_peer_id": reservation.client_peer_id,
+                    "relay_reservation_circuit_addr": reservation.circuit_addr,
+                    "relay_reservation_renewal": reservation.renewal
+                }),
+            )?;
+            return Ok(());
         }
         "echo" | "echo_large" => {
             let payload = if opts.scenario == "echo_large" {
@@ -1819,7 +2003,9 @@ async fn dial(opts: Options) -> Result<(), Box<dyn Error>> {
             "status": "ok",
             "ping_ok": ping_ok,
             "protocol_count": identify_count,
-            "signed_peer_record": identify_signed_record
+            "signed_peer_record": identify_signed_record,
+            "negotiated_transport": negotiated_transport,
+            "authenticated_remote_peer_id": authenticated_remote_peer_id
         }),
     )
 }
@@ -2034,5 +2220,87 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "dial" => dial(opts).await,
         "dial-relay" => dial_relay(opts).await,
         _ => Err(format!("unknown command {}", opts.command).into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RelayAddressError, RelayReservationProgress, relay_transport_addr};
+    use libp2p::{Multiaddr, identity, multiaddr::Protocol};
+    use std::net::Ipv4Addr;
+
+    fn test_peer() -> libp2p::PeerId {
+        identity::Keypair::generate_ed25519().public().to_peer_id()
+    }
+
+    fn test_transport_addr() -> Multiaddr {
+        Multiaddr::empty()
+            .with(Protocol::Ip4(Ipv4Addr::LOCALHOST))
+            .with(Protocol::Udp(4001))
+            .with(Protocol::QuicV1)
+    }
+
+    #[test]
+    fn relay_transport_addr_strips_matching_terminal_peer() {
+        let peer = test_peer();
+        let transport = test_transport_addr();
+        let endpoint = transport.clone().with(Protocol::P2p(peer));
+
+        assert_eq!(relay_transport_addr(endpoint, peer), Ok(transport));
+    }
+
+    #[test]
+    fn relay_transport_addr_keeps_peerless_endpoint() {
+        let transport = test_transport_addr();
+
+        assert_eq!(
+            relay_transport_addr(transport.clone(), test_peer()),
+            Ok(transport)
+        );
+    }
+
+    #[test]
+    fn relay_transport_addr_rejects_conflicting_terminal_peer() {
+        let endpoint = test_transport_addr().with(Protocol::P2p(test_peer()));
+
+        assert_eq!(
+            relay_transport_addr(endpoint, test_peer()),
+            Err(RelayAddressError::TerminalPeerMismatch),
+        );
+    }
+
+    #[test]
+    fn relay_reservation_progress_waits_for_acceptance_after_address() {
+        let mut progress = RelayReservationProgress::default();
+        progress.record_circuit_addr("/p2p/relay/p2p-circuit/p2p/client".to_string());
+
+        assert_eq!(progress.complete(), None);
+        assert_eq!(
+            progress.circuit_addr.as_deref(),
+            Some("/p2p/relay/p2p-circuit/p2p/client")
+        );
+
+        progress.record_acceptance(false);
+        assert_eq!(
+            progress.complete(),
+            Some((false, "/p2p/relay/p2p-circuit/p2p/client".to_string(),))
+        );
+        assert_eq!(progress.complete(), None);
+    }
+
+    #[test]
+    fn relay_reservation_progress_waits_for_address_after_acceptance() {
+        let mut progress = RelayReservationProgress::default();
+        progress.record_acceptance(false);
+
+        assert_eq!(progress.complete(), None);
+        assert_eq!(progress.accepted_renewal, Some(false));
+
+        progress.record_circuit_addr("/p2p/relay/p2p-circuit/p2p/client".to_string());
+        assert_eq!(
+            progress.complete(),
+            Some((false, "/p2p/relay/p2p-circuit/p2p/client".to_string(),))
+        );
+        assert_eq!(progress.complete(), None);
     }
 }

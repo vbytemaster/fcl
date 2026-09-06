@@ -33,19 +33,71 @@ The following surfaces are not production claims yet:
 - Rendezvous and the Forge-specific Peer Exchange feed the same bounded
   topology manager. Donor/live evidence remains classified separately in the
   inventory and must not be inferred from lifecycle activation alone;
-- Ping sampling and AutoNAT are not yet inputs to the managed topology score;
+- Rendezvous currently has registered Forge/Rust directions only. Go is an
+  explicit limitation because no official Go rendezvous behaviour donor is
+  pinned; this is not a claim of Go compatibility;
+- the Go/Rust Ping wire protocol is current; bounded periodic Ping health
+  sampling, AutoNAT v1 node-level reachability and AutoNAT v2 address-level
+  evidence remain separate Stage 6 host-local inputs to the managed topology
+  score;
+- observed-address confidence/expiry, public mDNS, private fingerprinted mDNS,
+  DNSAddr, the private TCP/Yamux transport PSK layer, optional native UPnP
+  mapping, adaptive Happy Eyeballs, IPv6 black-hole detection for native/private
+  profiles and UDP black-hole detection for the native profile are Stage 6 work;
 - AutoRelay and DCUtR mechanics lack the complete verified discovery and
   reachability feed;
-- GossipSub donor-consistent scoring and autonomous mesh selection remain incomplete;
+- the resource model lacks staged connection gating and donor-style memory,
+  file descriptor, transient and service scopes;
+- GossipSub donor-consistent scoring, autonomous mesh selection, v1.2/v1.3 and
+  opt-in Partial Messages implementation remain Stage 6 work;
   transport topology is owned by the managed topology service above.
 
-The machine-readable support inventory is
+P2P WebSocket `/ws` and `/wss` multiaddrs remain parseable but unsupported for
+dial/listen until Stage 9. WebTransport and WebRTC are separately deferred
+browser-profile capabilities; native TCP/QUIC readiness does not imply them.
+
+The donor-first scope manifest is
+[`p2p_donor_capabilities.json`](../../../tests/libp2p_interop/p2p_donor_capabilities.json).
+It records what the pinned specs, Go and Rust donors provide through four
+independent fields: `support_requirement`, `default_activation`,
+`interop_applicability` and `decision`. The machine-readable implementation inventory is
 [`p2p_feature_inventory.json`](../../../tests/libp2p_interop/p2p_feature_inventory.json).
-It is the source inventory for the production-hardening program, not a record
-of currently executed optional interop tests or a release-readiness verdict. A
-`mapped` donor case names a compatibility fixture with declared Forge
-coverage; it does not prove normal lifecycle activation or a passing current
-donor run.
+It contains only current Forge surfaces and evidence. Neither manifest is a
+record of currently executed optional interop tests or a release-readiness
+verdict. A `mapped` donor case names a compatibility fixture with declared
+Forge coverage; it does not prove normal lifecycle activation or a passing
+current donor run. The canonical Stage 6 registry is the exact ordered
+`stage_6_pr_registry` in that manifest:
+`forge-p2p-stage6-roadmap-v1`, `forge-chrono-v1`,
+`forge-p2p-host-protection-v1`, `forge-crypto-xsalsa20-v1`,
+`forge-p2p-private-network-v1`, `forge-p2p-address-resolution-v1`,
+`forge-p2p-reachability-v1`, `forge-p2p-mdns-v1`,
+`forge-p2p-nat-mapping-v1`, `forge-p2p-autorelay-v1`,
+`forge-p2p-path-management-v1`, `forge-p2p-gossipsub-scoring-v1` and
+`forge-p2p-gossipsub-extensions-v1`. These are PR0 through PR12 respectively.
+The registry also fixes dependencies and allowed capability owners; the roadmap,
+chrono and crypto prerequisite PRs own none.
+
+The source inventory checker validates this registration only and never emits a
+live interop PASS. A standalone artifact evaluator can report local consistency,
+but the CMake promotion target owns the canonical enabled runner invocation and
+immediately validates the artifact produced in that same invocation. It binds
+the reviewed clean `HEAD`, manifest, canonical argv and roots, current Python,
+fixture binaries, effective role/capability configuration and unique evidence
+per direction. Native QUIC, native TCP/Yamux and private TCP/Yamux+pnet are
+independent proofs; an optional capability is tested only as an explicit enabled
+run, never inferred to be default. Planned Stage 6 scenario IDs are comprehensive
+acceptance requirements, not runner registration or evidence. Missing or stale
+provenance is `NOT_RUN`; a canonical runner nonzero exit or recorded failure is
+`FAILED`; a documented limitation reports `PASS_WITH_DOCUMENTED_LIMITATIONS`.
+
+The SHA-256 evidence index is tamper-evident, self-consistent local evidence,
+not signed remote attestation or a claim that malicious artifacts are unforgeable.
+
+`test_forge_p2p_inventory` remains the paired source-manifest gate and PR0 runs
+only source validation plus the deterministic acceptance-checker self-test. The
+explicit `test_forge_p2p_stage6_acceptance` CMake target performs the live
+promotion; it never promotes a replayed externally supplied artifact.
 
 `discovery::policy` and `node::limits::discovery` remain Stable source
 compatibility surfaces. Node construction normalizes non-default legacy values
@@ -119,7 +171,13 @@ Current direction: P2P sits above first-class multiaddr, reusable
 `forge_net_transport`, and reusable TCP/STCP/Yamux/QUIC layers. QUIC and
 TCP+TLS/Noise+Yamux direct paths are wired through private direct profiles.
 Future transports must plug into the same multiaddr and transport session
-boundary, not fork P2P core.
+boundary, not fork P2P core. The private profile is TCP/Yamux plus a transport
+PSK layer before the normal secure channel, not a negotiated `/pnet` protocol
+ID. It excludes QUIC, Relay and DCUtR; AutoNAT lifecycle/client/service and
+UPnP each require explicit private-profile Internet egress, while native runs do
+not inherit that dependency. Public mDNS has Go/Rust interop; fingerprinted
+private mDNS is a Forge extension informed by donors and is Go-compatible with
+a documented Rust limitation.
 
 The direct QUIC profile keeps a bounded, peer-scoped cache of opaque QUIC
 `NEW_TOKEN` values only for authenticated expected peers. Its key includes the
@@ -141,6 +199,14 @@ Network-level behaviors that must not be pushed into plugins:
 - peer discovery and relay discovery;
 - protocol capability negotiation;
 - network limits, backpressure, metrics and shutdown behavior.
+
+Stage 6 must add typed host events and periodic Ping liveness within
+`forge_net_p2p`; this host-local policy is distinct from the already current
+Ping wire protocol. `plugins.p2p.node` may map the validated configuration and
+consume narrow local events, but it must not own Ping, observed-address,
+AutoNAT lifecycle, mDNS, UPnP or topology maintenance loops. Coordinated direct
+dial and port reuse replace the deprecated `/libp2p/simultaneous-connect`
+negotiation.
 
 Circuit Relay v2 reservations belong to authenticated peer sessions. Renewal
 keeps the same reservation generation and active-circuit accounting; the final

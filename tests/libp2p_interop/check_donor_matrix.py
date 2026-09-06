@@ -2,9 +2,14 @@
 import ast
 import json
 import re
-import subprocess
 import sys
 from pathlib import Path
+
+from provenance import (
+    donor_checkout_head_errors,
+    donor_revision_schema_errors,
+    donor_source_object_errors,
+)
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -101,30 +106,21 @@ def main() -> int:
     inventory = data.get("production_inventory", "")
     if not isinstance(inventory, str) or not inventory or not (path.parent / inventory).is_file():
         errors.append("production_inventory must reference the P2P feature inventory")
+    capability_inventory = data.get("capability_inventory", "")
+    if (
+        not isinstance(capability_inventory, str)
+        or not capability_inventory
+        or not (path.parent / capability_inventory).is_file()
+    ):
+        errors.append("capability_inventory must reference the donor-first capability manifest")
 
     donor_revisions = data.get("donor_revisions", {})
-    if not isinstance(donor_revisions, dict) or not donor_revisions:
-        errors.append("donor_revisions must be a non-empty object")
+    donor_revision_errors = donor_revision_schema_errors(donor_revisions)
+    errors.extend(donor_revision_errors)
+    if not isinstance(donor_revisions, dict):
         donor_revisions = {}
-    for repository, revision in donor_revisions.items():
-        if not isinstance(repository, str) or not repository or "/" in repository:
-            errors.append(f"invalid donor repository name {repository!r}")
-            continue
-        if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
-            errors.append(f"donor {repository}: revision must be a full lowercase commit SHA")
-            continue
-        if donors_root is not None:
-            repository_path = donors_root / repository
-            if not repository_path.is_dir():
-                errors.append(f"donor {repository}: repository is unavailable")
-                continue
-            result = subprocess.run(
-                ["git", "-C", str(repository_path), "rev-parse", "HEAD"],
-                text=True,
-                capture_output=True,
-            )
-            if result.returncode != 0 or result.stdout.strip() != revision:
-                errors.append(f"donor {repository}: checkout does not match pinned revision")
+    if donors_root is not None and not donor_revision_errors:
+        errors.extend(donor_checkout_head_errors(donors_root, donor_revisions))
 
     test_manifest = (root / "tests/CMakeLists.txt").read_text()
     registered_tests = set(
@@ -200,8 +196,13 @@ def main() -> int:
                     repository = relative.parts[1]
                     if repository not in donor_revisions:
                         errors.append(f"{case_id}: donor_file repository is not pinned: {repository}")
-                    elif donors_root is not None and not (donors_root / Path(*relative.parts[1:])).is_file():
-                        errors.append(f"{case_id}: donor_file does not exist: {donor_file}")
+                    elif donors_root is not None:
+                        errors.extend(
+                            f"{case_id}: {error}"
+                            for error in donor_source_object_errors(
+                                donors_root, donor_revisions, donor_file
+                            )
+                        )
                 else:
                     errors.append(f"{case_id}: donor_file must start with docs/ or donors/<repo>/")
         if not isinstance(tests, list) or any(

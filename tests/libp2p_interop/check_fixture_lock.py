@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 import json
-import subprocess
 import sys
 from pathlib import Path
 
 sys.dont_write_bytecode = True
 
-from provenance import graph_hash, sha256_file
+from provenance import (
+    fixture_donor_checkout_errors,
+    fixture_donor_revision_bindings,
+    graph_hash,
+    load_canonical_donor_revisions,
+    sha256_file,
+)
 
 
 EXPECTED_FORGE_BUILD_PROFILES = ["default", "Debug", "Release", "RelWithDebInfo", "MinSizeRel"]
@@ -48,10 +53,6 @@ EXPECTED_RUNTIME_ARTIFACT_SOURCES = {
 }
 EXPECTED_EVIDENCE_SOURCES = {"donor_cases.json"}
 EXPECTED_REGRESSION_SOURCES = {"test_provenance.py"}
-
-
-def git_value(path: Path, revision: str) -> str:
-    return subprocess.check_output(["git", "-C", str(path), "rev-parse", revision], text=True).strip()
 
 
 def check_hashes(root: Path, label: str, values: object, expected_paths: set[str], errors: list[str]) -> None:
@@ -145,33 +146,21 @@ def main() -> int:
     if not isinstance(donors, list) or len(donors) != 5:
         errors.append("fixture lock must contain the five pinned donors")
     else:
-        expected_names = {"go-libp2p", "rust-libp2p", "go-kad", "go-pubsub", "libp2p-specs"}
-        seen_names = set()
-        for donor in donors:
-            if not isinstance(donor, dict):
-                errors.append("fixture lock donor entry must be an object")
-                continue
-            name = donor.get("name")
-            directory = donor.get("directory")
-            commit = donor.get("commit")
-            tree = donor.get("tree")
-            if not all(isinstance(value, str) and value for value in (name, directory, commit, tree)):
-                errors.append(f"fixture lock donor entry is invalid: {donor}")
-                continue
-            seen_names.add(name)
-            checkout = donors_root / directory
-            if not checkout.is_dir():
-                errors.append(f"fixture donor checkout is missing: {checkout}")
-                continue
-            try:
-                if git_value(checkout, commit) != commit:
-                    errors.append(f"fixture donor commit is unavailable: {name}")
-                if git_value(checkout, f"{commit}^{{tree}}") != tree:
-                    errors.append(f"fixture donor tree mismatch: {name}")
-            except subprocess.CalledProcessError as error:
-                errors.append(f"fixture donor revision lookup failed for {name}: {error}")
-        if seen_names != expected_names:
-            errors.append("fixture lock donor names do not match the pinned donor set")
+        try:
+            canonical_donor_revisions = load_canonical_donor_revisions(
+                source_dir / "donor_cases.json"
+            )
+        except RuntimeError as error:
+            errors.append(str(error))
+            canonical_donor_revisions = {}
+        _, binding_errors = fixture_donor_revision_bindings(
+            donors, canonical_donor_revisions
+        )
+        errors.extend(binding_errors)
+        if not binding_errors:
+            errors.extend(
+                fixture_donor_checkout_errors(donors_root, donors, canonical_donor_revisions)
+            )
 
     if errors:
         for error in errors:
