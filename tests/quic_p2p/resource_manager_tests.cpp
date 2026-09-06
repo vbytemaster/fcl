@@ -7,13 +7,16 @@ module;
 #include <functional>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
 
-module forge.net.p2p.node;
+module forge.net.p2p.resource_manager;
 
-import forge.net.p2p.resource_manager;
+namespace forge::net::p2p::detail {
+void fail_next_service_bind_prepare_for_test() noexcept;
+}
 
 namespace forge::net::p2p {
 namespace {
@@ -24,6 +27,15 @@ namespace {
 
 [[nodiscard]] protocol_id test_protocol(std::string value) {
    return protocol_id{.value = std::move(value)};
+}
+
+[[nodiscard]] bool bind_accepted(resource_manager::stream_reservation::bind_result result) noexcept {
+   return result == resource_manager::stream_reservation::bind_result::accepted;
+}
+
+[[nodiscard]] bool bind_matches(resource_manager::stream_reservation::bind_result actual,
+                                resource_manager::stream_reservation::bind_result expected) noexcept {
+   return actual == expected;
 }
 
 template <typename T>
@@ -77,7 +89,7 @@ BOOST_AUTO_TEST_CASE(resource_manager_binds_protocol_then_service_in_distinct_at
    auto manager = resource_manager{};
    auto stream = manager.reserve_stream(test_peer("staged-peer"), resource_manager::session_direction::outbound);
    BOOST_REQUIRE(stream);
-   BOOST_REQUIRE(stream->bind_protocol(test_protocol("/staged/1")));
+   BOOST_REQUIRE(bind_accepted(stream->bind_protocol(test_protocol("/staged/1"))));
    BOOST_TEST(stream->bound());
    BOOST_TEST(!stream->service_bound());
    auto protocol_bound = manager.current();
@@ -87,7 +99,7 @@ BOOST_AUTO_TEST_CASE(resource_manager_binds_protocol_then_service_in_distinct_at
    BOOST_TEST(protocol_bound.protocol_peers.outbound_streams == 1U);
    BOOST_TEST(protocol_bound.services.outbound_streams == 0U);
 
-   BOOST_REQUIRE(stream->bind_service("identify"));
+   BOOST_REQUIRE(bind_accepted(stream->bind_service("identify")));
    BOOST_TEST(stream->service_bound());
    const auto service_bound = manager.current();
    BOOST_TEST(service_bound.services.outbound_streams == 1U);
@@ -143,22 +155,24 @@ BOOST_AUTO_TEST_CASE(resource_manager_isolates_protocol_peer_and_service_peer_li
    }};
    auto first = manager.reserve_stream(test_peer("peer-a"), resource_manager::session_direction::outbound);
    BOOST_REQUIRE(first);
-   BOOST_REQUIRE(first->bind_protocol(test_protocol("/shared/1")));
+   BOOST_REQUIRE(bind_accepted(first->bind_protocol(test_protocol("/shared/1"))));
 
    auto protocol_rejected = manager.reserve_stream(test_peer("peer-a"), resource_manager::session_direction::outbound);
    BOOST_REQUIRE(protocol_rejected);
-   BOOST_TEST(!protocol_rejected->bind_protocol(test_protocol("/shared/1")));
+   BOOST_TEST(bind_matches(protocol_rejected->bind_protocol(test_protocol("/shared/1")),
+                           resource_manager::stream_reservation::bind_result::policy_rejected));
    BOOST_TEST(!protocol_rejected->bound());
-   BOOST_REQUIRE(protocol_rejected->bind_protocol(test_protocol("/other/1")));
+   BOOST_REQUIRE(bind_accepted(protocol_rejected->bind_protocol(test_protocol("/other/1"))));
 
    auto other_peer = manager.reserve_stream(test_peer("peer-b"), resource_manager::session_direction::outbound);
    BOOST_REQUIRE(other_peer);
-   BOOST_REQUIRE(other_peer->bind_protocol(test_protocol("/shared/1")));
+   BOOST_REQUIRE(bind_accepted(other_peer->bind_protocol(test_protocol("/shared/1"))));
 
-   BOOST_REQUIRE(first->bind_service("shared-service"));
-   BOOST_TEST(!protocol_rejected->bind_service("shared-service"));
+   BOOST_REQUIRE(bind_accepted(first->bind_service("shared-service")));
+   BOOST_TEST(bind_matches(protocol_rejected->bind_service("shared-service"),
+                           resource_manager::stream_reservation::bind_result::policy_rejected));
    BOOST_TEST(!protocol_rejected->service_bound());
-   BOOST_REQUIRE(other_peer->bind_service("shared-service"));
+   BOOST_REQUIRE(bind_accepted(other_peer->bind_service("shared-service")));
    BOOST_TEST(manager.current().active_protocol_peer_scopes == 3U);
    BOOST_TEST(manager.current().active_service_peer_scopes == 2U);
 }
@@ -171,7 +185,7 @@ BOOST_AUTO_TEST_CASE(resource_manager_rejects_and_retries_staged_migrations_with
    BOOST_REQUIRE(first);
    auto first_memory = first->reserve_memory(3);
    BOOST_REQUIRE(first_memory);
-   BOOST_REQUIRE(first->bind_protocol(test_protocol("/limited/1")));
+   BOOST_REQUIRE(bind_accepted(first->bind_protocol(test_protocol("/limited/1"))));
 
    auto second =
        protocol_manager.reserve_stream(test_peer("protocol-b"), resource_manager::session_direction::outbound);
@@ -179,14 +193,15 @@ BOOST_AUTO_TEST_CASE(resource_manager_rejects_and_retries_staged_migrations_with
    auto second_memory = second->reserve_memory(2);
    BOOST_REQUIRE(second_memory);
    const auto before_protocol = protocol_manager.current();
-   BOOST_TEST(!second->bind_protocol(test_protocol("/limited/1")));
+   BOOST_TEST(bind_matches(second->bind_protocol(test_protocol("/limited/1")),
+                           resource_manager::stream_reservation::bind_result::policy_rejected));
    const auto after_protocol = protocol_manager.current();
    BOOST_TEST(!second->bound());
    BOOST_TEST(after_protocol.system.memory == before_protocol.system.memory);
    BOOST_TEST(after_protocol.transient.memory == before_protocol.transient.memory);
    BOOST_TEST(after_protocol.protocols.memory == before_protocol.protocols.memory);
    BOOST_TEST(after_protocol.denied_scope_migrations == before_protocol.denied_scope_migrations + 1U);
-   BOOST_REQUIRE(second->bind_protocol(test_protocol("/retry/1")));
+   BOOST_REQUIRE(bind_accepted(second->bind_protocol(test_protocol("/retry/1"))));
 
    auto service_manager = resource_manager{resource_manager::limits{
        .service = {.max_memory = 3},
@@ -196,22 +211,23 @@ BOOST_AUTO_TEST_CASE(resource_manager_rejects_and_retries_staged_migrations_with
    BOOST_REQUIRE(service_first);
    auto service_first_memory = service_first->reserve_memory(3);
    BOOST_REQUIRE(service_first_memory);
-   BOOST_REQUIRE(service_first->bind_protocol(test_protocol("/service-a/1")));
-   BOOST_REQUIRE(service_first->bind_service("limited-service"));
+   BOOST_REQUIRE(bind_accepted(service_first->bind_protocol(test_protocol("/service-a/1"))));
+   BOOST_REQUIRE(bind_accepted(service_first->bind_service("limited-service")));
 
    auto service_second =
        service_manager.reserve_stream(test_peer("service-b"), resource_manager::session_direction::outbound);
    BOOST_REQUIRE(service_second);
    auto service_second_memory = service_second->reserve_memory(2);
    BOOST_REQUIRE(service_second_memory);
-   BOOST_REQUIRE(service_second->bind_protocol(test_protocol("/service-b/1")));
+   BOOST_REQUIRE(bind_accepted(service_second->bind_protocol(test_protocol("/service-b/1"))));
    const auto before_service = service_manager.current();
-   BOOST_TEST(!service_second->bind_service("limited-service"));
+   BOOST_TEST(bind_matches(service_second->bind_service("limited-service"),
+                           resource_manager::stream_reservation::bind_result::policy_rejected));
    const auto after_service = service_manager.current();
    BOOST_TEST(!service_second->service_bound());
    BOOST_TEST(after_service.services.memory == before_service.services.memory);
    BOOST_TEST(after_service.service_peers.memory == before_service.service_peers.memory);
-   BOOST_REQUIRE(service_second->bind_service("retry-service"));
+   BOOST_REQUIRE(bind_accepted(service_second->bind_service("retry-service")));
 }
 
 BOOST_AUTO_TEST_CASE(resource_manager_accessors_are_serialized_with_same_handle_transition) {
@@ -224,7 +240,8 @@ BOOST_AUTO_TEST_CASE(resource_manager_accessors_are_serialized_with_same_handle_
    auto writer = std::thread{[&] {
       while (!start.load(std::memory_order_acquire)) {
       }
-      protocol_bound.store(stream->bind_protocol(test_protocol("/concurrent/1")), std::memory_order_release);
+      protocol_bound.store(bind_accepted(stream->bind_protocol(test_protocol("/concurrent/1"))),
+                           std::memory_order_release);
    }};
    auto reader = std::thread{[&] {
       start.store(true, std::memory_order_release);
@@ -399,11 +416,41 @@ BOOST_AUTO_TEST_CASE(resource_manager_separates_policy_rejection_from_invalid_an
    auto stream = manager.reserve_stream(test_peer("invalid-transition"), resource_manager::session_direction::outbound);
    BOOST_REQUIRE(stream);
    const auto before_invalid = manager.current();
-   BOOST_TEST(!stream->bind_service("service-before-protocol"));
+   BOOST_TEST(bind_matches(stream->bind_service("service-before-protocol"),
+                           resource_manager::stream_reservation::bind_result::invalid_transition));
    const auto after_invalid = manager.current();
    BOOST_TEST(after_invalid.denied == before_invalid.denied);
    BOOST_TEST(after_invalid.invalid_transitions == before_invalid.invalid_transitions + 1U);
    BOOST_TEST(after_invalid.runtime_failures == before_invalid.runtime_failures);
+}
+
+BOOST_AUTO_TEST_CASE(resource_manager_reports_service_bind_allocation_failure_without_policy_denial) {
+   auto manager = resource_manager{};
+   const auto protocol = test_protocol("/service-runtime/1");
+   auto stream = manager.reserve_stream(test_peer("service-runtime"), resource_manager::session_direction::outbound);
+   BOOST_REQUIRE(stream);
+   BOOST_REQUIRE(bind_accepted(stream->bind_protocol(protocol)));
+   const auto before = manager.current();
+
+   detail::fail_next_service_bind_prepare_for_test();
+   BOOST_TEST(bind_matches(stream->bind_service("p2p.custom:/service-runtime/1"),
+                           resource_manager::stream_reservation::bind_result::runtime_failure));
+
+   const auto after_failure = manager.current();
+   BOOST_TEST(!stream->service_bound());
+   BOOST_TEST(after_failure.denied == before.denied);
+   BOOST_TEST(after_failure.denied_scope_migrations == before.denied_scope_migrations);
+   BOOST_TEST(after_failure.runtime_failures == before.runtime_failures + 1U);
+   BOOST_TEST(after_failure.services.outbound_streams == before.services.outbound_streams);
+   BOOST_TEST(after_failure.service_peers.outbound_streams == before.service_peers.outbound_streams);
+
+   BOOST_REQUIRE(bind_accepted(stream->bind_service("p2p.custom:/service-runtime/1")));
+   BOOST_TEST(stream->service_bound());
+   stream.reset();
+   const auto after_release = manager.current();
+   BOOST_TEST(after_release.system.outbound_streams == 0U);
+   BOOST_TEST(after_release.protocols.outbound_streams == 0U);
+   BOOST_TEST(after_release.services.outbound_streams == 0U);
 }
 
 BOOST_AUTO_TEST_CASE(resource_manager_preserves_independent_operational_budgets) {

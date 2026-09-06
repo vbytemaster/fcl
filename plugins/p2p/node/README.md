@@ -152,9 +152,11 @@ plugins:
 ```
 
 `max-sessions` is the active-session watermark owned by the connection manager. The
-plugin reserves one additional provisional connection in the system resource scope
-so a completed handshake can be evaluated and can trigger pruning at the watermark;
-the active-session count never exceeds `max-sessions`.
+plugin reserves one additional provisional connection in each system connection
+dimension (total, inbound, and outbound), so a completed handshake can be evaluated
+and can replace an eligible session at the watermark. For limits above one, the
+derived prune watermark is one below `max-sessions`; the active-session count never
+exceeds `max-sessions`.
 
 Including `/p2p/<peer-id>` in each bootstrap endpoint pins the expected
 authenticated peer and is recommended for production. Existing peer-less

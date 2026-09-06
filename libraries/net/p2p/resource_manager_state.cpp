@@ -1,14 +1,17 @@
 module;
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 
 module forge.net.p2p.resource_manager;
@@ -18,6 +21,8 @@ module forge.net.p2p.resource_manager;
 namespace forge::net::p2p {
 
 namespace {
+
+std::atomic_bool service_bind_prepare_failpoint = false;
 
 template <typename T> [[nodiscard]] bool can_add(T current, T delta, T limit) noexcept {
    return current <= limit && delta <= limit - current;
@@ -638,11 +643,14 @@ bool resource_manager::state::establish_session(const std::shared_ptr<ledger>& v
    }
 }
 
-bool resource_manager::state::bind_protocol(const std::shared_ptr<ledger>& value, protocol_id protocol) noexcept {
+resource_manager::stream_reservation::bind_result
+resource_manager::state::bind_protocol(const std::shared_ptr<ledger>& value, const protocol_id& protocol) noexcept {
+   using bind_result = stream_reservation::bind_result;
    auto lock = std::scoped_lock{mutex_};
    if (!value || !value->parent_active || value->value_kind != ledger::kind::stream || !value->peer ||
        value->protocol || !value->transient || protocol.value.empty()) {
-      return reject_invalid_transition_locked();
+      static_cast<void>(reject_invalid_transition_locked());
+      return bind_result::invalid_transition;
    }
    auto protocol_scope = protocols_.end();
    auto protocol_peer = protocol_peers_.end();
@@ -652,7 +660,7 @@ bool resource_manager::state::bind_protocol(const std::shared_ptr<ledger>& value
    auto protocol_peer_scope_inserted = false;
    try {
       auto next_protocol = std::optional<protocol_id>{};
-      next_protocol.emplace(std::move(protocol));
+      next_protocol.emplace(protocol);
       std::tie(protocol_scope, protocol_inserted) = protocols_.try_emplace(next_protocol->value);
       std::tie(protocol_peer, protocol_peer_inserted) = protocol_peers_.try_emplace(*value->peer);
       std::tie(protocol_peer_scope, protocol_peer_scope_inserted) =
@@ -668,14 +676,15 @@ bool resource_manager::state::bind_protocol(const std::shared_ptr<ledger>& value
          if (protocol_inserted && empty(protocol_scope->second.usage)) {
             protocols_.erase(protocol_scope);
          }
-         return reject_limit_locked(snapshot_.denied_scope_migrations);
+         static_cast<void>(reject_limit_locked(snapshot_.denied_scope_migrations));
+         return bind_result::policy_rejected;
       }
       remove_locked(transient_, value->usage);
       add_locked(protocol_scope->second, value->usage);
       add_locked(protocol_peer_scope->second, value->usage);
       value->protocol.swap(next_protocol);
       value->transient = false;
-      return true;
+      return bind_result::accepted;
    } catch (...) {
       if (protocol_peer_scope_inserted && protocol_peer != protocol_peers_.end()) {
          protocol_peer->second.erase(protocol_peer_scope);
@@ -687,15 +696,23 @@ bool resource_manager::state::bind_protocol(const std::shared_ptr<ledger>& value
          protocols_.erase(protocol_scope);
       }
       record_runtime_failure_locked();
-      return false;
+      return bind_result::runtime_failure;
    }
 }
 
-bool resource_manager::state::bind_service(const std::shared_ptr<ledger>& value, std::string service) noexcept {
+resource_manager::stream_reservation::bind_result
+resource_manager::state::bind_service(const std::shared_ptr<ledger>& value, std::string_view service) noexcept {
    auto lock = std::scoped_lock{mutex_};
+   return bind_service_locked(value, service);
+}
+
+resource_manager::stream_reservation::bind_result
+resource_manager::state::bind_service_locked(const std::shared_ptr<ledger>& value, std::string_view service) noexcept {
+   using bind_result = stream_reservation::bind_result;
    if (!value || !value->parent_active || value->value_kind != ledger::kind::stream || !value->peer ||
        !value->protocol || value->service || service.empty()) {
-      return reject_invalid_transition_locked();
+      static_cast<void>(reject_invalid_transition_locked());
+      return bind_result::invalid_transition;
    }
    auto service_scope = services_.end();
    auto service_peer = service_peers_.end();
@@ -704,8 +721,11 @@ bool resource_manager::state::bind_service(const std::shared_ptr<ledger>& value,
    auto service_peer_inserted = false;
    auto service_peer_scope_inserted = false;
    try {
+      if (service_bind_prepare_failpoint.exchange(false, std::memory_order_relaxed)) {
+         throw std::bad_alloc{};
+      }
       auto next_service = std::optional<std::string>{};
-      next_service.emplace(std::move(service));
+      next_service.emplace(service);
       std::tie(service_scope, service_inserted) = services_.try_emplace(*next_service);
       std::tie(service_peer, service_peer_inserted) = service_peers_.try_emplace(*value->peer);
       std::tie(service_peer_scope, service_peer_scope_inserted) = service_peer->second.try_emplace(*next_service);
@@ -720,12 +740,13 @@ bool resource_manager::state::bind_service(const std::shared_ptr<ledger>& value,
          if (service_inserted && empty(service_scope->second.usage)) {
             services_.erase(service_scope);
          }
-         return reject_limit_locked(snapshot_.denied_scope_migrations);
+         static_cast<void>(reject_limit_locked(snapshot_.denied_scope_migrations));
+         return bind_result::policy_rejected;
       }
       add_locked(service_scope->second, value->usage);
       add_locked(service_peer_scope->second, value->usage);
       value->service.swap(next_service);
-      return true;
+      return bind_result::accepted;
    } catch (...) {
       if (service_peer_scope_inserted && service_peer != service_peers_.end()) {
          service_peer->second.erase(service_peer_scope);
@@ -737,7 +758,7 @@ bool resource_manager::state::bind_service(const std::shared_ptr<ledger>& value,
          services_.erase(service_scope);
       }
       record_runtime_failure_locked();
-      return false;
+      return bind_result::runtime_failure;
    }
 }
 
@@ -816,5 +837,13 @@ void resource_manager::state::release_parent(const std::shared_ptr<ledger>& valu
    value->parent_active = false;
    cleanup_scopes_locked(*value);
 }
+
+namespace detail {
+
+void fail_next_service_bind_prepare_for_test() noexcept {
+   service_bind_prepare_failpoint.store(true, std::memory_order_relaxed);
+}
+
+} // namespace detail
 
 } // namespace forge::net::p2p

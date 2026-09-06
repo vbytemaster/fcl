@@ -7,6 +7,7 @@ module;
 #include <chrono>
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <set>
@@ -47,9 +48,12 @@ import forge.plugins.db.store.api;
 namespace forge::plugins::p2p::node {
 namespace {
 
-[[nodiscard]] std::size_t with_provisional_session(std::size_t active_limit) noexcept {
+[[nodiscard]] constexpr std::size_t with_provisional_session(std::size_t active_limit) noexcept {
    return active_limit == (std::numeric_limits<std::size_t>::max)() ? active_limit : active_limit + 1;
 }
+
+static_assert(with_provisional_session((std::numeric_limits<std::size_t>::max)()) ==
+              (std::numeric_limits<std::size_t>::max)());
 
 [[nodiscard]] forge::net::p2p::path::policy parse_path_policy(path_policy value, bool relay_client_enabled,
                                                               std::size_t relay_max_candidates) {
@@ -311,12 +315,12 @@ void apply_config(plugin::impl& state, const config& config) {
        peer_id.empty() ? std::nullopt : std::make_optional(forge::net::p2p::peer_id{.value = peer_id});
    state.options.limits.max_sessions = static_cast<std::size_t>(config.max_sessions);
    state.options.limits.session_low_watermark =
-       std::min(state.options.limits.session_low_watermark, state.options.limits.max_sessions);
+       state.options.limits.max_sessions == 1 ? std::size_t{1} : state.options.limits.max_sessions - 1;
    auto& session_limits = state.options.limits.resources.system;
    const auto admission_limit = with_provisional_session(state.options.limits.max_sessions);
    session_limits.max_connections = admission_limit;
-   session_limits.max_inbound_connections = std::min(session_limits.max_inbound_connections, admission_limit);
-   session_limits.max_outbound_connections = std::min(session_limits.max_outbound_connections, admission_limit);
+   session_limits.max_inbound_connections = admission_limit;
+   session_limits.max_outbound_connections = admission_limit;
    state.options.limits.max_protocol_handlers = static_cast<std::size_t>(config.max_protocol_handlers);
    state.options.allow_insecure_test_mode = config.allow_insecure_test_mode;
    const auto has_identity = !state.certificate_secret.empty() && !state.private_key_secret.empty();

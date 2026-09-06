@@ -3,12 +3,14 @@ module;
 #include <forge/exceptions/macros.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <new>
 #include <optional>
 #include <set>
 #include <string>
@@ -25,6 +27,9 @@ import forge.net.p2p.identity;
 
 namespace forge::net::p2p {
 namespace {
+
+std::atomic_bool fail_next_prepare_for_test = false;
+std::atomic_bool fail_next_peer_session_prepare_for_test = false;
 
 [[nodiscard]] std::int64_t checked_tag_sum(std::int64_t left, std::int64_t right) {
    if ((right > 0 && left > (std::numeric_limits<std::int64_t>::max)() - right) ||
@@ -255,10 +260,14 @@ bool connection_manager::should_prune_before(const session_record& left, const s
    return left.id < right.id;
 }
 
-bool connection_manager::prune_one(std::vector<std::uint64_t>& pruned, std::chrono::steady_clock::time_point now,
-                                   std::optional<direction> required_direction) {
+std::optional<std::uint64_t> connection_manager::select_prune_one(const std::vector<std::uint64_t>& selected,
+                                                                  std::chrono::steady_clock::time_point now,
+                                                                  std::optional<direction> required_direction) const {
    auto victim = sessions_.end();
    for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
+      if (std::ranges::find(selected, it->first) != selected.end()) {
+         continue;
+      }
       if (required_direction && it->second.direction != *required_direction) {
          continue;
       }
@@ -270,12 +279,9 @@ bool connection_manager::prune_one(std::vector<std::uint64_t>& pruned, std::chro
       }
    }
    if (victim == sessions_.end()) {
-      return false;
+      return std::nullopt;
    }
-   const auto id = victim->first;
-   pruned.push_back(id);
-   erase_record(id);
-   return true;
+   return victim->first;
 }
 
 connection_manager::admission connection_manager::remember(session_record record,
@@ -301,23 +307,74 @@ connection_manager::admission connection_manager::remember(session_record record
    const auto global_saturated = sessions_.size() >= policy_.max_sessions;
 
    if (global_saturated) {
-      while (may_prune && sessions_.size() > policy_.low_watermark && prune_one(result.pruned, now)) {
+      // The candidate itself needs a slot. Keep the public low watermark valid
+      // at one, while still allowing a max_sessions == 1 replacement.
+      const auto target =
+          policy_.max_sessions == 0 ? std::size_t{0} : std::min(policy_.low_watermark, policy_.max_sessions - 1);
+      result.pruned.reserve(sessions_.size() - target);
+      while (may_prune && sessions_.size() - result.pruned.size() > target) {
+         const auto victim = select_prune_one(result.pruned, now);
+         if (!victim) {
+            break;
+         }
+         result.pruned.push_back(*victim);
       }
-      if (!result.pruned.empty()) {
-         last_prune_ = now;
+      if (sessions_.size() - result.pruned.size() >= policy_.max_sessions) {
+         return admission{.accepted = false, .reason = "P2P max sessions reached"};
       }
-      if (sessions_.size() >= policy_.max_sessions) {
-         return admission{.accepted = false, .pruned = std::move(result.pruned), .reason = "P2P max sessions reached"};
-      }
-   } else if (!result.pruned.empty()) {
-      last_prune_ = now;
    }
 
    const auto id = record.id;
    const auto peer = record.peer;
-   sessions_.emplace(id, std::move(record));
-   sessions_by_peer_[peer].insert(id);
-   network_scores_[peer] = normalized_network_score(sessions_.at(id).network_score);
+   const auto score = normalized_network_score(record.network_score);
+   auto session_inserted = false;
+   auto peer_inserted = false;
+   auto peer_session_inserted = false;
+   auto score_inserted = false;
+   try {
+      if (fail_next_prepare_for_test.exchange(false, std::memory_order_relaxed)) {
+         throw std::bad_alloc{};
+      }
+      const auto [session, inserted] = sessions_.emplace(id, std::move(record));
+      static_cast<void>(session);
+      if (!inserted) {
+         return admission{.accepted = false, .reason = "P2P duplicate session id"};
+      }
+      session_inserted = inserted;
+      auto [peer_sessions, inserted_peer] = sessions_by_peer_.try_emplace(peer);
+      peer_inserted = inserted_peer;
+      if (fail_next_peer_session_prepare_for_test.exchange(false, std::memory_order_relaxed)) {
+         throw std::bad_alloc{};
+      }
+      peer_session_inserted = peer_sessions->second.insert(id).second;
+      auto [network_score, inserted_score] = network_scores_.try_emplace(peer, score);
+      score_inserted = inserted_score;
+      if (!inserted_score) {
+         network_score->second = score;
+      }
+   } catch (...) {
+      if (score_inserted) {
+         network_scores_.erase(peer);
+      }
+      if (auto found = sessions_by_peer_.find(peer); found != sessions_by_peer_.end()) {
+         if (peer_session_inserted) {
+            found->second.erase(id);
+         }
+         if (peer_inserted && found->second.empty()) {
+            sessions_by_peer_.erase(found);
+         }
+      }
+      if (session_inserted) {
+         sessions_.erase(id);
+      }
+      throw;
+   }
+   for (const auto victim : result.pruned) {
+      erase_record(victim);
+   }
+   if (!result.pruned.empty()) {
+      last_prune_ = now;
+   }
    result.accepted = true;
    return result;
 }
@@ -385,5 +442,17 @@ connection_manager::policy connection_policy_for(const node::limits& limits) {
        .prune_silence = limits.session_prune_silence,
    };
 }
+
+namespace detail {
+
+void fail_next_connection_manager_prepare_for_test() noexcept {
+   fail_next_prepare_for_test.store(true, std::memory_order_relaxed);
+}
+
+void fail_next_connection_manager_peer_session_prepare_for_test() noexcept {
+   fail_next_peer_session_prepare_for_test.store(true, std::memory_order_relaxed);
+}
+
+} // namespace detail
 
 } // namespace forge::net::p2p

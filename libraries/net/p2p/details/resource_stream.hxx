@@ -17,10 +17,12 @@ class resource_stream final : public forge::net::transport::detail::stream_conce
    void attach(forge::net::transport::stream stream) noexcept;
    [[nodiscard]] bool valid() const noexcept override;
    [[nodiscard]] std::int64_t id() const noexcept override;
-   [[nodiscard]] bool bind_protocol(protocol_id value) noexcept;
-   [[nodiscard]] bool bind_service(std::string value) noexcept;
+   [[nodiscard]] resource_manager::stream_reservation::bind_result bind_protocol(const protocol_id& value) noexcept;
+   [[nodiscard]] resource_manager::stream_reservation::bind_result bind_service_for_protocol(const protocol_id& value,
+                                                                                             bool dht_profile) noexcept;
    [[nodiscard]] std::optional<resource_manager::memory_reservation>
-   reserve_memory(std::uint64_t bytes, resource_manager::memory_priority priority = resource_manager::memory_priority::always) noexcept;
+   reserve_memory(std::uint64_t bytes,
+                  resource_manager::memory_priority priority = resource_manager::memory_priority::always) noexcept;
 
    boost::asio::awaitable<void> async_write(std::span<const std::uint8_t> bytes) override;
    boost::asio::awaitable<void> async_write_chunk(forge::net::transport::chunk bytes) override;

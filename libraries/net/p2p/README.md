@@ -8,7 +8,9 @@ and GossipSub/pubsub.
 API status: `forge.net.p2p.resource_manager` is Preview while P2P production
 hardening replaces manual counters with move-only reservations. The Stage 3
 migration intentionally removes `try_acquire_*`/`release_*`; callers retain the
-returned reservation for the complete operation lifetime instead. Other public
+returned reservation for the complete operation lifetime instead. Staged stream
+scope binding returns an explicit result: only `policy_rejected` is backpressure;
+`invalid_transition` and `runtime_failure` are internal failures. Other public
 P2P contracts remain Stable unless their owning section explicitly says
 otherwise.
 

@@ -282,7 +282,7 @@ struct node::impl : std::enable_shared_from_this<impl> {
    void invalidate_pubsub_outbound_locked(const peer_id& peer,
                                           std::optional<std::uint64_t> owner_session_id = std::nullopt,
                                           const std::shared_ptr<forge::asio::gate>& owner_write_gate = {},
-                                          const std::shared_ptr<forge::net::p2p::stream>& owner_stream = {});
+                                          const std::shared_ptr<forge::net::p2p::stream>& owner_stream = {}) noexcept;
    void forget_pubsub_peer_locked(const peer_id& peer);
    void finish_pubsub_inbound(const peer_id& peer, std::uint64_t generation);
    void clear_pubsub_outbound_locked();

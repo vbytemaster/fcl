@@ -7,6 +7,7 @@ module;
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 
 export module forge.net.p2p.resource_manager;
 
@@ -271,6 +272,13 @@ class resource_manager::dial_reservation {
 
 class resource_manager::stream_reservation {
  public:
+   enum class bind_result : std::uint8_t {
+      accepted,
+      policy_rejected,
+      invalid_transition,
+      runtime_failure,
+   };
+
    stream_reservation() noexcept;
    ~stream_reservation();
    stream_reservation(stream_reservation&&) noexcept;
@@ -281,8 +289,8 @@ class resource_manager::stream_reservation {
    [[nodiscard]] bool active() const noexcept;
    [[nodiscard]] bool bound() const noexcept;
    [[nodiscard]] bool service_bound() const noexcept;
-   [[nodiscard]] bool bind_protocol(protocol_id value) noexcept;
-   [[nodiscard]] bool bind_service(std::string value) noexcept;
+   [[nodiscard]] bind_result bind_protocol(const protocol_id& value) noexcept;
+   [[nodiscard]] bind_result bind_service(std::string_view value) noexcept;
    [[nodiscard]] std::optional<memory_reservation>
    reserve_memory(std::uint64_t bytes, memory_priority priority = memory_priority::always) noexcept;
    [[nodiscard]] std::optional<file_descriptor_reservation> reserve_file_descriptors(std::size_t count) noexcept;

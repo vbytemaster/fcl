@@ -29,8 +29,10 @@ struct stream::impl {
    };
 
    impl(std::shared_ptr<detail::stream_concept> model_value,
-        detail::stream_cancel_request request_cancel_value)
-       : model(std::move(model_value)), request_cancel(std::move(request_cancel_value)) {}
+        detail::stream_cancel_request request_cancel_value,
+        detail::stream_cancel_request abandon_cancel_value)
+       : model(std::move(model_value)), request_cancel(std::move(request_cancel_value)),
+         abandon_cancel(std::move(abandon_cancel_value)) {}
 
    ~impl() {
       request_abandon_cancel();
@@ -73,7 +75,11 @@ struct stream::impl {
 
    void request_abandon_cancel() noexcept {
       if (claim_terminal(terminal_state::cancel_requested)) {
-         invoke_cancel();
+         if (abandon_cancel) {
+            abandon_cancel();
+         } else {
+            invoke_cancel();
+         }
       }
    }
 
@@ -87,12 +93,14 @@ struct stream::impl {
    detail::bounded_frame_buffer buffer;
    // Immutable after publication. terminal is the sole invocation gate.
    detail::stream_cancel_request request_cancel;
+   detail::stream_cancel_request abandon_cancel;
    std::atomic<terminal_state> terminal{terminal_state::active};
 };
 
 stream::stream() = default;
-stream::stream(std::shared_ptr<detail::stream_concept> model, detail::stream_cancel_request request_cancel)
-    : impl_(std::make_shared<impl>(std::move(model), std::move(request_cancel))) {}
+stream::stream(std::shared_ptr<detail::stream_concept> model, detail::stream_cancel_request request_cancel,
+               detail::stream_cancel_request abandon_cancel)
+    : impl_(std::make_shared<impl>(std::move(model), std::move(request_cancel), std::move(abandon_cancel))) {}
 
 stream::~stream() = default;
 stream::stream(stream&&) noexcept = default;
@@ -224,6 +232,12 @@ stream detail::stream_access::make(std::shared_ptr<stream_concept> model) {
 stream detail::stream_access::make_cancelable(std::shared_ptr<stream_concept> model,
                                               stream_cancel_request request_cancel) {
    return stream{std::move(model), std::move(request_cancel)};
+}
+
+stream detail::stream_access::make_cancelable(std::shared_ptr<stream_concept> model,
+                                              stream_cancel_request request_cancel,
+                                              stream_cancel_request abandon_cancel) {
+   return stream{std::move(model), std::move(request_cancel), std::move(abandon_cancel)};
 }
 
 stream detail::stream_access::with_buffer(stream value, std::vector<std::uint8_t> buffered) {

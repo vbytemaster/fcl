@@ -7,6 +7,7 @@ module;
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -294,12 +295,14 @@ bool resource_manager::stream_reservation::service_bound() const noexcept {
    return active() && owner_->stream_service_bound(ledger_);
 }
 
-bool resource_manager::stream_reservation::bind_protocol(protocol_id value) noexcept {
-   return active() && owner_->bind_protocol(ledger_, std::move(value));
+resource_manager::stream_reservation::bind_result
+resource_manager::stream_reservation::bind_protocol(const protocol_id& value) noexcept {
+   return active() ? owner_->bind_protocol(ledger_, value) : bind_result::invalid_transition;
 }
 
-bool resource_manager::stream_reservation::bind_service(std::string value) noexcept {
-   return active() && owner_->bind_service(ledger_, std::move(value));
+resource_manager::stream_reservation::bind_result
+resource_manager::stream_reservation::bind_service(std::string_view value) noexcept {
+   return active() ? owner_->bind_service(ledger_, value) : bind_result::invalid_transition;
 }
 
 std::optional<resource_manager::memory_reservation>

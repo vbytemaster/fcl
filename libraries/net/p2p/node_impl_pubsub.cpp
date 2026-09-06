@@ -75,7 +75,7 @@ boost::asio::awaitable<std::vector<std::uint8_t>> async_read_length_delimited(fo
 
 void node::impl::invalidate_pubsub_outbound_locked(const peer_id& peer, std::optional<std::uint64_t> owner_session_id,
                                                    const std::shared_ptr<forge::asio::gate>& owner_write_gate,
-                                                   const std::shared_ptr<forge::net::p2p::stream>& owner_stream) {
+                                                   const std::shared_ptr<forge::net::p2p::stream>& owner_stream) noexcept {
    const auto found = pubsub_value.outbound.find(peer);
    if (found == pubsub_value.outbound.end() || (owner_session_id && found->second.session_id != *owner_session_id) ||
        (owner_write_gate && found->second.write_gate != owner_write_gate) ||

@@ -163,7 +163,7 @@
         ]
       },
       "header_features": {},
-      "sha256": "648014029505ced10f5060d55b155042d43477fda16d5abbd440c0a63fcb8913",
+      "sha256": "52c26171a5282d9f8f2fc76d56d08f7ccbe423020e3edfeb3ec5076c296c850e",
       "feature_ids": [
         "transport.direct_quic",
         "transport.tcp_yamux",

@@ -20,6 +20,7 @@ import forge.net.transport.frame;
 import forge.net.transport.stream;
 
 #include "details/resource_stream.hxx"
+#include "details/resource_service.hxx"
 
 namespace forge::net::p2p::detail {
 namespace {
@@ -79,12 +80,18 @@ std::int64_t resource_stream::id() const noexcept {
    return stream_.id();
 }
 
-bool resource_stream::bind_protocol(protocol_id value) noexcept {
-   return reservation_.bind_protocol(std::move(value));
+resource_manager::stream_reservation::bind_result resource_stream::bind_protocol(const protocol_id& value) noexcept {
+   return reservation_.bind_protocol(value);
 }
 
-bool resource_stream::bind_service(std::string value) noexcept {
-   return reservation_.bind_service(std::move(value));
+resource_manager::stream_reservation::bind_result
+resource_stream::bind_service_for_protocol(const protocol_id& value, bool dht_profile) noexcept {
+   try {
+      const auto service = resource_service_id(value, dht_profile);
+      return reservation_.bind_service(service);
+   } catch (...) {
+      return resource_manager::stream_reservation::bind_result::runtime_failure;
+   }
 }
 
 std::optional<resource_manager::memory_reservation>
@@ -199,11 +206,16 @@ std::pair<forge::net::transport::stream, std::shared_ptr<resource_stream>>
 prepare_resource_stream(resource_manager::stream_reservation reservation) {
    auto resource = std::make_shared<resource_stream>(std::move(reservation));
    auto weak = std::weak_ptr<resource_stream>{resource};
-   auto stream =
-       forge::net::transport::detail::stream_access::make_cancelable(resource, [weak = std::move(weak)]() noexcept {
+   auto stream = forge::net::transport::detail::stream_access::make_cancelable(
+       resource,
+       [weak = std::move(weak)]() noexcept {
           if (auto value = weak.lock()) {
              value->request_cancel();
           }
+       },
+       []() noexcept {
+          // The dispatcher still owns resource and performs graceful close.
+          // An escaped facade remains protected by resource_stream's destructor.
        });
    return {std::move(stream), std::move(resource)};
 }

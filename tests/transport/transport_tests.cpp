@@ -624,6 +624,30 @@ BOOST_AUTO_TEST_CASE(transport_stream_graceful_close_is_not_reset_by_facade_dest
    BOOST_TEST(cancel_requests.load(std::memory_order_relaxed) == 0U);
 }
 
+BOOST_AUTO_TEST_CASE(transport_stream_distinguishes_explicit_cancel_from_managed_abandonment) {
+   auto model = std::make_shared<fake_stream>(50);
+   auto cancel_requests = std::atomic_size_t{};
+   auto abandon_requests = std::atomic_size_t{};
+   {
+      auto value = forge::net::transport::detail::stream_access::make_cancelable(
+          model,
+          [&cancel_requests]() noexcept { cancel_requests.fetch_add(1, std::memory_order_relaxed); },
+          [&abandon_requests]() noexcept { abandon_requests.fetch_add(1, std::memory_order_relaxed); });
+   }
+
+   BOOST_TEST(cancel_requests.load(std::memory_order_relaxed) == 0U);
+   BOOST_TEST(abandon_requests.load(std::memory_order_relaxed) == 1U);
+
+   auto value = forge::net::transport::detail::stream_access::make_cancelable(
+       model,
+       [&cancel_requests]() noexcept { cancel_requests.fetch_add(1, std::memory_order_relaxed); },
+       [&abandon_requests]() noexcept { abandon_requests.fetch_add(1, std::memory_order_relaxed); });
+   value.request_cancel();
+   value.request_cancel();
+   BOOST_TEST(cancel_requests.load(std::memory_order_relaxed) == 1U);
+   BOOST_TEST(abandon_requests.load(std::memory_order_relaxed) == 1U);
+}
+
 BOOST_AUTO_TEST_CASE(transport_stream_concurrent_request_cancel_invokes_immutable_callback_once) {
    constexpr auto requester_count = std::size_t{4};
    auto runtime = forge::asio::runtime{};

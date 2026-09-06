@@ -1,15 +1,5 @@
 #pragma once
 
-#include <chrono>
-#include <cstddef>
-#include <cstdint>
-#include <map>
-#include <optional>
-#include <set>
-#include <string>
-#include <string_view>
-#include <vector>
-
 namespace forge::net::p2p {
 
 class connection_manager {
@@ -83,8 +73,9 @@ class connection_manager {
       std::chrono::steady_clock::time_point last_used_at{};
    };
 
-   [[nodiscard]] bool prune_one(std::vector<std::uint64_t>& pruned, std::chrono::steady_clock::time_point now,
-                                std::optional<direction> required_direction = std::nullopt);
+   [[nodiscard]] std::optional<std::uint64_t>
+   select_prune_one(const std::vector<std::uint64_t>& selected, std::chrono::steady_clock::time_point now,
+                    std::optional<direction> required_direction = std::nullopt) const;
    [[nodiscard]] bool should_prune_before(const session_record& left, const session_record& right) const;
    void erase_record(std::uint64_t id);
 

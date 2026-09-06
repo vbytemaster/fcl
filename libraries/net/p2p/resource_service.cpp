@@ -4,6 +4,8 @@ module;
 
 module forge.net.p2p.node;
 
+import forge.net.p2p.protocol;
+
 #include "details/resource_service.hxx"
 
 namespace forge::net::p2p::detail {

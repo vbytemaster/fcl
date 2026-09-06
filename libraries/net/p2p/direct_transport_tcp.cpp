@@ -323,6 +323,13 @@ class tcp_profile final {
          FORGE_THROW_EXCEPTION(exceptions::closed, "P2P TCP direct listener is not active");
       }
       try {
+         // The terminal worker retains this holder across TCP/STCP handoff, but
+         // it starts empty so an idle accept does not consume session or FD
+         // budget before the kernel has produced a connection.
+         auto native_lifetime =
+             std::make_shared<std::optional<resource_manager::file_descriptor_reservation>>();
+         auto tcp =
+             std::make_shared<forge::net::tcp::connection>(co_await listener->async_accept_connection(native_lifetime));
          auto admission = resources_.reserve_session(resource_manager::session_direction::inbound);
          if (!admission) {
             FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P inbound session limit reached");
@@ -331,9 +338,7 @@ class tcp_profile final {
          if (!descriptor) {
             FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P inbound TCP file descriptor limit reached");
          }
-         auto native_lifetime = std::make_shared<resource_manager::file_descriptor_reservation>(std::move(*descriptor));
-         auto tcp =
-             std::make_shared<forge::net::tcp::connection>(co_await listener->async_accept_connection(native_lifetime));
+         native_lifetime->emplace(std::move(*descriptor));
          try {
             if (!listener_is_current(key, listener)) {
                FORGE_THROW_EXCEPTION(exceptions::closed, "P2P TCP direct listener stopped during accept");
