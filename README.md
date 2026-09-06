@@ -236,6 +236,7 @@ components above without installing the guest sysroot; only `tooling_abi` and
 - [docs/runtime/asio-app.md](docs/runtime/asio-app.md) — runtime, scheduler and async app lifecycle.
 - [docs/web/http-websocket.md](docs/web/http-websocket.md) — HTTP/WebSocket layering.
 - [docs/network/quic-p2p.md](docs/network/quic-p2p.md) — QUIC and P2P model.
+- [docs/iterations/forge-p2p-production-implementation-v1.md](docs/iterations/forge-p2p-production-implementation-v1.md) — Stage 6 P2P ownership and canonical runner acceptance promotion.
 - [docs/blueprints/blockchain-constructor/README.md](docs/blueprints/blockchain-constructor/README.md) — planning map for FORGE as a neutral constructor substrate.
 - [docs/tui/notcurses-component-library.md](docs/tui/notcurses-component-library.md) — TUI abstraction over Notcurses.
 - [docs/codecs/json-yaml-glaze.md](docs/codecs/json-yaml-glaze.md) — JSON/YAML codec boundary.

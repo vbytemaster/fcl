@@ -42,6 +42,17 @@ PUBSUB_SCENARIOS = LIVE_SCENARIO_PROFILES["quic_pubsub"]
 DHT_VALUE_SCENARIOS = ("dht_pk_put_get", "dht_ipns_put_get")
 PUBSUB_STRESS_SCENARIO = LIVE_SCENARIO_PROFILES["mixed_pubsub"][0]
 TOPOLOGY_SCENARIOS = LIVE_SCENARIO_PROFILES["quic_topology"]
+CURRENT_ACCEPTANCE_SCENARIOS = {
+    "quic_base/ping": ("ping",),
+    "quic_base/identify": ("quic_v1_transport", "identify"),
+    "quic_base/relay_reserve": ("relay_v2_client_transport",),
+    "tcp_noise/ping": ("ping_native_tcp_yamux",),
+    "tcp_noise/identify": ("multistream_select", "noise_identity"),
+    "tcp_noise/echo": ("tcp_yamux",),
+    "tcp_tls/identify": ("tls_identity",),
+    "quic_dht/dht_provide_find_provider": ("kademlia_amino",),
+    "quic_rendezvous/rendezvous_register_discover": ("rendezvous_rust",),
+}
 DIAL_TIMEOUT_SECONDS = 90
 NATIVE_TOPOLOGIES = (
     ("forge", "go", "go"),
@@ -282,17 +293,24 @@ class Listener:
         self.log_file = log_file
         self.log_handle = log_handle
         self.command = command
+        # Keep a mutable terminal record so artifacts built after close include
+        # the process outcome without inventing a separate listener result.
+        self.terminal_status: dict[str, object] = {"exit_code": None, "termination": "running"}
 
     def close(self) -> None:
         try:
             self.stop_file.write_text("stop\n")
-            self.process.wait(timeout=5)
+            self.terminal_status["exit_code"] = self.process.wait(timeout=5)
+            self.terminal_status["termination"] = "graceful"
         except Exception:
             self.process.send_signal(signal.SIGTERM)
             try:
-                self.process.wait(timeout=5)
+                self.terminal_status["exit_code"] = self.process.wait(timeout=5)
+                self.terminal_status["termination"] = "terminated"
             except Exception:
                 self.process.kill()
+                self.terminal_status["exit_code"] = self.process.wait(timeout=5)
+                self.terminal_status["termination"] = "killed"
         finally:
             self.log_handle.close()
 
@@ -471,7 +489,9 @@ def run_dial(binary: Path, implementation: str, scenario: str, peer_id: str, add
         if result_file.exists():
             detail += f"; result={result_file.read_text(errors='replace')}"
         raise RuntimeError(detail)
-    return attach_attempts(json.loads(result_file.read_text()), attempts)
+    result = json.loads(result_file.read_text())
+    result["result_file"] = str(result_file)
+    return attach_attempts(result, attempts)
 
 
 def listener_evidence(listener: Listener) -> dict:
@@ -479,6 +499,7 @@ def listener_evidence(listener: Listener) -> dict:
         "pid": listener.process.pid,
         "command": listener.command,
         "log_file": str(listener.log_file),
+        "terminal_status": listener.terminal_status,
         "peer_id": listener.ready["peer_id"],
         "listen_addrs": listener.ready.get("listen_addrs", []),
     }
@@ -680,7 +701,9 @@ def run_relay_dial(binary: Path, implementation: str, scenario: str, target_peer
         if result_file.exists():
             detail += f"; result={result_file.read_text(errors='replace')}"
         raise RuntimeError(detail)
-    return attach_attempts(json.loads(result_file.read_text()), attempts)
+    result = json.loads(result_file.read_text())
+    result["result_file"] = str(result_file)
+    return attach_attempts(result, attempts)
 
 
 def prepare_go_fixture(source_dir: Path, build_dir: Path, go_tool: str,
@@ -850,8 +873,28 @@ def require_dht_provider_evidence(result: dict, dialer: str) -> None:
         raise RuntimeError(f"FORGE DHT provider proof negotiated the wrong protocol: {result}")
 
 
-def run_pair(dialer_binary: Path, dialer: str, listener_binary: Path, listener: str, scenario: str, root: Path) -> dict:
-    return run_pair_with_transport(dialer_binary, dialer, listener_binary, listener, scenario, root, "quic")
+def run_pair(dialer_binary: Path, dialer: str, listener_binary: Path, listener: str, scenario: str, root: Path,
+             acceptance_scenario_id: Optional[str] = None) -> dict:
+    runner_profile = "quic_base"
+    if scenario in DHT_SCENARIOS:
+        runner_profile = "quic_dht"
+    elif scenario in RENDEZVOUS_SCENARIOS:
+        runner_profile = "quic_rendezvous"
+    elif scenario in PUBSUB_SCENARIOS:
+        runner_profile = "quic_pubsub"
+    return run_pair_with_transport(
+        dialer_binary,
+        dialer,
+        listener_binary,
+        listener,
+        scenario,
+        root,
+        "quic",
+        "native",
+        ("quic",),
+        f"{runner_profile}/{scenario}",
+        acceptance_scenario_id or scenario,
+    )
 
 
 def run_dht_value_remote_get(binaries: dict[str, Path], writer: str, listener: str, scenario: str,
@@ -903,8 +946,10 @@ def run_dht_value_remote_get(binaries: dict[str, Path], writer: str, listener: s
 
 
 def run_pair_with_transport(dialer_binary: Path, dialer: str, listener_binary: Path, listener: str, scenario: str,
-                            root: Path, transport: str) -> dict:
-    work = root / f"{transport}-{dialer}-to-{listener}-{scenario}"
+                            root: Path, transport: str, acceptance_profile: str,
+                            transport_stack: tuple[str, ...], runner_scenario_id: str,
+                            acceptance_scenario_id: str) -> dict:
+    work = root / f"{transport}-{dialer}-to-{listener}-{acceptance_scenario_id}"
     work.mkdir(parents=True, exist_ok=True)
     listener_result = (
         work / f"{listener}-listen-{scenario}.json"
@@ -932,6 +977,10 @@ def run_pair_with_transport(dialer_binary: Path, dialer: str, listener_binary: P
             "dialer": dialer,
             "listener": listener,
             "scenario": scenario,
+            "runner_scenario_id": runner_scenario_id,
+            "acceptance_scenario_id": acceptance_scenario_id,
+            "profile": acceptance_profile,
+            "transport_stack": list(transport_stack),
             "transport": transport,
             "addr": addr,
             "selected_addresses": {
@@ -943,6 +992,7 @@ def run_pair_with_transport(dialer_binary: Path, dialer: str, listener_binary: P
                 "pid": server.process.pid,
                 "command": server.command,
                 "log_file": str(server.log_file),
+                "terminal_status": server.terminal_status,
             },
             "result": result,
             "listener_result": delivered,
@@ -953,6 +1003,8 @@ def run_pair_with_transport(dialer_binary: Path, dialer: str, listener_binary: P
         elif transport == "tcp-tls":
             out["negotiated_security"] = "/tls/1.0.0"
             out["negotiated_muxer"] = "/yamux/1.0.0"
+        if listener_result is not None:
+            out["listener_result_file"] = str(listener_result)
         return out
     finally:
         server.close()
@@ -1006,7 +1058,9 @@ def run_topology(binary: Path, implementation: str, scenario: str, root: Path) -
         if result_file.exists():
             detail += f"; result={result_file.read_text(errors='replace')}"
         raise RuntimeError(detail)
-    result = attach_attempts(json.loads(result_file.read_text()), attempts)
+    result = json.loads(result_file.read_text())
+    result["result_file"] = str(result_file)
+    result = attach_attempts(result, attempts)
     require_local_topology_evidence(result, scenario)
     return {
         "implementation": implementation,
@@ -1055,14 +1109,63 @@ def run_native_relay_topology(binaries: dict[str, Path], source: str, relay_impl
         relay.close()
 
 
-def write_artifact(path: Path, root: Path, provenance: dict, artifacts: list[dict], failures: list[str]) -> None:
+def referenced_evidence_paths(value: object) -> set[Path]:
+    paths: set[Path] = set()
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if key in {"log_file", "result_file", "listener_result_file"} and isinstance(nested, str):
+                paths.add(Path(nested))
+            paths.update(referenced_evidence_paths(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            paths.update(referenced_evidence_paths(nested))
+    return paths
+
+
+def evidence_index(root: Path, artifacts: list[dict]) -> list[dict]:
+    if not root.is_dir():
+        return []
+    indexed: list[dict] = []
+    for evidence_path in sorted(referenced_evidence_paths(artifacts), key=lambda item: str(item)):
+        resolved = evidence_path.resolve()
+        try:
+            relative = resolved.relative_to(root.resolve())
+        except ValueError as error:
+            raise RuntimeError(f"interop evidence escapes artifact root: {evidence_path}") from error
+        if not resolved.is_file():
+            raise RuntimeError(f"interop evidence is missing: {evidence_path}")
+        indexed.append({
+            "path": relative.as_posix(),
+            "size": resolved.stat().st_size,
+            "sha256": sha256_file(resolved),
+        })
+    return indexed
+
+
+def acceptance_manifest_metadata(path: Optional[str]) -> Optional[dict]:
+    if path is None:
+        return None
+    manifest = Path(path).resolve()
+    if not manifest.is_file():
+        raise RuntimeError(f"acceptance manifest is unavailable: {manifest}")
+    return {"path": str(manifest), "sha256": sha256_file(manifest)}
+
+
+def write_artifact(path: Path, root: Path, provenance: dict, artifacts: list[dict], failures: list[str],
+                   runner_argv: list[str], started_at_unix: float, acceptance_manifest: Optional[dict]) -> None:
     path.write_text(
         json.dumps(
             {
+                "schema_version": 2,
+                "runner_argv": runner_argv,
+                "started_at_unix": started_at_unix,
+                "finished_at_unix": time.time(),
+                "acceptance_manifest": acceptance_manifest,
                 "artifact_root": str(root),
                 "fixture_provenance": provenance,
                 "artifacts": artifacts,
                 "failures": failures,
+                "evidence_index": evidence_index(root, artifacts),
             },
             indent=2,
         )
@@ -1079,6 +1182,7 @@ def main() -> int:
     parser.add_argument("--build-dir", required=True)
     parser.add_argument("--forge-root", required=True)
     parser.add_argument("--donors-root", required=True)
+    parser.add_argument("--acceptance-manifest")
     args = parser.parse_args()
 
     if not args.provenance_only and not enabled_from_args(args.enabled):
@@ -1103,8 +1207,12 @@ def main() -> int:
         "tools": {},
         "commands": [],
     }
+    started_at_unix = time.time()
+    runner_argv = [sys.executable, *sys.argv]
     start_identity = None
+    acceptance_manifest = None
     try:
+        acceptance_manifest = acceptance_manifest_metadata(args.acceptance_manifest)
         python_path = str(Path(sys.executable).resolve())
         git_path = str(Path(require_tool("git")).resolve())
         provenance["tools"]["python"] = {
@@ -1179,20 +1287,42 @@ def main() -> int:
                     if listener == dialer:
                         continue
                     for scenario in SCENARIOS:
-                        try:
-                            artifacts.append(
-                                run_pair(binaries[dialer], dialer, binaries[listener], listener, scenario, root)
-                            )
-                        except Exception as error:
-                            failures.append(f"{dialer}->{listener} {scenario}: {error}")
+                        for acceptance_scenario_id in CURRENT_ACCEPTANCE_SCENARIOS.get(
+                            f"quic_base/{scenario}", (scenario,)
+                        ):
+                            try:
+                                artifacts.append(
+                                    run_pair(
+                                        binaries[dialer],
+                                        dialer,
+                                        binaries[listener],
+                                        listener,
+                                        scenario,
+                                        root,
+                                        acceptance_scenario_id,
+                                    )
+                                )
+                            except Exception as error:
+                                failures.append(f"{dialer}->{listener} {acceptance_scenario_id}: {error}")
                     for scenario in DHT_SCENARIOS:
                         try:
                             if scenario in DHT_VALUE_SCENARIOS:
                                 artifacts.append(run_dht_value_remote_get(binaries, dialer, listener, scenario, root))
                             else:
-                                artifacts.append(
-                                    run_pair(binaries[dialer], dialer, binaries[listener], listener, scenario, root)
-                                )
+                                for acceptance_scenario_id in CURRENT_ACCEPTANCE_SCENARIOS.get(
+                                    f"quic_dht/{scenario}", (scenario,)
+                                ):
+                                    artifacts.append(
+                                        run_pair(
+                                            binaries[dialer],
+                                            dialer,
+                                            binaries[listener],
+                                            listener,
+                                            scenario,
+                                            root,
+                                            acceptance_scenario_id,
+                                        )
+                                    )
                         except Exception as error:
                             failures.append(f"{dialer}->{listener} {scenario}: {error}")
                     for scenario in PUBSUB_SCENARIOS:
@@ -1207,26 +1337,52 @@ def main() -> int:
             for dialer, listener in (("forge", "go"), ("go", "forge"), ("forge", "rust"), ("rust", "forge")):
                 for transport, profile in (("tcp", "tcp_noise"), ("tcp-tls", "tcp_tls")):
                     for scenario in LIVE_SCENARIO_PROFILES[profile]:
-                        try:
-                            artifacts.append(
-                                run_pair_with_transport(
-                                    binaries[dialer], dialer, binaries[listener], listener, scenario, root, transport
+                        for acceptance_scenario_id in CURRENT_ACCEPTANCE_SCENARIOS.get(
+                            f"{profile}/{scenario}", (scenario,)
+                        ):
+                            try:
+                                artifacts.append(
+                                    run_pair_with_transport(
+                                        binaries[dialer],
+                                        dialer,
+                                        binaries[listener],
+                                        listener,
+                                        scenario,
+                                        root,
+                                        transport,
+                                        "native",
+                                        ("tcp", "yamux"),
+                                        f"{profile}/{scenario}",
+                                        acceptance_scenario_id,
+                                    )
                                 )
-                            )
-                        except Exception as error:
-                            failures.append(f"{dialer}->{listener} {transport} {scenario}: {error}")
+                            except Exception as error:
+                                failures.append(
+                                    f"{dialer}->{listener} {transport} {acceptance_scenario_id}: {error}"
+                                )
             try:
                 artifacts.append(run_pubsub_mixed_mesh_stress(binaries, root))
             except Exception as error:
                 failures.append(f"{PUBSUB_STRESS_SCENARIO}: {error}")
             for listener, dialer in (("rust", "forge"), ("forge", "rust")):
                 for scenario in RENDEZVOUS_SCENARIOS:
-                    try:
-                        artifacts.append(
-                            run_pair(binaries[dialer], dialer, binaries[listener], listener, scenario, root)
-                        )
-                    except Exception as error:
-                        failures.append(f"{dialer}->{listener} {scenario}: {error}")
+                    for acceptance_scenario_id in CURRENT_ACCEPTANCE_SCENARIOS.get(
+                        f"quic_rendezvous/{scenario}", (scenario,)
+                    ):
+                        try:
+                            artifacts.append(
+                                run_pair(
+                                    binaries[dialer],
+                                    dialer,
+                                    binaries[listener],
+                                    listener,
+                                    scenario,
+                                    root,
+                                    acceptance_scenario_id,
+                                )
+                            )
+                        except Exception as error:
+                            failures.append(f"{dialer}->{listener} {acceptance_scenario_id}: {error}")
             for seeker, routing, hidden in HIDDEN_DHT_PERMUTATIONS:
                 try:
                     artifacts.append(run_hidden_dht_find_peer(binaries, seeker, routing, hidden, root))
@@ -1264,7 +1420,16 @@ def main() -> int:
                     )
         except Exception as error:
             failures.append(f"provenance end fingerprint: {error}")
-        write_artifact(artifact_path, root, provenance, artifacts, failures)
+        write_artifact(
+            artifact_path,
+            root,
+            provenance,
+            artifacts,
+            failures,
+            runner_argv,
+            started_at_unix,
+            acceptance_manifest,
+        )
 
     if failures:
         for failure in failures:

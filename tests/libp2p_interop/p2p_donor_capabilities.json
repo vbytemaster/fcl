@@ -162,29 +162,34 @@
   ],
   "interop_acceptance_registry": {
     "artifact_schema": {
-      "schema_version": 1,
-      "claim_scope": "external_exact_head_artifact_only",
+      "schema_version": 2,
+      "claim_scope": "canonical_runner_exact_head_artifact_only",
       "required_fields": [
         "schema_version",
-        "head",
-        "manifest_sha256",
         "runner_argv",
         "started_at_unix",
         "finished_at_unix",
-        "capability_results"
+        "acceptance_manifest",
+        "artifact_root",
+        "fixture_provenance",
+        "artifacts",
+        "failures",
+        "evidence_index"
       ],
-      "result_required_fields": [
-        "capability_id",
-        "scenario_id",
+      "raw_artifact_required_fields": [
+        "dialer",
+        "listener",
+        "scenario",
+        "runner_scenario_id",
+        "acceptance_scenario_id",
         "profile",
         "transport_stack",
-        "activation",
-        "directions",
-        "status",
-        "evidence"
+        "result",
+        "listener_process"
       ],
-      "allowed_result_statuses": [ "passed", "limited" ],
+      "evidence_index_required_fields": [ "path", "size", "sha256" ],
       "passing_status": "passed",
+      "limited_status": "limited",
       "registration_is_not_verdict": true
     },
     "capabilities": {
@@ -196,123 +201,125 @@
       "transport.tcp_yamux": {
         "scenarios": [
           { "id": "tcp_yamux", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "registered", "runner_scenario_id": "tcp_noise/echo", "source_case_id": "transport.tcp_noise_yamux_direct", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-          { "id": "tcp_yamux_private_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "requires_capabilities": [ "security.private_network_psk" ], "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+          { "id": "tcp_yamux_private_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/tcp_yamux_private_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "requires_capabilities": [ "security.private_network_psk" ], "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
         ]
       },
       "negotiation.multistream_select": {
         "scenarios": [
           { "id": "multistream_select", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "registered", "runner_scenario_id": "tcp_noise/identify", "source_case_id": "transport.tcp_noise_yamux_direct", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-          { "id": "multistream_select_private_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "requires_capabilities": [ "security.private_network_psk" ], "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+          { "id": "multistream_select_private_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/multistream_select_private_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "requires_capabilities": [ "security.private_network_psk" ], "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
         ]
       },
       "security.noise_tls_identity": {
         "scenarios": [
           { "id": "noise_identity", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "registered", "runner_scenario_id": "tcp_noise/identify", "source_case_id": "transport.tcp_noise_yamux_direct", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
           { "id": "tls_identity", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "registered", "runner_scenario_id": "tcp_tls/identify", "source_case_id": "transport.tcp_tls_yamux_direct", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-          { "id": "noise_identity_private_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "requires_capabilities": [ "security.private_network_psk" ], "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-          { "id": "tls_identity_private_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "requires_capabilities": [ "security.private_network_psk" ], "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+          { "id": "noise_identity_private_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/noise_identity_private_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "requires_capabilities": [ "security.private_network_psk" ], "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+          { "id": "tls_identity_private_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/tls_identity_private_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "requires_capabilities": [ "security.private_network_psk" ], "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
         ]
       },
       "protocol.ping": {
         "scenarios": [
           { "id": "ping", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "registered", "runner_scenario_id": "quic_base/ping", "source_case_id": "interop.live_ping_identify_autonat_relay", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
           { "id": "ping_native_tcp_yamux", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "registered", "runner_scenario_id": "tcp_noise/ping", "source_case_id": "transport.tcp_noise_yamux_direct", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-          { "id": "ping_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "requires_capabilities": [ "security.private_network_psk" ], "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+          { "id": "ping_private_tcp_yamux_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/ping_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "requires_capabilities": [ "security.private_network_psk" ], "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
         ]
       },
       "protocol.identify": {
         "scenarios": [
           { "id": "identify", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "registered", "runner_scenario_id": "quic_base/identify", "source_case_id": "interop.live_ping_identify_autonat_relay", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
           { "id": "identify_native_tcp_yamux", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "registered", "runner_scenario_id": "tcp_noise/identify", "source_case_id": "transport.tcp_noise_yamux_direct", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-          { "id": "identify_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "requires_capabilities": [ "security.private_network_psk" ], "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+          { "id": "identify_private_tcp_yamux_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/identify_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "requires_capabilities": [ "security.private_network_psk" ], "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
         ]
       },
       "protocol.autonat_v1_client": { "scenarios": [
-        { "id": "autonat_v1_client", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-        { "id": "autonat_v1_client_native_tcp_yamux", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-        { "id": "autonat_v1_client_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+        { "id": "autonat_v1_client", "runner_scenario_id": "quic_stage6/autonat_v1_client", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+        { "id": "autonat_v1_client_native_tcp_yamux", "runner_scenario_id": "tcp_stage6/autonat_v1_client_native_tcp_yamux", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+        { "id": "autonat_v1_client_private_tcp_yamux_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/autonat_v1_client_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
       ] },
       "protocol.autonat_v1_service": { "scenarios": [
-        { "id": "autonat_v1_service", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-        { "id": "autonat_v1_service_native_tcp_yamux", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-        { "id": "autonat_v1_service_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+        { "id": "autonat_v1_service", "runner_scenario_id": "quic_stage6/autonat_v1_service", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+        { "id": "autonat_v1_service_native_tcp_yamux", "runner_scenario_id": "tcp_stage6/autonat_v1_service_native_tcp_yamux", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+        { "id": "autonat_v1_service_private_tcp_yamux_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/autonat_v1_service_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
       ] },
       "protocol.autonat_v2_client": { "scenarios": [
-        { "id": "autonat_v2_client", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-        { "id": "autonat_v2_client_native_tcp_yamux", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-        { "id": "autonat_v2_client_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+        { "id": "autonat_v2_client", "runner_scenario_id": "quic_stage6/autonat_v2_client", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+        { "id": "autonat_v2_client_native_tcp_yamux", "runner_scenario_id": "tcp_stage6/autonat_v2_client_native_tcp_yamux", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+        { "id": "autonat_v2_client_private_tcp_yamux_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/autonat_v2_client_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
       ] },
       "protocol.autonat_v2_service": { "scenarios": [
-        { "id": "autonat_v2_service", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-        { "id": "autonat_v2_service_native_tcp_yamux", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-        { "id": "autonat_v2_service_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+        { "id": "autonat_v2_service", "runner_scenario_id": "quic_stage6/autonat_v2_service", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+        { "id": "autonat_v2_service_native_tcp_yamux", "runner_scenario_id": "tcp_stage6/autonat_v2_service_native_tcp_yamux", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+        { "id": "autonat_v2_service_private_tcp_yamux_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/autonat_v2_service_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
       ] },
       "relay.circuit_v2_client_transport": { "scenarios": [
         { "id": "relay_v2_client_transport", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "registered", "runner_scenario_id": "quic_base/relay_reserve", "source_case_id": "relayv2.reserve_connect_status", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
       ] },
       "relay.circuit_v2_service": { "scenarios": [
-        { "id": "relay_v2_service", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+        { "id": "relay_v2_service", "runner_scenario_id": "quic_stage6/relay_v2_service", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
       ] },
       "relay.dcutr": { "scenarios": [
-        { "id": "dcutr", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+        { "id": "dcutr", "runner_scenario_id": "quic_stage6/dcutr", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
       ] },
       "routing.kademlia_amino": { "scenarios": [
-        { "id": "kademlia_amino", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "registered", "runner_scenario_id": "quic_dht/dht_provide_find_provider", "source_case_id": "interop.live_dht_provider_lookup", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+        { "id": "kademlia_amino", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "registered", "runner_scenario_id": "quic_dht/dht_provide_find_provider", "source_case_id": "interop.live_dht_provider_lookup", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+        { "id": "kademlia_amino_private_tcp_yamux_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/kademlia_amino_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "requires_capabilities": [ "security.private_network_psk" ], "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
       ] },
       "discovery.rendezvous": {
         "scenarios": [
-          { "id": "rendezvous_rust", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "registered", "runner_scenario_id": "quic_rendezvous/rendezvous_register_discover", "source_case_id": "interop.live_rendezvous_register_discover", "required_directions": [ "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+          { "id": "rendezvous_rust", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "registered", "runner_scenario_id": "quic_rendezvous/rendezvous_register_discover", "source_case_id": "interop.live_rendezvous_register_discover", "required_directions": [ "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+          { "id": "rendezvous_rust_private_tcp_yamux_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/rendezvous_rust_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "requires_capabilities": [ "security.private_network_psk" ], "required_directions": [ "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
         ],
         "limitation": { "implementation": "go", "source_case_id": "interop.live_rendezvous_register_discover", "description": "No official Go rendezvous behaviour donor is pinned; Go directions remain explicitly limited." }
       },
       "pubsub.gossipsub_v1_0_v1_1": { "scenarios": [
-        { "id": "gossipsub_v1_0_v1_1", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-        { "id": "gossipsub_v1_0_v1_1_native_tcp_yamux", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-        { "id": "gossipsub_v1_0_v1_1_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+        { "id": "gossipsub_v1_0_v1_1", "runner_scenario_id": "quic_stage6/gossipsub_v1_0_v1_1", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+        { "id": "gossipsub_v1_0_v1_1_native_tcp_yamux", "runner_scenario_id": "tcp_stage6/gossipsub_v1_0_v1_1_native_tcp_yamux", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+        { "id": "gossipsub_v1_0_v1_1_private_tcp_yamux_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/gossipsub_v1_0_v1_1_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
       ] },
       "discovery.mdns_public": { "scenarios": [
-        { "id": "mdns_public", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+        { "id": "mdns_public", "runner_scenario_id": "tcp_stage6/mdns_public", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
       ] },
       "discovery.mdns_private_fingerprinted": {
         "scenarios": [
-          { "id": "mdns_private_fingerprinted_go", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge" ], "expected_status": "passed" }
+          { "id": "mdns_private_fingerprinted_go", "runner_scenario_id": "private_tcp_yamux_pnet/mdns_private_fingerprinted_go", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge" ], "expected_status": "passed" }
         ],
         "limitation": { "implementation": "rust", "source_case_id": "mdns.private_fingerprinted_rust_limitation", "description": "Pinned Rust mDNS lacks the private fingerprinted service configuration." }
       },
       "addressing.dnsaddr": { "scenarios": [
-        { "id": "dnsaddr", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-        { "id": "dnsaddr_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+        { "id": "dnsaddr", "runner_scenario_id": "tcp_stage6/dnsaddr", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+        { "id": "dnsaddr_private_tcp_yamux_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/dnsaddr_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
       ] },
       "security.private_network_psk": { "scenarios": [
-        { "id": "pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+        { "id": "pnet", "runner_scenario_id": "private_tcp_yamux_pnet/pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
       ] },
       "connections.coordinated_dial_port_reuse": { "scenarios": [
-        { "id": "coordinated_dial_port_reuse", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-        { "id": "coordinated_dial_port_reuse_private_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+        { "id": "coordinated_dial_port_reuse", "runner_scenario_id": "tcp_stage6/coordinated_dial_port_reuse", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+        { "id": "coordinated_dial_port_reuse_private_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/coordinated_dial_port_reuse_private_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
       ] },
       "connections.inlined_muxer_negotiation": {
         "scenarios": [
-          { "id": "inline_muxer_go", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge" ], "expected_status": "passed" },
-          { "id": "inline_muxer_go_private_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge" ], "expected_status": "passed" },
-          { "id": "inline_muxer_rust_fallback", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_rust", "rust_to_forge" ], "expected_status": "limited" },
-          { "id": "inline_muxer_rust_fallback_private_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_rust", "rust_to_forge" ], "expected_status": "limited" }
+          { "id": "inline_muxer_go", "runner_scenario_id": "tcp_stage6/inline_muxer_go", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge" ], "expected_status": "passed" },
+          { "id": "inline_muxer_go_private_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/inline_muxer_go_private_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge" ], "expected_status": "passed" },
+          { "id": "inline_muxer_rust_fallback", "runner_scenario_id": "tcp_stage6/inline_muxer_rust_fallback", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_rust", "rust_to_forge" ], "expected_status": "limited" },
+          { "id": "inline_muxer_rust_fallback_private_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/inline_muxer_rust_fallback_private_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_rust", "rust_to_forge" ], "expected_status": "limited" }
         ],
         "limitation": { "implementation": "rust", "source_case_id": "transport.tcp_tls_yamux_direct", "description": "Forge-Rust and the pinned Rust donor use fallback post-TLS mux negotiation, not inline muxing." }
       },
       "pubsub.gossipsub_v1_2": { "scenarios": [
-        { "id": "gossipsub_v1_2", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-        { "id": "gossipsub_v1_2_native_tcp_yamux", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-        { "id": "gossipsub_v1_2_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+        { "id": "gossipsub_v1_2", "runner_scenario_id": "quic_stage6/gossipsub_v1_2", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+        { "id": "gossipsub_v1_2_native_tcp_yamux", "runner_scenario_id": "tcp_stage6/gossipsub_v1_2_native_tcp_yamux", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+        { "id": "gossipsub_v1_2_private_tcp_yamux_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/gossipsub_v1_2_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
       ] },
       "pubsub.gossipsub_v1_3": { "scenarios": [
-        { "id": "gossipsub_v1_3", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-        { "id": "gossipsub_v1_3_native_tcp_yamux", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-        { "id": "gossipsub_v1_3_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+        { "id": "gossipsub_v1_3", "runner_scenario_id": "quic_stage6/gossipsub_v1_3", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+        { "id": "gossipsub_v1_3_native_tcp_yamux", "runner_scenario_id": "tcp_stage6/gossipsub_v1_3_native_tcp_yamux", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+        { "id": "gossipsub_v1_3_private_tcp_yamux_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/gossipsub_v1_3_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
       ] },
       "pubsub.partial_messages": { "scenarios": [
-        { "id": "partial_messages", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-        { "id": "partial_messages_native_tcp_yamux", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
-        { "id": "partial_messages_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
+        { "id": "partial_messages", "runner_scenario_id": "quic_stage6/partial_messages", "profile": "native", "transport_stack": [ "quic" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+        { "id": "partial_messages_native_tcp_yamux", "runner_scenario_id": "tcp_stage6/partial_messages_native_tcp_yamux", "profile": "native", "transport_stack": [ "tcp", "yamux" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" },
+        { "id": "partial_messages_private_tcp_yamux_pnet", "runner_scenario_id": "private_tcp_yamux_pnet/partial_messages_private_tcp_yamux_pnet", "profile": "private_network", "transport_stack": [ "tcp", "yamux", "pnet" ], "activation": "enabled", "registration": "planned", "required_directions": [ "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge" ], "expected_status": "passed" }
       ] }
     }
   },
@@ -536,10 +543,10 @@
       "donor_sources": [
         "donors/libp2p-specs/noise/README.md",
         "donors/libp2p-specs/tls/tls.md",
-        "donors/go-libp2p/p2p/security/noise/handshake.go",
-        "donors/go-libp2p/p2p/security/tls/crypto.go",
-        "donors/rust-libp2p/transports/noise/src/lib.rs",
-        "donors/rust-libp2p/transports/tls/src/upgrade.rs"
+        "donors/go-libp2p/p2p/security/noise/transport.go",
+        "donors/go-libp2p/p2p/security/tls/transport.go",
+        "donors/rust-libp2p/transports/noise/src/io/handshake.rs",
+        "donors/rust-libp2p/transports/tls/src/lib.rs"
       ],
       "rationale": "Authenticated peer identity is mandatory before protocol, address or topology facts are trusted."
     },
@@ -1208,10 +1215,10 @@
       "donor_sources": [
         "donors/libp2p-specs/connections/inlined-muxer-negotiation.md",
         "donors/go-libp2p/p2p/net/upgrader/upgrader.go",
-        "donors/go-libp2p/p2p/security/tls/crypto.go",
-        "donors/go-libp2p/p2p/security/noise/handshake.go",
-        "donors/rust-libp2p/transports/tls/src/upgrade.rs",
-        "donors/rust-libp2p/transports/noise/src/lib.rs"
+        "donors/go-libp2p/p2p/security/tls/transport.go",
+        "donors/go-libp2p/p2p/security/noise/transport.go",
+        "donors/rust-libp2p/transports/tls/src/lib.rs",
+        "donors/rust-libp2p/transports/noise/src/io/handshake.rs"
       ],
       "rationale": "Inlined muxer negotiation is optional to activate but required Stage 6 support: Go TLS and Noise support inline negotiation, while pinned Rust TLS fixes ALPN and Rust Noise handles extensions before the documented fallback rather than claiming inline support."
     },

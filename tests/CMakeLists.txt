@@ -1041,6 +1041,7 @@ add_custom_target(
       --build-dir ${FORGE_INTEROP_ARTIFACT_DIRECTORY}
       --forge-root ${CMAKE_SOURCE_DIR}
       --donors-root ${FORGE_LIBP2P_DONORS_ROOT}
+      --acceptance-manifest ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/p2p_donor_capabilities.json
    DEPENDS forge_interop_fixture
 )
 add_test(
@@ -1053,6 +1054,7 @@ add_test(
       --build-dir ${FORGE_INTEROP_ARTIFACT_DIRECTORY}
       --forge-root ${CMAKE_SOURCE_DIR}
       --donors-root ${FORGE_LIBP2P_DONORS_ROOT}
+      --acceptance-manifest ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/p2p_donor_capabilities.json
 )
 set_tests_properties(test_forge_libp2p_interop PROPERTIES SKIP_REGULAR_EXPRESSION "^SKIP:")
 
@@ -1067,6 +1069,7 @@ add_test(
       --build-dir ${FORGE_INTEROP_ARTIFACT_DIRECTORY}
       --forge-root ${CMAKE_SOURCE_DIR}
       --donors-root ${FORGE_LIBP2P_DONORS_ROOT}
+      --acceptance-manifest ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/p2p_donor_capabilities.json
 )
 
 add_test(
@@ -1091,7 +1094,7 @@ set(
    FORGE_P2P_STAGE6_ACCEPTANCE_ARTIFACT
    ""
    CACHE FILEPATH
-   "Optional exact-head Stage 6 interop acceptance artifact; empty keeps PR0 source-only"
+   "Canonical exact-head Stage 6 runner artifact; empty makes the promotion target report NOT_RUN"
 )
 add_custom_target(
    test_forge_p2p_inventory
@@ -1123,6 +1126,15 @@ add_test(
    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 
+execute_process(
+   COMMAND git -C ${CMAKE_SOURCE_DIR} rev-parse HEAD
+   RESULT_VARIABLE _forge_p2p_stage6_git_result
+   OUTPUT_VARIABLE _forge_p2p_stage6_expected_head
+   OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+if(NOT _forge_p2p_stage6_git_result EQUAL 0)
+   message(FATAL_ERROR "Cannot resolve exact git HEAD for Stage 6 acceptance artifact validation")
+endif()
 if(FORGE_P2P_STAGE6_ACCEPTANCE_ARTIFACT)
    get_filename_component(
       _forge_p2p_stage6_acceptance_artifact
@@ -1130,27 +1142,25 @@ if(FORGE_P2P_STAGE6_ACCEPTANCE_ARTIFACT)
       ABSOLUTE
       BASE_DIR "${CMAKE_BINARY_DIR}"
    )
-   execute_process(
-      COMMAND git -C ${CMAKE_SOURCE_DIR} rev-parse HEAD
-      RESULT_VARIABLE _forge_p2p_stage6_git_result
-      OUTPUT_VARIABLE _forge_p2p_stage6_expected_head
-      OUTPUT_STRIP_TRAILING_WHITESPACE
+else()
+   set(
+      _forge_p2p_stage6_acceptance_artifact
+      "${CMAKE_BINARY_DIR}/interop-artifacts.json"
    )
-   if(NOT _forge_p2p_stage6_git_result EQUAL 0)
-      message(FATAL_ERROR "Cannot resolve exact git HEAD for Stage 6 acceptance artifact validation")
-   endif()
-   add_custom_target(
-      test_forge_p2p_stage6_acceptance_artifact
-      COMMAND ${Python3_EXECUTABLE}
-         ${FORGE_P2P_STAGE6_ACCEPTANCE_CHECK}
-         ${CMAKE_SOURCE_DIR}
-         ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/p2p_donor_capabilities.json
-         ${_forge_p2p_stage6_acceptance_artifact}
-         ${_forge_p2p_stage6_expected_head}
-      DEPENDS test_forge_p2p_inventory
-      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-      VERBATIM
-   )
+endif()
+add_custom_target(
+   test_forge_p2p_stage6_acceptance
+   COMMAND ${Python3_EXECUTABLE}
+      ${FORGE_P2P_STAGE6_ACCEPTANCE_CHECK}
+      ${CMAKE_SOURCE_DIR}
+      ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/p2p_donor_capabilities.json
+      ${_forge_p2p_stage6_acceptance_artifact}
+      ${_forge_p2p_stage6_expected_head}
+   DEPENDS test_forge_p2p_inventory
+   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+   VERBATIM
+)
+if(FORGE_P2P_STAGE6_ACCEPTANCE_ARTIFACT)
    add_test(
       NAME test_forge_p2p_stage6_acceptance_artifact
       COMMAND ${Python3_EXECUTABLE}

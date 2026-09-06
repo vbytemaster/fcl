@@ -942,29 +942,34 @@ def main() -> int:
         interop_registry = {}
     artifact_schema = interop_registry.get("artifact_schema", {})
     expected_artifact_schema = {
-        "schema_version": 1,
-        "claim_scope": "external_exact_head_artifact_only",
+        "schema_version": 2,
+        "claim_scope": "canonical_runner_exact_head_artifact_only",
         "required_fields": [
             "schema_version",
-            "head",
-            "manifest_sha256",
             "runner_argv",
             "started_at_unix",
             "finished_at_unix",
-            "capability_results",
+            "acceptance_manifest",
+            "artifact_root",
+            "fixture_provenance",
+            "artifacts",
+            "failures",
+            "evidence_index",
         ],
-        "result_required_fields": [
-            "capability_id",
-            "scenario_id",
+        "raw_artifact_required_fields": [
+            "dialer",
+            "listener",
+            "scenario",
+            "runner_scenario_id",
+            "acceptance_scenario_id",
             "profile",
             "transport_stack",
-            "activation",
-            "directions",
-            "status",
-            "evidence",
+            "result",
+            "listener_process",
         ],
-        "allowed_result_statuses": ["passed", "limited"],
+        "evidence_index_required_fields": ["path", "size", "sha256"],
         "passing_status": "passed",
+        "limited_status": "limited",
         "registration_is_not_verdict": True,
     }
     if artifact_schema != expected_artifact_schema:
@@ -1039,6 +1044,7 @@ def main() -> int:
             registration = scenario.get("registration")
             allowed_scenario_fields = {
                 "id",
+                "runner_scenario_id",
                 "profile",
                 "transport_stack",
                 "activation",
@@ -1047,7 +1053,7 @@ def main() -> int:
                 "expected_status",
             }
             if registration == "registered":
-                allowed_scenario_fields |= {"runner_scenario_id", "source_case_id"}
+                allowed_scenario_fields.add("source_case_id")
             elif registration == "planned" and "requires_capabilities" in scenario:
                 allowed_scenario_fields.add("requires_capabilities")
             if set(scenario) != allowed_scenario_fields:
@@ -1083,6 +1089,9 @@ def main() -> int:
                 directions = []
             if expected_status not in {"passed", "limited"}:
                 errors.append(f"donor capability {capability_id}: acceptance status is invalid")
+            runner_scenario_id = scenario.get("runner_scenario_id")
+            if not isinstance(runner_scenario_id, str) or not runner_scenario_id or "/" not in runner_scenario_id:
+                errors.append(f"donor capability {capability_id}: acceptance runner scenario id is invalid")
             if expected_status == "passed" and set(directions) == expected_primary_directions:
                 has_primary_scenario = True
             if registration == "registered":
@@ -1091,7 +1100,6 @@ def main() -> int:
                     errors.append(
                         f"donor capability {capability_id}: staged scenario cannot claim current runner registration"
                     )
-                runner_scenario_id = scenario.get("runner_scenario_id")
                 source_case_id = scenario.get("source_case_id")
                 source_case = donor_by_id.get(source_case_id)
                 if not isinstance(runner_scenario_id, str) or runner_scenario_id not in runner_scenario_ids:
@@ -1224,6 +1232,37 @@ def main() -> int:
         if actual_ids != expected_ids:
             errors.append(f"donor capability {capability_id}: acceptance scenario ids differ from Stage 6 baseline")
 
+    required_private_pnet_scenarios = {
+        "routing.kademlia_amino": {
+            "id": "kademlia_amino_private_tcp_yamux_pnet",
+            "directions": {"forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge"},
+        },
+        "discovery.rendezvous": {
+            "id": "rendezvous_rust_private_tcp_yamux_pnet",
+            "directions": {"forge_to_rust", "rust_to_forge"},
+        },
+    }
+    for capability_id, expected in required_private_pnet_scenarios.items():
+        scenarios = acceptance_capabilities.get(capability_id, {}).get("scenarios", [])
+        matching = [
+            scenario for scenario in scenarios
+            if isinstance(scenario, dict) and scenario.get("id") == expected["id"]
+        ]
+        if len(matching) != 1:
+            errors.append(f"donor capability {capability_id}: private TCP/Yamux+pnet acceptance scenario is required")
+            continue
+        scenario = matching[0]
+        if (
+            scenario.get("profile") != "private_network"
+            or scenario.get("transport_stack") != ["tcp", "yamux", "pnet"]
+            or scenario.get("activation") != "enabled"
+            or scenario.get("registration") != "planned"
+            or scenario.get("requires_capabilities") != ["security.private_network_psk"]
+            or set(scenario.get("required_directions", [])) != expected["directions"]
+            or scenario.get("runner_scenario_id") != f"private_tcp_yamux_pnet/{expected['id']}"
+        ):
+            errors.append(f"donor capability {capability_id}: private TCP/Yamux+pnet scenario is incomplete")
+
     inlined_muxer = acceptance_capabilities.get("connections.inlined_muxer_negotiation", {})
     inlined_scenarios = inlined_muxer.get("scenarios", []) if isinstance(inlined_muxer, dict) else []
     inlined_shape = {
@@ -1241,10 +1280,10 @@ def main() -> int:
 
     noise_tls_sources = capabilities_by_id.get("security.noise_tls_identity", {}).get("donor_sources", [])
     required_noise_tls_sources = {
-        "donors/go-libp2p/p2p/security/noise/handshake.go",
-        "donors/go-libp2p/p2p/security/tls/crypto.go",
-        "donors/rust-libp2p/transports/noise/src/lib.rs",
-        "donors/rust-libp2p/transports/tls/src/upgrade.rs",
+        "donors/go-libp2p/p2p/security/noise/transport.go",
+        "donors/go-libp2p/p2p/security/tls/transport.go",
+        "donors/rust-libp2p/transports/noise/src/io/handshake.rs",
+        "donors/rust-libp2p/transports/tls/src/lib.rs",
     }
     if not isinstance(noise_tls_sources, list) or not required_noise_tls_sources <= set(noise_tls_sources):
         errors.append("donor capability security.noise_tls_identity: exact Noise and TLS donor paths are required")
@@ -1253,10 +1292,10 @@ def main() -> int:
         "connections.inlined_muxer_negotiation", {}
     ).get("donor_sources", [])
     required_inlined_muxer_sources = {
-        "donors/go-libp2p/p2p/security/noise/handshake.go",
-        "donors/go-libp2p/p2p/security/tls/crypto.go",
-        "donors/rust-libp2p/transports/noise/src/lib.rs",
-        "donors/rust-libp2p/transports/tls/src/upgrade.rs",
+        "donors/go-libp2p/p2p/security/noise/transport.go",
+        "donors/go-libp2p/p2p/security/tls/transport.go",
+        "donors/rust-libp2p/transports/noise/src/io/handshake.rs",
+        "donors/rust-libp2p/transports/tls/src/lib.rs",
     }
     if not isinstance(inlined_muxer_sources, list) or not required_inlined_muxer_sources <= set(
         inlined_muxer_sources
