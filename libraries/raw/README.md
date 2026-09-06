@@ -33,6 +33,9 @@ Target: `forge_raw`.
 Dependencies: `forge_core`, `forge_exceptions`, `forge_reflect`, `forge_variant`,
 Boost headers and Boost.Multiprecision.
 
+`forge_raw` owns the retained FC wire conversion for supported `std::chrono`
+types and intentionally does not depend on `forge_chrono`.
+
 `unpack_limits` bounds per-container, cumulative-container and byte
 allocations. A framed codec that decodes nested Raw payloads through
 `unpack_nested_exact(parent, frame)` inherits the parent's configured

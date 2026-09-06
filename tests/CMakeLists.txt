@@ -106,7 +106,6 @@ add_test(
 add_executable(
    test_forge
    unit/main.cpp
-   core/test_chrono.cpp
    core/test_escape_str.cpp
    variant/test_static_variant.cpp
    variant/test_variant.cpp
@@ -135,6 +134,26 @@ target_sources(
 target_link_libraries(test_forge forge Boost::included_unit_test_framework)
 add_test(NAME test_forge COMMAND test_forge WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
+add_executable(test_forge_chrono unit/main.cpp chrono/test_chrono.cpp)
+target_link_libraries(test_forge_chrono forge_chrono Boost::included_unit_test_framework)
+add_test(NAME test_forge_chrono COMMAND test_forge_chrono WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+add_executable(
+   test_forge_variant
+   unit/main.cpp
+   variant/test_static_variant.cpp
+   variant/test_variant.cpp
+   variant/test_variant_dynamic_bitset.cpp
+   variant/test_variant_estimated_size.cpp
+)
+target_link_libraries(
+   test_forge_variant
+   forge_codec_base64
+   forge_variant
+   Boost::included_unit_test_framework
+)
+add_test(NAME test_forge_variant COMMAND test_forge_variant WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
 add_executable(
    test_forge_exceptions
    unit/main.cpp
@@ -148,7 +167,7 @@ add_executable(
    unit/main.cpp
    log/log_tests.cpp
 )
-target_link_libraries(test_forge_log forge Boost::included_unit_test_framework)
+target_link_libraries(test_forge_log forge_log Boost::included_unit_test_framework)
 add_test(NAME test_forge_log COMMAND test_forge_log WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 add_executable(
@@ -192,7 +211,13 @@ add_executable(
    unit/main.cpp
    raw/test_raw.cpp
 )
-target_link_libraries(test_forge_raw forge Boost::included_unit_test_framework)
+target_link_libraries(
+   test_forge_raw
+   forge_codec_hex
+   forge_crypto_digest
+   forge_raw
+   Boost::included_unit_test_framework
+)
 add_test(NAME test_forge_raw COMMAND test_forge_raw WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 add_executable(
@@ -1636,6 +1661,19 @@ add_custom_target(
    DEPENDS test_forge_package_install
 )
 add_custom_target(
+   test_forge_package_chrono_component
+   COMMAND ${CMAKE_CTEST_COMMAND}
+      --build-and-test
+      ${CMAKE_CURRENT_SOURCE_DIR}/package_chrono_component
+      ${CMAKE_BINARY_DIR}/forge-package-chrono-component
+      --build-generator ${CMAKE_GENERATOR}
+      --build-options
+         ${FORGE_PACKAGE_CONSUMER_BUILD_OPTIONS}
+         -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON
+      --test-command forge_package_chrono_component
+   DEPENDS test_forge_package_install
+)
+add_custom_target(
    test_forge_package_crypto_core_component
    COMMAND ${CMAKE_CTEST_COMMAND}
       --build-and-test
@@ -2569,6 +2607,19 @@ add_test(
       --test-command forge_package_codec_base32_component
 )
 set_tests_properties(test_forge_package_codec_base32_component PROPERTIES DEPENDS test_forge_package_install)
+add_test(
+   NAME test_forge_package_chrono_component
+   COMMAND ${CMAKE_CTEST_COMMAND}
+      --build-and-test
+      ${CMAKE_CURRENT_SOURCE_DIR}/package_chrono_component
+      ${CMAKE_BINARY_DIR}/forge-package-chrono-component
+      --build-generator ${CMAKE_GENERATOR}
+      --build-options
+         ${FORGE_PACKAGE_CONSUMER_BUILD_OPTIONS}
+         -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON
+      --test-command forge_package_chrono_component
+)
+set_tests_properties(test_forge_package_chrono_component PROPERTIES DEPENDS test_forge_package_install)
 add_test(
    NAME test_forge_package_crypto_core_component
    COMMAND ${CMAKE_CTEST_COMMAND}

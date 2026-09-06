@@ -12,10 +12,12 @@ module;
 #include <filesystem>
 #include <flat_map>
 #include <list>
+#include <limits>
 #include <map>
 #include <memory>
 #include <new>
 #include <set>
+#include <stdexcept>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -24,7 +26,6 @@ export module forge.raw.raw;
 
 export import forge.raw.codec;
 
-import forge.core.chrono;
 import forge.core.utility;
 import forge.core.uint128;
 import forge.exceptions;
@@ -203,34 +204,39 @@ template <typename Stream> void host_unpack(Stream& stream, std::filesystem::pat
 }
 
 template <typename Stream> void host_pack(Stream& stream, const std::chrono::sys_seconds& value) {
-   pack(stream, forge::chrono::to_fc_time_point_sec_wire(value));
+   const auto count = value.time_since_epoch().count();
+   if (count < 0 || count > std::numeric_limits<std::uint32_t>::max()) {
+      throw std::out_of_range{"sys_seconds is outside FC time_point_sec wire range"};
+   }
+   pack(stream, static_cast<std::uint32_t>(count));
 }
 
 template <typename Stream> void host_unpack(Stream& stream, std::chrono::sys_seconds& value) {
    auto seconds = std::uint32_t{};
    unpack(stream, seconds);
-   value = forge::chrono::from_fc_time_point_sec_wire(seconds);
+   value = std::chrono::sys_seconds{std::chrono::seconds{seconds}};
 }
 
 template <typename Stream>
 void host_pack(Stream& stream, const std::chrono::sys_time<std::chrono::microseconds>& value) {
-   pack(stream, forge::chrono::to_fc_time_point_wire(value));
+   pack(stream, static_cast<std::uint64_t>(value.time_since_epoch().count()));
 }
 
 template <typename Stream> void host_unpack(Stream& stream, std::chrono::sys_time<std::chrono::microseconds>& value) {
    auto microseconds = std::uint64_t{};
    unpack(stream, microseconds);
-   value = forge::chrono::from_fc_time_point_wire(microseconds);
+   value = std::chrono::sys_time<std::chrono::microseconds>{
+       std::chrono::microseconds{static_cast<std::int64_t>(microseconds)}};
 }
 
 template <typename Stream> void host_pack(Stream& stream, const std::chrono::microseconds& value) {
-   pack(stream, forge::chrono::to_fc_microseconds_wire(value));
+   pack(stream, static_cast<std::uint64_t>(value.count()));
 }
 
 template <typename Stream> void host_unpack(Stream& stream, std::chrono::microseconds& value) {
    auto microseconds = std::uint64_t{};
    unpack(stream, microseconds);
-   value = forge::chrono::from_fc_microseconds_wire(microseconds);
+   value = std::chrono::microseconds{static_cast<std::int64_t>(microseconds)};
 }
 
 template <typename Stream> void host_pack(Stream& stream, const forge::uint128& value) {

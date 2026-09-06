@@ -236,6 +236,7 @@ set_target_properties(
 set(
    FORGE_SOURCE_INCLUDE_DIRS
    "${CMAKE_CURRENT_SOURCE_DIR}/libraries/core/include"
+   "${CMAKE_CURRENT_SOURCE_DIR}/libraries/chrono/include"
    "${CMAKE_CURRENT_SOURCE_DIR}/libraries/exceptions/include"
    "${CMAKE_CURRENT_SOURCE_DIR}/libraries/reflect/include"
    "${CMAKE_CURRENT_SOURCE_DIR}/libraries/schema/include"
@@ -570,6 +571,7 @@ function(forge_target_contract_guest_component target)
 endfunction()
 
 add_subdirectory(libraries/core)
+add_subdirectory(libraries/chrono)
 add_subdirectory(libraries/exceptions)
 add_subdirectory(libraries/codec/base32)
 add_subdirectory(libraries/codec/base64)
@@ -593,6 +595,7 @@ add_subdirectory(libraries/asio)
 set(
    FORGE_LEAF_TARGETS
    forge_core
+   forge_chrono
    forge_exceptions
    forge_reflect
    forge_schema
@@ -753,6 +756,7 @@ endforeach()
 set(
    FORGE_BUILT_COMPONENTS
    core
+   chrono
    exceptions
    reflect
    schema
@@ -912,6 +916,7 @@ install(
 set(
    FORGE_INSTALL_INCLUDE_DIRS
    libraries/core/include/forge
+   libraries/chrono/include/forge
    libraries/exceptions/include/forge
    libraries/reflect/include/forge
    libraries/schema/include/forge
@@ -1099,6 +1104,14 @@ install(
    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Forge
    COMPONENT dev
    EXCLUDE_FROM_ALL
+)
+
+# Keep the configured build-tree package usable by focused component consumers
+# without requiring a full install of every Forge leaf.
+export(
+   EXPORT ForgeTargets
+   FILE "${CMAKE_CURRENT_BINARY_DIR}/ForgeTargets.cmake"
+   NAMESPACE Forge::
 )
 
 configure_package_config_file(

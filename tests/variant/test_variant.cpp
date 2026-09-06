@@ -13,7 +13,6 @@ import forge.variant.chrono;
 import forge.variant.multiprecision;
 import forge.variant.format;
 import forge.variant.described;
-import forge.core.chrono;
 import forge.exceptions;
 import forge.codec.base64;
 using namespace forge;

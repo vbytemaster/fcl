@@ -6,7 +6,6 @@ logging or network dependencies.
 
 ## When To Use
 
-- Нужно разобрать/сформатировать `std::chrono` timestamps в FC-compatible форме.
 - Нужны безопасные string/UTF-8 helpers, `uint128`, type names or version metadata.
 - Нужно написать библиотеку верхнего уровня и не создать обратную зависимость на
   `variant`, `raw`, `json`, `log` or `crypto`.
@@ -20,7 +19,6 @@ logging or network dependencies.
 
 ## Public Modules
 
-- `forge.core.chrono` — ISO helpers and FC wire conversions for `std::chrono`.
 - `forge.core.string` — numeric parsing and escaped string formatting.
 - `forge.core.type_name` — diagnostic-friendly type names.
 - `forge.core.uint128` — retained 128-bit value support.
@@ -45,27 +43,6 @@ auto value = forge::to_uint64("18446744073709551615");
 auto printable = forge::escape_str("line\nbreak", 64);
 ```
 
-### Use Std Chrono With FC Wire Helpers
-
-```cpp
-import forge.core.chrono;
-
-auto time = forge::chrono::from_iso_time_point("2026-05-12T08:30:00.000001");
-auto wire = forge::chrono::to_fc_time_point_wire(time); // uint64 microseconds
-auto restored = forge::chrono::from_fc_time_point_wire(wire);
-auto text = forge::chrono::to_iso_string(restored);
-```
-
-### Work With Seconds-Level Contract Times
-
-```cpp
-import forge.core.chrono;
-
-auto deadline = std::chrono::sys_seconds{std::chrono::seconds{1}};
-auto wire = forge::chrono::to_fc_time_point_sec_wire(deadline); // uint32 seconds
-auto decoded = forge::chrono::from_fc_time_point_sec_wire(wire);
-```
-
 ## Risks And Anti-Patterns
 
 - Do not use core helpers to hide application policy. If a rule depends on files,
@@ -84,6 +61,5 @@ auto decoded = forge::chrono::from_fc_time_point_sec_wire(wire);
 
 ## Tests
 
-`tests/core` covers chrono ISO/wire compatibility, string escaping and retained
-low-level behavior. Any new `core` API must prove it does not depend on upper
-FORGE domains.
+`tests/core` covers string escaping and retained low-level behavior. Any new
+`core` API must prove it does not depend on upper FORGE domains.

@@ -874,8 +874,9 @@ Rust-supported with an explicit Go limitation: no
 official Go rendezvous behaviour donor is pinned, so it cannot be presented as
 Go-compatible.
 
-`forge_chrono` remains algorithms-only: it supplies deadline, expiry, backoff
-and jitter calculations but owns no clock, scheduler or P2P lifecycle.
+`forge_chrono` supplies only formatting and parsing for explicit
+`std::chrono` timestamps; it owns no clock, scheduler, deadline/backoff policy
+or P2P lifecycle.
 `forge-crypto-xsalsa20-v1` requires pinned `libsodium`; address resolution over
 `net_dns` requires pinned `c-ares`. Those dependency checks and focused tests
 belong to their runtime PRs. Official plugin configuration mapping is Stage 7

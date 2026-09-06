@@ -7,7 +7,6 @@ configure_file(
 
 add_library(
    forge_core STATIC
-   chrono.cpp
    string.cpp
    uint128.cpp
    utf8.cpp
@@ -23,7 +22,6 @@ target_include_directories(
 target_link_libraries(
    forge_core PRIVATE
       Boost::headers
-      Boost::date_time
       Boost::multiprecision
 )
 target_compile_definitions(

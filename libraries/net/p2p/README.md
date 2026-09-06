@@ -152,6 +152,11 @@ Foundation compatibility modules below P2P live in `forge_multiformats`:
 `forge.multiformats.multihash`, `forge.multiformats.multibase` and
 first-class multiaddr/address support.
 
+IPNS retains its domain-specific seconds-plus-subsecond EOL timestamp and
+RFC3339Nano codec. Libp2p-compatible IPNS EOL values may reach year 9999,
+outside the `int64` `sys_time<nanoseconds>` range after 2262; therefore
+`forge_net_p2p` does not depend on `forge_chrono` for IPNS wire handling.
+
 ## Production Network Direction
 
 `forge_net_p2p` is the owner for production peer-network mechanics. The direction is
