@@ -1,11 +1,15 @@
 module;
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 
 module forge.net.p2p.resource_manager;
 
@@ -13,7 +17,79 @@ module forge.net.p2p.resource_manager;
 
 namespace forge::net::p2p {
 
-resource_manager::state::state(limits value) noexcept : limits_(value) {}
+namespace {
+
+template <typename T> [[nodiscard]] bool can_add(T current, T delta, T limit) noexcept {
+   return current <= limit && delta <= limit - current;
+}
+
+template <typename T> [[nodiscard]] T saturating_sum(T left, T right) noexcept {
+   const auto maximum = (std::numeric_limits<T>::max)();
+   return left > maximum - right ? maximum : left + right;
+}
+
+[[nodiscard]] std::size_t total_connections(const resource_manager::scope_totals& value) noexcept {
+   return saturating_sum(value.inbound_connections, value.outbound_connections);
+}
+
+[[nodiscard]] std::size_t total_streams(const resource_manager::scope_totals& value) noexcept {
+   return saturating_sum(value.inbound_streams, value.outbound_streams);
+}
+
+[[nodiscard]] resource_manager::scope_totals connection_delta(resource_manager::session_direction direction) noexcept {
+   auto result = resource_manager::scope_totals{};
+   if (direction == resource_manager::session_direction::inbound) {
+      result.inbound_connections = 1;
+   } else {
+      result.outbound_connections = 1;
+   }
+   return result;
+}
+
+[[nodiscard]] resource_manager::scope_totals stream_delta(resource_manager::session_direction direction) noexcept {
+   auto result = resource_manager::scope_totals{};
+   if (direction == resource_manager::session_direction::inbound) {
+      result.inbound_streams = 1;
+   } else {
+      result.outbound_streams = 1;
+   }
+   return result;
+}
+
+[[nodiscard]] bool empty(const resource_manager::scope_totals& value) noexcept {
+   return value.memory == 0 && value.file_descriptors == 0 && value.inbound_connections == 0 &&
+          value.outbound_connections == 0 && value.inbound_streams == 0 && value.outbound_streams == 0;
+}
+
+void add_saturating(resource_manager::scope_totals& target, const resource_manager::scope_totals& source) noexcept {
+   target.memory = saturating_sum(target.memory, source.memory);
+   target.file_descriptors = saturating_sum(target.file_descriptors, source.file_descriptors);
+   target.inbound_connections = saturating_sum(target.inbound_connections, source.inbound_connections);
+   target.outbound_connections = saturating_sum(target.outbound_connections, source.outbound_connections);
+   target.inbound_streams = saturating_sum(target.inbound_streams, source.inbound_streams);
+   target.outbound_streams = saturating_sum(target.outbound_streams, source.outbound_streams);
+}
+
+[[nodiscard]] std::uint64_t priority_threshold(std::uint64_t limit,
+                                               resource_manager::memory_priority priority) noexcept {
+   if (limit == (std::numeric_limits<std::uint64_t>::max)()) {
+      return limit;
+   }
+   const auto factor = static_cast<std::uint64_t>(static_cast<std::uint8_t>(priority)) + 1;
+   const auto quotient = limit / 256;
+   const auto remainder = limit % 256;
+   return quotient * factor + (remainder * factor) / 256;
+}
+
+// The commit phase changes counters only after every potentially allocating
+// operation has completed. These swaps therefore cannot bypass rollback.
+static_assert(noexcept(std::declval<std::optional<peer_id>&>().swap(std::declval<std::optional<peer_id>&>())));
+static_assert(noexcept(std::declval<std::optional<protocol_id>&>().swap(std::declval<std::optional<protocol_id>&>())));
+static_assert(noexcept(std::declval<std::optional<std::string>&>().swap(std::declval<std::optional<std::string>&>())));
+
+} // namespace
+
+resource_manager::state::state(limits value) noexcept : limits_(std::move(value)) {}
 
 const resource_manager::limits& resource_manager::state::configured_limits() const noexcept {
    return limits_;
@@ -22,84 +98,378 @@ const resource_manager::limits& resource_manager::state::configured_limits() con
 resource_manager::snapshot resource_manager::state::current() const noexcept {
    auto lock = std::scoped_lock{mutex_};
    auto out = snapshot_;
-   out.active_peer_scopes = streams_by_peer_.size();
-   out.active_protocol_scopes = streams_by_protocol_.size();
-   out.active_session_peer_scopes = sessions_by_peer_.size();
+   out.system = system_.usage;
+   out.transient = transient_.usage;
+   out.connections = connections_.usage;
+   out.streams = streams_.usage;
+   const auto aggregate = [](const auto& accounts) {
+      auto result = scope_totals{};
+      for (const auto& [_, account] : accounts) {
+         add_saturating(result, account.usage);
+      }
+      return result;
+   };
+   const auto aggregate_nested = [](const auto& accounts) {
+      auto result = scope_totals{};
+      for (const auto& [_, per_peer] : accounts) {
+         for (const auto& [__, account] : per_peer) {
+            add_saturating(result, account.usage);
+         }
+      }
+      return result;
+   };
+   const auto count_active = [](const auto& accounts) {
+      return static_cast<std::size_t>(std::count_if(accounts.begin(), accounts.end(),
+                                                    [](const auto& entry) { return !empty(entry.second.usage); }));
+   };
+   const auto count_active_nested = [](const auto& accounts) {
+      auto count = std::size_t{0};
+      for (const auto& [_, per_peer] : accounts) {
+         count += static_cast<std::size_t>(std::count_if(per_peer.begin(), per_peer.end(),
+                                                         [](const auto& entry) { return !empty(entry.second.usage); }));
+      }
+      return count;
+   };
+   out.peers = aggregate(peers_);
+   out.protocols = aggregate(protocols_);
+   out.services = aggregate(services_);
+   out.protocol_peers = aggregate_nested(protocol_peers_);
+   out.service_peers = aggregate_nested(service_peers_);
+   out.active_peer_scopes = count_active(peers_);
+   out.active_protocol_scopes = count_active(protocols_);
+   out.active_service_scopes = count_active(services_);
+   out.active_protocol_peer_scopes = count_active_nested(protocol_peers_);
+   out.active_service_peer_scopes = count_active_nested(service_peers_);
    out.dial_attempt_scopes = dial_attempts_by_peer_.size();
+   out.relay_reservation_scopes = relay_reservations_by_peer_.size();
    out.malformed_scopes = malformed_by_peer_.size();
    return out;
 }
 
-bool resource_manager::state::deny_locked(std::uint64_t& reason) noexcept {
+std::shared_ptr<resource_manager::ledger> resource_manager::state::make_ledger_locked() noexcept {
+   if (next_ledger_id_ == 0) {
+      record_runtime_failure_locked();
+      return nullptr;
+   }
+   try {
+      auto result = std::make_shared<ledger>();
+      result->id = next_ledger_id_++;
+      return result;
+   } catch (...) {
+      record_runtime_failure_locked();
+      return nullptr;
+   }
+}
+
+bool resource_manager::state::reject_limit_locked(std::uint64_t& reason) noexcept {
    ++snapshot_.denied;
    ++reason;
    return false;
 }
 
-bool resource_manager::state::acquire_pending(session_direction direction) noexcept {
-   auto lock = std::scoped_lock{mutex_};
-   auto& current = direction == session_direction::inbound ? snapshot_.pending_inbound_sessions
-                                                           : snapshot_.pending_outbound_sessions;
-   const auto limit = direction == session_direction::inbound ? limits_.max_pending_inbound_sessions
-                                                              : limits_.max_pending_outbound_sessions;
-   if (current >= limit) {
-      return deny_locked(snapshot_.denied_sessions);
-   }
-   ++current;
-   return true;
+bool resource_manager::state::reject_invalid_transition_locked() noexcept {
+   ++snapshot_.invalid_transitions;
+   return false;
 }
 
-bool resource_manager::state::establish_session(session_scope value) noexcept {
-   auto lock = std::scoped_lock{mutex_};
-   if (value.peer.value.empty()) {
-      return deny_locked(snapshot_.denied_sessions);
-   }
-   const auto found = sessions_by_peer_.find(value.peer);
-   const auto peer_sessions = found == sessions_by_peer_.end() ? 0 : found->second;
-   const auto inbound = value.direction == session_direction::inbound;
-   if (peer_sessions >= limits_.max_sessions_per_peer ||
-       (inbound && snapshot_.active_inbound_sessions >= limits_.max_inbound_sessions) ||
-       (!inbound && snapshot_.active_outbound_sessions >= limits_.max_outbound_sessions)) {
-      return deny_locked(snapshot_.denied_sessions);
-   }
-   ++sessions_by_peer_[value.peer];
-   if (inbound) {
-      ++snapshot_.active_inbound_sessions;
-   } else {
-      ++snapshot_.active_outbound_sessions;
-   }
-   return true;
+void resource_manager::state::record_runtime_failure_locked() noexcept {
+   ++snapshot_.runtime_failures;
 }
 
-void resource_manager::state::release_pending(session_direction direction) noexcept {
-   auto lock = std::scoped_lock{mutex_};
-   auto& current = direction == session_direction::inbound ? snapshot_.pending_inbound_sessions
-                                                           : snapshot_.pending_outbound_sessions;
-   if (current > 0) {
-      --current;
+bool resource_manager::state::can_add_locked(const scope_account& account, const scope_limits& limits,
+                                             const scope_totals& delta, memory_priority priority) const noexcept {
+   if (!can_add(account.usage.memory, delta.memory, limits.max_memory)) {
+      return false;
+   }
+   const auto new_memory = account.usage.memory + delta.memory;
+   if (new_memory > priority_threshold(limits.max_memory, priority)) {
+      return false;
+   }
+   return can_add(account.usage.file_descriptors, delta.file_descriptors, limits.max_file_descriptors) &&
+          can_add(account.usage.inbound_connections, delta.inbound_connections, limits.max_inbound_connections) &&
+          can_add(account.usage.outbound_connections, delta.outbound_connections, limits.max_outbound_connections) &&
+          can_add(total_connections(account.usage), total_connections(delta), limits.max_connections) &&
+          can_add(account.usage.inbound_streams, delta.inbound_streams, limits.max_inbound_streams) &&
+          can_add(account.usage.outbound_streams, delta.outbound_streams, limits.max_outbound_streams) &&
+          can_add(total_streams(account.usage), total_streams(delta), limits.max_streams);
+}
+
+bool resource_manager::state::can_remove_locked(const scope_account& account,
+                                                const scope_totals& delta) const noexcept {
+   return account.usage.memory >= delta.memory && account.usage.file_descriptors >= delta.file_descriptors &&
+          account.usage.inbound_connections >= delta.inbound_connections &&
+          account.usage.outbound_connections >= delta.outbound_connections &&
+          account.usage.inbound_streams >= delta.inbound_streams &&
+          account.usage.outbound_streams >= delta.outbound_streams;
+}
+
+bool resource_manager::state::can_add_to_current_scopes_locked(const ledger& value, const scope_totals& delta,
+                                                               memory_priority priority) const noexcept {
+   if (!can_add_locked(system_, limits_.system, delta, priority)) {
+      return false;
+   }
+   if (value.transient && !can_add_locked(transient_, limits_.transient, delta, priority)) {
+      return false;
+   }
+   if (value.peer) {
+      const auto peer = peers_.find(*value.peer);
+      if (peer == peers_.end() || !can_add_locked(peer->second, limits_.peer, delta, priority)) {
+         return false;
+      }
+   }
+   if (value.protocol) {
+      const auto protocol = protocols_.find(value.protocol->value);
+      const auto peer = protocol_peers_.find(*value.peer);
+      if (protocol == protocols_.end() || peer == protocol_peers_.end()) {
+         return false;
+      }
+      const auto protocol_peer = peer->second.find(value.protocol->value);
+      if (protocol_peer == peer->second.end() || !can_add_locked(protocol->second, limits_.protocol, delta, priority) ||
+          !can_add_locked(protocol_peer->second, limits_.protocol_peer, delta, priority)) {
+         return false;
+      }
+   }
+   if (value.service) {
+      const auto service = services_.find(*value.service);
+      const auto peer = service_peers_.find(*value.peer);
+      if (service == services_.end() || peer == service_peers_.end()) {
+         return false;
+      }
+      const auto service_peer = peer->second.find(*value.service);
+      if (service_peer == peer->second.end() || !can_add_locked(service->second, limits_.service, delta, priority) ||
+          !can_add_locked(service_peer->second, limits_.service_peer, delta, priority)) {
+         return false;
+      }
+   }
+   const auto local = scope_account{.usage = value.usage};
+   if (value.value_kind == ledger::kind::connection) {
+      return can_add_locked(local, limits_.connection, delta, priority);
+   }
+   return value.value_kind != ledger::kind::stream || can_add_locked(local, limits_.stream, delta, priority);
+}
+
+bool resource_manager::state::can_remove_from_current_scopes_locked(const ledger& value,
+                                                                    const scope_totals& delta) const noexcept {
+   if (!can_remove_locked(system_, delta) || (value.transient && !can_remove_locked(transient_, delta))) {
+      return false;
+   }
+   if (value.peer) {
+      const auto peer = peers_.find(*value.peer);
+      if (peer == peers_.end() || !can_remove_locked(peer->second, delta)) {
+         return false;
+      }
+   }
+   if (value.protocol) {
+      const auto protocol = protocols_.find(value.protocol->value);
+      const auto peer = protocol_peers_.find(*value.peer);
+      if (protocol == protocols_.end() || peer == protocol_peers_.end()) {
+         return false;
+      }
+      const auto protocol_peer = peer->second.find(value.protocol->value);
+      if (protocol_peer == peer->second.end() || !can_remove_locked(protocol->second, delta) ||
+          !can_remove_locked(protocol_peer->second, delta)) {
+         return false;
+      }
+   }
+   if (value.service) {
+      const auto service = services_.find(*value.service);
+      const auto peer = service_peers_.find(*value.peer);
+      if (service == services_.end() || peer == service_peers_.end()) {
+         return false;
+      }
+      const auto service_peer = peer->second.find(*value.service);
+      if (service_peer == peer->second.end() || !can_remove_locked(service->second, delta) ||
+          !can_remove_locked(service_peer->second, delta)) {
+         return false;
+      }
+   }
+   if (value.value_kind == ledger::kind::connection && !can_remove_locked(connections_, delta)) {
+      return false;
+   }
+   return value.value_kind != ledger::kind::stream || can_remove_locked(streams_, delta);
+}
+
+void resource_manager::state::add_locked(scope_account& account, const scope_totals& delta) noexcept {
+   account.usage.memory += delta.memory;
+   account.usage.file_descriptors += delta.file_descriptors;
+   account.usage.inbound_connections += delta.inbound_connections;
+   account.usage.outbound_connections += delta.outbound_connections;
+   account.usage.inbound_streams += delta.inbound_streams;
+   account.usage.outbound_streams += delta.outbound_streams;
+}
+
+void resource_manager::state::remove_locked(scope_account& account, const scope_totals& delta) noexcept {
+   account.usage.memory -= delta.memory;
+   account.usage.file_descriptors -= delta.file_descriptors;
+   account.usage.inbound_connections -= delta.inbound_connections;
+   account.usage.outbound_connections -= delta.outbound_connections;
+   account.usage.inbound_streams -= delta.inbound_streams;
+   account.usage.outbound_streams -= delta.outbound_streams;
+}
+
+void resource_manager::state::add_to_current_scopes_locked(const ledger& value, const scope_totals& delta) noexcept {
+   add_locked(system_, delta);
+   if (value.transient) {
+      add_locked(transient_, delta);
+   }
+   if (value.peer) {
+      add_locked(peers_.find(*value.peer)->second, delta);
+   }
+   if (value.protocol) {
+      add_locked(protocols_.find(value.protocol->value)->second, delta);
+      add_locked(protocol_peers_.find(*value.peer)->second.find(value.protocol->value)->second, delta);
+   }
+   if (value.service) {
+      add_locked(services_.find(*value.service)->second, delta);
+      add_locked(service_peers_.find(*value.peer)->second.find(*value.service)->second, delta);
+   }
+   if (value.value_kind == ledger::kind::connection) {
+      add_locked(connections_, delta);
+   } else if (value.value_kind == ledger::kind::stream) {
+      add_locked(streams_, delta);
    }
 }
 
-void resource_manager::state::release_session(const session_scope& value) noexcept {
-   auto lock = std::scoped_lock{mutex_};
-   auto& current = value.direction == session_direction::inbound ? snapshot_.active_inbound_sessions
-                                                                 : snapshot_.active_outbound_sessions;
-   if (current > 0) {
-      --current;
+void resource_manager::state::remove_from_current_scopes_locked(const ledger& value,
+                                                                const scope_totals& delta) noexcept {
+   remove_locked(system_, delta);
+   if (value.transient) {
+      remove_locked(transient_, delta);
    }
-   if (auto found = sessions_by_peer_.find(value.peer); found != sessions_by_peer_.end()) {
-      if (found->second > 1) {
-         --found->second;
-      } else {
-         sessions_by_peer_.erase(found);
+   if (value.peer) {
+      remove_locked(peers_.find(*value.peer)->second, delta);
+   }
+   if (value.protocol) {
+      remove_locked(protocols_.find(value.protocol->value)->second, delta);
+      remove_locked(protocol_peers_.find(*value.peer)->second.find(value.protocol->value)->second, delta);
+   }
+   if (value.service) {
+      remove_locked(services_.find(*value.service)->second, delta);
+      remove_locked(service_peers_.find(*value.peer)->second.find(*value.service)->second, delta);
+   }
+   if (value.value_kind == ledger::kind::connection) {
+      remove_locked(connections_, delta);
+   } else if (value.value_kind == ledger::kind::stream) {
+      remove_locked(streams_, delta);
+   }
+}
+
+void resource_manager::state::cleanup_scopes_locked(const ledger& value) noexcept {
+   if (value.protocol) {
+      if (const auto protocol = protocols_.find(value.protocol->value);
+          protocol != protocols_.end() && empty(protocol->second.usage)) {
+         protocols_.erase(protocol);
+      }
+      if (const auto peer = protocol_peers_.find(*value.peer); peer != protocol_peers_.end()) {
+         if (const auto protocol = peer->second.find(value.protocol->value);
+             protocol != peer->second.end() && empty(protocol->second.usage)) {
+            peer->second.erase(protocol);
+         }
+         if (peer->second.empty()) {
+            protocol_peers_.erase(peer);
+         }
+      }
+   }
+   if (value.service) {
+      if (const auto service = services_.find(*value.service);
+          service != services_.end() && empty(service->second.usage)) {
+         services_.erase(service);
+      }
+      if (const auto peer = service_peers_.find(*value.peer); peer != service_peers_.end()) {
+         if (const auto service = peer->second.find(*value.service);
+             service != peer->second.end() && empty(service->second.usage)) {
+            peer->second.erase(service);
+         }
+         if (peer->second.empty()) {
+            service_peers_.erase(peer);
+         }
+      }
+   }
+   if (value.peer) {
+      if (const auto peer = peers_.find(*value.peer); peer != peers_.end() && empty(peer->second.usage)) {
+         peers_.erase(peer);
       }
    }
 }
 
-bool resource_manager::state::acquire_dial() noexcept {
+std::shared_ptr<resource_manager::ledger> resource_manager::state::reserve_lifecycle() noexcept {
+   auto lock = std::scoped_lock{mutex_};
+   return make_ledger_locked();
+}
+
+std::shared_ptr<resource_manager::ledger>
+resource_manager::state::reserve_session(session_direction direction) noexcept {
+   auto lock = std::scoped_lock{mutex_};
+   const auto delta = connection_delta(direction);
+   const auto local = scope_account{};
+   if (!can_add_locked(system_, limits_.system, delta, memory_priority::always) ||
+       !can_add_locked(transient_, limits_.transient, delta, memory_priority::always) ||
+       !can_add_locked(local, limits_.connection, delta, memory_priority::always)) {
+      static_cast<void>(reject_limit_locked(snapshot_.denied_connections));
+      return nullptr;
+   }
+   auto result = make_ledger_locked();
+   if (!result) {
+      return nullptr;
+   }
+   result->value_kind = ledger::kind::connection;
+   result->direction = direction;
+   result->usage = delta;
+   result->transient = true;
+   add_to_current_scopes_locked(*result, delta);
+   return result;
+}
+
+std::shared_ptr<resource_manager::ledger>
+resource_manager::state::reserve_stream(peer_id peer, session_direction direction) noexcept {
+   auto lock = std::scoped_lock{mutex_};
+   if (peer.value.empty()) {
+      static_cast<void>(reject_invalid_transition_locked());
+      return nullptr;
+   }
+   const auto delta = stream_delta(direction);
+   const auto local = scope_account{};
+   auto peer_scope = peers_.end();
+   auto peer_inserted = false;
+   try {
+      std::tie(peer_scope, peer_inserted) = peers_.try_emplace(peer);
+      if (!can_add_locked(system_, limits_.system, delta, memory_priority::always) ||
+          !can_add_locked(transient_, limits_.transient, delta, memory_priority::always) ||
+          !can_add_locked(peer_scope->second, limits_.peer, delta, memory_priority::always) ||
+          !can_add_locked(local, limits_.stream, delta, memory_priority::always)) {
+         if (peer_inserted && empty(peer_scope->second.usage)) {
+            peers_.erase(peer_scope);
+         }
+         static_cast<void>(reject_limit_locked(snapshot_.denied_streams));
+         return nullptr;
+      }
+      auto result = make_ledger_locked();
+      if (!result) {
+         if (peer_inserted && empty(peer_scope->second.usage)) {
+            peers_.erase(peer_scope);
+         }
+         return nullptr;
+      }
+      result->value_kind = ledger::kind::stream;
+      result->direction = direction;
+      result->usage = delta;
+      result->peer = std::move(peer);
+      result->transient = true;
+      add_to_current_scopes_locked(*result, delta);
+      return result;
+   } catch (...) {
+      if (peer_inserted && peer_scope != peers_.end() && empty(peer_scope->second.usage)) {
+         peers_.erase(peer_scope);
+      }
+      record_runtime_failure_locked();
+      return nullptr;
+   }
+}
+
+bool resource_manager::state::reserve_dial() noexcept {
    auto lock = std::scoped_lock{mutex_};
    if (snapshot_.active_dials >= limits_.max_dial_attempts) {
-      return deny_locked(snapshot_.denied_dials);
+      return reject_limit_locked(snapshot_.denied_dials);
    }
    ++snapshot_.active_dials;
    return true;
@@ -108,14 +478,22 @@ bool resource_manager::state::acquire_dial() noexcept {
 bool resource_manager::state::bind_dial(const peer_id& peer) noexcept {
    auto lock = std::scoped_lock{mutex_};
    if (peer.value.empty()) {
-      return deny_locked(snapshot_.denied_dials);
+      return reject_invalid_transition_locked();
    }
-   auto& attempts = dial_attempts_by_peer_[peer];
+   const auto found = dial_attempts_by_peer_.find(peer);
+   const auto attempts = found == dial_attempts_by_peer_.end() ? 0 : found->second;
    if (attempts >= limits_.max_dial_attempts_per_peer) {
-      return deny_locked(snapshot_.denied_dials);
+      return reject_limit_locked(snapshot_.denied_dials);
    }
-   ++attempts;
-   return true;
+   try {
+      auto [entry, inserted] = dial_attempts_by_peer_.try_emplace(peer);
+      static_cast<void>(inserted);
+      ++entry->second;
+      return true;
+   } catch (...) {
+      record_runtime_failure_locked();
+      return false;
+   }
 }
 
 void resource_manager::state::release_dial(const std::optional<peer_id>& peer) noexcept {
@@ -126,7 +504,7 @@ void resource_manager::state::release_dial(const std::optional<peer_id>& peer) n
    if (!peer) {
       return;
    }
-   if (auto found = dial_attempts_by_peer_.find(*peer); found != dial_attempts_by_peer_.end()) {
+   if (const auto found = dial_attempts_by_peer_.find(*peer); found != dial_attempts_by_peer_.end()) {
       if (found->second > 1) {
          --found->second;
       } else {
@@ -135,71 +513,24 @@ void resource_manager::state::release_dial(const std::optional<peer_id>& peer) n
    }
 }
 
-bool resource_manager::state::acquire_stream(bool relay) noexcept {
+bool resource_manager::state::reserve_relay(const peer_id& peer) noexcept {
    auto lock = std::scoped_lock{mutex_};
-   if (snapshot_.active_streams >= limits_.max_streams ||
-       (relay && snapshot_.active_relay_streams >= limits_.max_relay_streams)) {
-      return deny_locked(snapshot_.denied_streams);
+   if (peer.value.empty()) {
+      return reject_invalid_transition_locked();
    }
-   ++snapshot_.active_streams;
-   if (relay) {
-      ++snapshot_.active_relay_streams;
+   if (snapshot_.active_relay_reservations >= limits_.max_relay_reservations) {
+      return reject_limit_locked(snapshot_.denied_relays);
    }
-   return true;
-}
-
-bool resource_manager::state::bind_stream(const scope& value) noexcept {
-   auto lock = std::scoped_lock{mutex_};
-   if (value.peer.value.empty() || value.protocol.value.empty()) {
-      return deny_locked(snapshot_.denied_streams);
+   try {
+      auto [entry, inserted] = relay_reservations_by_peer_.try_emplace(peer);
+      static_cast<void>(inserted);
+      ++entry->second;
+      ++snapshot_.active_relay_reservations;
+      return true;
+   } catch (...) {
+      record_runtime_failure_locked();
+      return false;
    }
-   const auto peer = streams_by_peer_.find(value.peer);
-   const auto protocol = streams_by_protocol_.find(value.protocol.value);
-   const auto peer_streams = peer == streams_by_peer_.end() ? 0 : peer->second;
-   const auto protocol_streams = protocol == streams_by_protocol_.end() ? 0 : protocol->second;
-   if (peer_streams >= limits_.max_streams_per_peer || protocol_streams >= limits_.max_streams_per_protocol) {
-      return deny_locked(snapshot_.denied_streams);
-   }
-   ++streams_by_peer_[value.peer];
-   ++streams_by_protocol_[value.protocol.value];
-   return true;
-}
-
-void resource_manager::state::release_stream(const std::optional<scope>& value, bool relay) noexcept {
-   auto lock = std::scoped_lock{mutex_};
-   if (snapshot_.active_streams > 0) {
-      --snapshot_.active_streams;
-   }
-   if (relay && snapshot_.active_relay_streams > 0) {
-      --snapshot_.active_relay_streams;
-   }
-   if (!value) {
-      return;
-   }
-   if (auto found = streams_by_peer_.find(value->peer); found != streams_by_peer_.end()) {
-      if (found->second > 1) {
-         --found->second;
-      } else {
-         streams_by_peer_.erase(found);
-      }
-   }
-   if (auto found = streams_by_protocol_.find(value->protocol.value); found != streams_by_protocol_.end()) {
-      if (found->second > 1) {
-         --found->second;
-      } else {
-         streams_by_protocol_.erase(found);
-      }
-   }
-}
-
-bool resource_manager::state::acquire_relay(const peer_id& peer) noexcept {
-   auto lock = std::scoped_lock{mutex_};
-   if (peer.value.empty() || snapshot_.active_relay_reservations >= limits_.max_relay_reservations) {
-      return deny_locked(snapshot_.denied_relays);
-   }
-   ++snapshot_.active_relay_reservations;
-   ++relay_reservations_by_peer_[peer];
-   return true;
 }
 
 void resource_manager::state::release_relay(const peer_id& peer) noexcept {
@@ -207,7 +538,7 @@ void resource_manager::state::release_relay(const peer_id& peer) noexcept {
    if (snapshot_.active_relay_reservations > 0) {
       --snapshot_.active_relay_reservations;
    }
-   if (auto found = relay_reservations_by_peer_.find(peer); found != relay_reservations_by_peer_.end()) {
+   if (const auto found = relay_reservations_by_peer_.find(peer); found != relay_reservations_by_peer_.end()) {
       if (found->second > 1) {
          --found->second;
       } else {
@@ -216,31 +547,251 @@ void resource_manager::state::release_relay(const peer_id& peer) noexcept {
    }
 }
 
-bool resource_manager::state::acquire_queued_bytes(std::uint64_t bytes) noexcept {
-   auto lock = std::scoped_lock{mutex_};
-   if (bytes > limits_.max_queued_bytes || snapshot_.queued_bytes > limits_.max_queued_bytes - bytes) {
-      return deny_locked(snapshot_.denied_queued_bytes);
-   }
-   snapshot_.queued_bytes += bytes;
-   return true;
-}
-
-void resource_manager::state::release_queued_bytes(std::uint64_t bytes) noexcept {
-   auto lock = std::scoped_lock{mutex_};
-   snapshot_.queued_bytes = bytes > snapshot_.queued_bytes ? 0 : snapshot_.queued_bytes - bytes;
-}
-
 bool resource_manager::state::record_malformed(const peer_id& peer) noexcept {
    auto lock = std::scoped_lock{mutex_};
    if (peer.value.empty()) {
-      return deny_locked(snapshot_.denied_malformed);
+      return reject_invalid_transition_locked();
    }
-   auto& count = malformed_by_peer_[peer];
-   if (count >= limits_.max_malformed_messages_per_peer) {
-      return deny_locked(snapshot_.denied_malformed);
+   const auto found = malformed_by_peer_.find(peer);
+   const auto messages = found == malformed_by_peer_.end() ? 0 : found->second;
+   if (messages >= limits_.max_malformed_messages_per_peer) {
+      return reject_limit_locked(snapshot_.denied_malformed);
    }
-   ++count;
+   try {
+      auto [entry, inserted] = malformed_by_peer_.try_emplace(peer);
+      static_cast<void>(inserted);
+      ++entry->second;
+      return true;
+   } catch (...) {
+      record_runtime_failure_locked();
+      return false;
+   }
+}
+
+bool resource_manager::state::session_established(const std::shared_ptr<ledger>& value) const noexcept {
+   auto lock = std::scoped_lock{mutex_};
+   return value && value->parent_active && value->value_kind == ledger::kind::connection && value->peer.has_value();
+}
+
+bool resource_manager::state::stream_bound(const std::shared_ptr<ledger>& value) const noexcept {
+   auto lock = std::scoped_lock{mutex_};
+   return value && value->parent_active && value->value_kind == ledger::kind::stream && value->protocol.has_value();
+}
+
+bool resource_manager::state::stream_service_bound(const std::shared_ptr<ledger>& value) const noexcept {
+   auto lock = std::scoped_lock{mutex_};
+   return value && value->parent_active && value->value_kind == ledger::kind::stream && value->service.has_value();
+}
+
+bool resource_manager::state::establish_session(const std::shared_ptr<ledger>& value, session_scope scope) noexcept {
+   auto lock = std::scoped_lock{mutex_};
+   if (!value || !value->parent_active || value->value_kind != ledger::kind::connection || value->peer ||
+       !value->transient || scope.peer.value.empty() || scope.direction != value->direction) {
+      return reject_invalid_transition_locked();
+   }
+   auto peer = peers_.end();
+   auto peer_inserted = false;
+   try {
+      auto next_peer = std::optional<peer_id>{};
+      next_peer.emplace(std::move(scope.peer));
+      std::tie(peer, peer_inserted) = peers_.try_emplace(*next_peer);
+      if (!can_add_locked(peer->second, limits_.peer, value->usage, memory_priority::always)) {
+         if (peer_inserted && empty(peer->second.usage)) {
+            peers_.erase(peer);
+         }
+         return reject_limit_locked(snapshot_.denied_scope_migrations);
+      }
+      remove_locked(transient_, value->usage);
+      add_locked(peer->second, value->usage);
+      value->peer.swap(next_peer);
+      value->transient = false;
+      return true;
+   } catch (...) {
+      if (peer_inserted && peer != peers_.end() && empty(peer->second.usage)) {
+         peers_.erase(peer);
+      }
+      record_runtime_failure_locked();
+      return false;
+   }
+}
+
+bool resource_manager::state::bind_protocol(const std::shared_ptr<ledger>& value, protocol_id protocol) noexcept {
+   auto lock = std::scoped_lock{mutex_};
+   if (!value || !value->parent_active || value->value_kind != ledger::kind::stream || !value->peer ||
+       value->protocol || !value->transient || protocol.value.empty()) {
+      return reject_invalid_transition_locked();
+   }
+   auto protocol_scope = protocols_.end();
+   auto protocol_peer = protocol_peers_.end();
+   auto protocol_peer_scope = std::map<std::string, scope_account>::iterator{};
+   auto protocol_inserted = false;
+   auto protocol_peer_inserted = false;
+   auto protocol_peer_scope_inserted = false;
+   try {
+      auto next_protocol = std::optional<protocol_id>{};
+      next_protocol.emplace(std::move(protocol));
+      std::tie(protocol_scope, protocol_inserted) = protocols_.try_emplace(next_protocol->value);
+      std::tie(protocol_peer, protocol_peer_inserted) = protocol_peers_.try_emplace(*value->peer);
+      std::tie(protocol_peer_scope, protocol_peer_scope_inserted) =
+          protocol_peer->second.try_emplace(next_protocol->value);
+      if (!can_add_locked(protocol_scope->second, limits_.protocol, value->usage, memory_priority::always) ||
+          !can_add_locked(protocol_peer_scope->second, limits_.protocol_peer, value->usage, memory_priority::always)) {
+         if (protocol_peer_scope_inserted) {
+            protocol_peer->second.erase(protocol_peer_scope);
+         }
+         if (protocol_peer_inserted && protocol_peer->second.empty()) {
+            protocol_peers_.erase(protocol_peer);
+         }
+         if (protocol_inserted && empty(protocol_scope->second.usage)) {
+            protocols_.erase(protocol_scope);
+         }
+         return reject_limit_locked(snapshot_.denied_scope_migrations);
+      }
+      remove_locked(transient_, value->usage);
+      add_locked(protocol_scope->second, value->usage);
+      add_locked(protocol_peer_scope->second, value->usage);
+      value->protocol.swap(next_protocol);
+      value->transient = false;
+      return true;
+   } catch (...) {
+      if (protocol_peer_scope_inserted && protocol_peer != protocol_peers_.end()) {
+         protocol_peer->second.erase(protocol_peer_scope);
+      }
+      if (protocol_peer_inserted && protocol_peer != protocol_peers_.end() && protocol_peer->second.empty()) {
+         protocol_peers_.erase(protocol_peer);
+      }
+      if (protocol_inserted && protocol_scope != protocols_.end() && empty(protocol_scope->second.usage)) {
+         protocols_.erase(protocol_scope);
+      }
+      record_runtime_failure_locked();
+      return false;
+   }
+}
+
+bool resource_manager::state::bind_service(const std::shared_ptr<ledger>& value, std::string service) noexcept {
+   auto lock = std::scoped_lock{mutex_};
+   if (!value || !value->parent_active || value->value_kind != ledger::kind::stream || !value->peer ||
+       !value->protocol || value->service || service.empty()) {
+      return reject_invalid_transition_locked();
+   }
+   auto service_scope = services_.end();
+   auto service_peer = service_peers_.end();
+   auto service_peer_scope = std::map<std::string, scope_account>::iterator{};
+   auto service_inserted = false;
+   auto service_peer_inserted = false;
+   auto service_peer_scope_inserted = false;
+   try {
+      auto next_service = std::optional<std::string>{};
+      next_service.emplace(std::move(service));
+      std::tie(service_scope, service_inserted) = services_.try_emplace(*next_service);
+      std::tie(service_peer, service_peer_inserted) = service_peers_.try_emplace(*value->peer);
+      std::tie(service_peer_scope, service_peer_scope_inserted) = service_peer->second.try_emplace(*next_service);
+      if (!can_add_locked(service_scope->second, limits_.service, value->usage, memory_priority::always) ||
+          !can_add_locked(service_peer_scope->second, limits_.service_peer, value->usage, memory_priority::always)) {
+         if (service_peer_scope_inserted) {
+            service_peer->second.erase(service_peer_scope);
+         }
+         if (service_peer_inserted && service_peer->second.empty()) {
+            service_peers_.erase(service_peer);
+         }
+         if (service_inserted && empty(service_scope->second.usage)) {
+            services_.erase(service_scope);
+         }
+         return reject_limit_locked(snapshot_.denied_scope_migrations);
+      }
+      add_locked(service_scope->second, value->usage);
+      add_locked(service_peer_scope->second, value->usage);
+      value->service.swap(next_service);
+      return true;
+   } catch (...) {
+      if (service_peer_scope_inserted && service_peer != service_peers_.end()) {
+         service_peer->second.erase(service_peer_scope);
+      }
+      if (service_peer_inserted && service_peer != service_peers_.end() && service_peer->second.empty()) {
+         service_peers_.erase(service_peer);
+      }
+      if (service_inserted && service_scope != services_.end() && empty(service_scope->second.usage)) {
+         services_.erase(service_scope);
+      }
+      record_runtime_failure_locked();
+      return false;
+   }
+}
+
+bool resource_manager::state::reserve_memory(const std::shared_ptr<ledger>& value, std::uint64_t bytes,
+                                             memory_priority priority) noexcept {
+   auto lock = std::scoped_lock{mutex_};
+   if (!value || !value->parent_active) {
+      return reject_invalid_transition_locked();
+   }
+   const auto delta = scope_totals{.memory = bytes};
+   if (!can_add_to_current_scopes_locked(*value, delta, priority)) {
+      return reject_limit_locked(snapshot_.denied_memory);
+   }
+   add_to_current_scopes_locked(*value, delta);
+   value->usage.memory += bytes;
    return true;
+}
+
+bool resource_manager::state::reserve_file_descriptors(const std::shared_ptr<ledger>& value,
+                                                       std::size_t count) noexcept {
+   auto lock = std::scoped_lock{mutex_};
+   if (!value || !value->parent_active) {
+      return reject_invalid_transition_locked();
+   }
+   const auto delta = scope_totals{.file_descriptors = count};
+   if (!can_add_to_current_scopes_locked(*value, delta, memory_priority::always)) {
+      return reject_limit_locked(snapshot_.denied_file_descriptors);
+   }
+   add_to_current_scopes_locked(*value, delta);
+   value->usage.file_descriptors += count;
+   return true;
+}
+
+void resource_manager::state::release_memory(const std::shared_ptr<ledger>& value, std::uint64_t bytes) noexcept {
+   auto lock = std::scoped_lock{mutex_};
+   const auto delta = scope_totals{.memory = bytes};
+   if (!value || !can_remove_from_current_scopes_locked(*value, delta)) {
+      return;
+   }
+   remove_from_current_scopes_locked(*value, delta);
+   value->usage.memory -= bytes;
+   cleanup_scopes_locked(*value);
+}
+
+void resource_manager::state::release_file_descriptors(const std::shared_ptr<ledger>& value,
+                                                       std::size_t count) noexcept {
+   auto lock = std::scoped_lock{mutex_};
+   const auto delta = scope_totals{.file_descriptors = count};
+   if (!value || !can_remove_from_current_scopes_locked(*value, delta)) {
+      return;
+   }
+   remove_from_current_scopes_locked(*value, delta);
+   value->usage.file_descriptors -= count;
+   cleanup_scopes_locked(*value);
+}
+
+void resource_manager::state::release_parent(const std::shared_ptr<ledger>& value) noexcept {
+   auto lock = std::scoped_lock{mutex_};
+   if (!value || !value->parent_active) {
+      return;
+   }
+   if (value->value_kind == ledger::kind::lifecycle) {
+      value->parent_active = false;
+      return;
+   }
+   const auto delta = value->value_kind == ledger::kind::connection ? connection_delta(value->direction)
+                                                                    : stream_delta(value->direction);
+   if (!can_remove_from_current_scopes_locked(*value, delta)) {
+      return;
+   }
+   remove_from_current_scopes_locked(*value, delta);
+   value->usage.inbound_connections -= delta.inbound_connections;
+   value->usage.outbound_connections -= delta.outbound_connections;
+   value->usage.inbound_streams -= delta.inbound_streams;
+   value->usage.outbound_streams -= delta.outbound_streams;
+   value->parent_active = false;
+   cleanup_scopes_locked(*value);
 }
 
 } // namespace forge::net::p2p

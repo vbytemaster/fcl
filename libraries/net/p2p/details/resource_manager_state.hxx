@@ -2,39 +2,85 @@
 
 namespace forge::net::p2p {
 
+struct resource_manager::ledger {
+   enum class kind { lifecycle, connection, stream };
+
+   std::uint64_t id = 0;
+   kind value_kind = kind::lifecycle;
+   session_direction direction = session_direction::outbound;
+   scope_totals usage;
+   std::optional<peer_id> peer;
+   std::optional<protocol_id> protocol;
+   std::optional<std::string> service;
+   bool parent_active = true;
+   bool transient = false;
+};
+
 struct resource_manager::state {
    explicit state(limits value) noexcept;
 
    [[nodiscard]] const limits& configured_limits() const noexcept;
    [[nodiscard]] snapshot current() const noexcept;
-   [[nodiscard]] bool acquire_pending(session_direction direction) noexcept;
-   [[nodiscard]] bool establish_session(session_scope value) noexcept;
-   void release_pending(session_direction direction) noexcept;
-   void release_session(const session_scope& value) noexcept;
-   [[nodiscard]] bool acquire_dial() noexcept;
+   [[nodiscard]] std::shared_ptr<ledger> reserve_lifecycle() noexcept;
+   [[nodiscard]] std::shared_ptr<ledger> reserve_session(session_direction direction) noexcept;
+   [[nodiscard]] std::shared_ptr<ledger> reserve_stream(peer_id peer, session_direction direction) noexcept;
+   [[nodiscard]] bool reserve_dial() noexcept;
    [[nodiscard]] bool bind_dial(const peer_id& peer) noexcept;
    void release_dial(const std::optional<peer_id>& peer) noexcept;
-   [[nodiscard]] bool acquire_stream(bool relay) noexcept;
-   [[nodiscard]] bool bind_stream(const scope& value) noexcept;
-   void release_stream(const std::optional<scope>& value, bool relay) noexcept;
-   [[nodiscard]] bool acquire_relay(const peer_id& peer) noexcept;
+   [[nodiscard]] bool reserve_relay(const peer_id& peer) noexcept;
    void release_relay(const peer_id& peer) noexcept;
-   [[nodiscard]] bool acquire_queued_bytes(std::uint64_t bytes) noexcept;
-   void release_queued_bytes(std::uint64_t bytes) noexcept;
    [[nodiscard]] bool record_malformed(const peer_id& peer) noexcept;
+   [[nodiscard]] bool session_established(const std::shared_ptr<ledger>& value) const noexcept;
+   [[nodiscard]] bool stream_bound(const std::shared_ptr<ledger>& value) const noexcept;
+   [[nodiscard]] bool stream_service_bound(const std::shared_ptr<ledger>& value) const noexcept;
+   [[nodiscard]] bool establish_session(const std::shared_ptr<ledger>& value, session_scope scope) noexcept;
+   [[nodiscard]] bool bind_protocol(const std::shared_ptr<ledger>& value, protocol_id protocol) noexcept;
+   [[nodiscard]] bool bind_service(const std::shared_ptr<ledger>& value, std::string service) noexcept;
+   [[nodiscard]] bool reserve_memory(const std::shared_ptr<ledger>& value, std::uint64_t bytes,
+                                     memory_priority priority) noexcept;
+   [[nodiscard]] bool reserve_file_descriptors(const std::shared_ptr<ledger>& value, std::size_t count) noexcept;
+   void release_memory(const std::shared_ptr<ledger>& value, std::uint64_t bytes) noexcept;
+   void release_file_descriptors(const std::shared_ptr<ledger>& value, std::size_t count) noexcept;
+   void release_parent(const std::shared_ptr<ledger>& value) noexcept;
 
  private:
-   [[nodiscard]] bool deny_locked(std::uint64_t& reason) noexcept;
+   struct scope_account {
+      scope_totals usage;
+   };
+
+   [[nodiscard]] std::shared_ptr<ledger> make_ledger_locked() noexcept;
+   [[nodiscard]] bool reject_limit_locked(std::uint64_t& reason) noexcept;
+   [[nodiscard]] bool reject_invalid_transition_locked() noexcept;
+   void record_runtime_failure_locked() noexcept;
+   [[nodiscard]] bool can_add_locked(const scope_account& account, const scope_limits& limits,
+                                     const scope_totals& delta, memory_priority priority) const noexcept;
+   [[nodiscard]] bool can_remove_locked(const scope_account& account, const scope_totals& delta) const noexcept;
+   [[nodiscard]] bool can_add_to_current_scopes_locked(const ledger& value, const scope_totals& delta,
+                                                       memory_priority priority) const noexcept;
+   [[nodiscard]] bool can_remove_from_current_scopes_locked(const ledger& value,
+                                                            const scope_totals& delta) const noexcept;
+   void add_locked(scope_account& account, const scope_totals& delta) noexcept;
+   void remove_locked(scope_account& account, const scope_totals& delta) noexcept;
+   void add_to_current_scopes_locked(const ledger& value, const scope_totals& delta) noexcept;
+   void remove_from_current_scopes_locked(const ledger& value, const scope_totals& delta) noexcept;
+   void cleanup_scopes_locked(const ledger& value) noexcept;
 
    mutable std::mutex mutex_;
    limits limits_;
    snapshot snapshot_;
-   std::map<peer_id, std::size_t> streams_by_peer_;
-   std::map<std::string, std::size_t> streams_by_protocol_;
-   std::map<peer_id, std::size_t> relay_reservations_by_peer_;
-   std::map<peer_id, std::size_t> sessions_by_peer_;
+   scope_account system_;
+   scope_account transient_;
+   scope_account connections_;
+   scope_account streams_;
+   std::map<peer_id, scope_account> peers_;
+   std::map<std::string, scope_account> protocols_;
+   std::map<std::string, scope_account> services_;
+   std::map<peer_id, std::map<std::string, scope_account>> protocol_peers_;
+   std::map<peer_id, std::map<std::string, scope_account>> service_peers_;
    std::map<peer_id, std::size_t> dial_attempts_by_peer_;
+   std::map<peer_id, std::size_t> relay_reservations_by_peer_;
    std::map<peer_id, std::size_t> malformed_by_peer_;
+   std::uint64_t next_ledger_id_ = 1;
 };
 
 } // namespace forge::net::p2p

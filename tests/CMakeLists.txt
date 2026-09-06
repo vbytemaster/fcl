@@ -997,6 +997,7 @@ add_executable(
    quic_p2p/ipns_tests.cpp
    quic_p2p/quic_tests.cpp
    quic_p2p/connection_gater_tests.cpp
+   quic_p2p/resource_manager_tests.cpp
    quic_p2p/p2p_lifecycle_tests.cpp
    quic_p2p/p2p_tests.cpp
    quic_p2p/session_teardown_tests.cpp
