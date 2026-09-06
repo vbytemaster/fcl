@@ -8,6 +8,7 @@ import struct
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 
 WORKTREE_FINGERPRINT_FORMAT = b"forge-libp2p-interop-worktree-v2\0"
@@ -141,6 +142,53 @@ def append_worktree_path(digest: "hashlib._Hash", root: Path, relative: bytes) -
     digest.update(struct.pack(">I", stat.S_IFMT(metadata.st_mode)))
 
 
+def append_invalid_gitlink_path(digest: "hashlib._Hash", path: Path, relative: bytes) -> None:
+    """Fingerprint unexpected gitlink contents without following a nested repository."""
+    metadata = path.lstat()
+    digest.update(b"gitlink-path\0")
+    append_bytes(digest, relative)
+    if stat.S_ISLNK(metadata.st_mode):
+        digest.update(b"symlink\0")
+        append_bytes(digest, os.fsencode(os.readlink(path)))
+        return
+    if stat.S_ISREG(metadata.st_mode):
+        digest.update(b"file\0")
+        digest.update(struct.pack(">Q", metadata.st_size))
+        with path.open("rb") as value:
+            while chunk := value.read(1024 * 1024):
+                digest.update(chunk)
+        return
+    if stat.S_ISDIR(metadata.st_mode):
+        digest.update(b"directory\0")
+        for child in sorted(path.iterdir(), key=lambda value: os.fsencode(value.name)):
+            append_invalid_gitlink_path(digest, child, relative + b"/" + os.fsencode(child.name))
+        return
+    digest.update(b"other\0")
+    digest.update(struct.pack(">I", stat.S_IFMT(metadata.st_mode)))
+
+
+def initialized_submodule_root(path: Path) -> Optional[Path]:
+    """Return a valid nested repository root, never Git's enclosing superproject."""
+    marker = path / ".git"
+    try:
+        marker_metadata = marker.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    if stat.S_ISLNK(marker_metadata.st_mode) or not (
+        stat.S_ISREG(marker_metadata.st_mode) or stat.S_ISDIR(marker_metadata.st_mode)
+    ):
+        return None
+    try:
+        inside = git_output(path, "rev-parse", "--is-inside-work-tree").strip()
+        checked_out_root = Path(
+            git_output(path, "rev-parse", "--show-toplevel").decode("utf-8").strip()
+        ).resolve()
+    except RuntimeError:
+        return None
+    resolved = path.resolve()
+    return resolved if inside == b"true" and checked_out_root == resolved else None
+
+
 def append_submodule(digest: "hashlib._Hash", root: Path, relative: bytes, object_id: bytes,
                      ancestors: frozenset[Path]) -> bool:
     path = safe_worktree_path(root, relative)
@@ -151,20 +199,21 @@ def append_submodule(digest: "hashlib._Hash", root: Path, relative: bytes, objec
     try:
         metadata = path.lstat()
     except (FileNotFoundError, NotADirectoryError):
-        digest.update(b"missing\0")
-        return True
+        digest.update(b"uninitialized-missing\0")
+        return False
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
         digest.update(b"invalid\0")
         digest.update(struct.pack(">I", stat.S_IFMT(metadata.st_mode)))
         return True
-    try:
-        checked_out_root = Path(git_output(path, "rev-parse", "--show-toplevel").decode("utf-8").strip()).resolve()
-    except RuntimeError:
-        digest.update(b"uninitialized\0")
+    resolved = initialized_submodule_root(path)
+    if resolved is None:
+        children = tuple(path.iterdir())
+        if not children:
+            digest.update(b"uninitialized-empty\0")
+            return False
+        digest.update(b"invalid-non-repository\0")
+        append_invalid_gitlink_path(digest, path, relative)
         return True
-    resolved = path.resolve()
-    if checked_out_root != resolved:
-        raise RuntimeError(f"Git submodule root escapes its indexed path: {path}")
     if resolved in ancestors:
         raise RuntimeError(f"Git submodule recursion cycle: {resolved}")
     identity = worktree_identity(resolved, ancestors)

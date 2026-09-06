@@ -966,6 +966,7 @@ def main() -> int:
             "transport_stack",
             "result",
             "listener_process",
+            "effective_configuration",
         ],
         "evidence_index_required_fields": ["path", "size", "sha256"],
         "passing_status": "passed",
@@ -1054,7 +1055,7 @@ def main() -> int:
             }
             if registration == "registered":
                 allowed_scenario_fields.add("source_case_id")
-            elif registration == "planned" and "requires_capabilities" in scenario:
+            if "requires_capabilities" in scenario:
                 allowed_scenario_fields.add("requires_capabilities")
             if set(scenario) != allowed_scenario_fields:
                 errors.append(f"donor capability {capability_id}: acceptance scenario has invalid shape")
@@ -1065,6 +1066,7 @@ def main() -> int:
             activation = scenario.get("activation")
             directions = scenario.get("required_directions")
             expected_status = scenario.get("expected_status")
+            required_capabilities = scenario.get("requires_capabilities", [])
             if not isinstance(scenario_id, str) or not scenario_id or scenario_id in seen_scenario_ids:
                 errors.append(f"donor capability {capability_id}: acceptance scenario id must be globally unique")
             elif scenario_id:
@@ -1087,6 +1089,10 @@ def main() -> int:
             ) or len(set(directions)) != len(directions):
                 errors.append(f"donor capability {capability_id}: acceptance directions are invalid")
                 directions = []
+            if not isinstance(required_capabilities, list) or any(
+                not isinstance(required, str) or not required for required in required_capabilities
+            ) or len(set(required_capabilities)) != len(required_capabilities):
+                errors.append(f"donor capability {capability_id}: acceptance capability requirements are invalid")
             if expected_status not in {"passed", "limited"}:
                 errors.append(f"donor capability {capability_id}: acceptance status is invalid")
             runner_scenario_id = scenario.get("runner_scenario_id")
@@ -1123,7 +1129,6 @@ def main() -> int:
                             f"donor capability {capability_id}: donor case does not match required donor implementations"
                         )
             elif registration == "planned":
-                required_capabilities = scenario.get("requires_capabilities", [])
                 if not isinstance(required_capabilities, list) or any(
                     not isinstance(required, str)
                     or capabilities_by_id.get(required, {}).get("decision") != "stage_6"
@@ -1142,6 +1147,17 @@ def main() -> int:
             else:
                 errors.append(
                     f"donor capability {capability_id}: acceptance registration must be registered or planned"
+                )
+            if (
+                profile == "private_network"
+                and isinstance(scenario_id, str)
+                and scenario_id.startswith("autonat_")
+                and required_capabilities != [
+                    "security.private_network_psk", "reachability.private_internet_policy"
+                ]
+            ):
+                errors.append(
+                    f"donor capability {capability_id}: private AutoNAT acceptance must require PSK and private Internet policy"
                 )
         if not has_primary_scenario:
             errors.append(f"donor capability {capability_id}: acceptance lacks its primary directions")

@@ -813,19 +813,19 @@ corresponding Forge facility exists.
 The exact order, dependency DAG and permitted capability owners are locked by
 `stage_6_pr_registry` in `p2p_donor_capabilities.json`; the roadmap, chrono and
 crypto prerequisite PRs deliberately own no capability entries. The
-`interop_acceptance_registry` is source-only registration. It cannot produce an execution
-PASS: release acceptance requires an external exact-`HEAD` artifact with the
-manifest SHA-256, canonical structured runner argv, commit-bound timing,
-capability-specific profile, transport-stack and enabled-run scenarios and
-distinct SHA-256-verified evidence files per direction. Native QUIC, native
+`interop_acceptance_registry` is source-only registration. It cannot produce an
+execution PASS: the CMake promotion target launches the canonical enabled runner
+and immediately validates the exact artifact from that invocation, including
+clean exact-`HEAD`, manifest, runner argv/roots, tool and binary provenance,
+effective enabled roles and capability dependencies. Native QUIC, native
 TCP/Yamux and private TCP/Yamux+pnet are separate evidence scopes; an enabled
-optional run is not a default-activation claim. The checked-out tracked tree
-must be clean. `limited` is allowed only
-for a registry-classified limitation and yields
-`PASS_WITH_DOCUMENTED_LIMITATIONS`; an absent, stale or incomplete artifact is
-`NOT_RUN`. The inventory checker remains the paired source-manifest gate, while
-the CMake artifact gate is opt-in through
-`FORGE_P2P_STAGE6_ACCEPTANCE_ARTIFACT`; PR0 itself remains source-only.
+optional run is not a default-activation claim. An absent or stale provenance is
+`NOT_RUN`; a canonical runner nonzero exit or recorded failure is `FAILED`.
+`limited` is allowed only for a registry-classified limitation and yields
+`PASS_WITH_DOCUMENTED_LIMITATIONS`. SHA-256 evidence is tamper-evident local
+consistency evidence, not signed remote attestation or malicious-artifact
+unforgeability. The inventory checker remains the paired source-manifest gate;
+PR0 itself remains source-only.
 
 The manifest's inline-muxer evidence names Go TLS and Noise support plus the
 pinned Rust TLS fixed-ALPN and Noise extension/fallback paths. Its GossipSub
@@ -955,9 +955,10 @@ complete only after its exact-head review and evidence gates pass.
   snapshots or perform unbounded work per tick.
 - Diagnostics identify disabled, idle, degraded and healthy discovery states.
 - Live libp2p interoperability remains green for every enabled and applicable
-  direction, proven by the external exact-`HEAD` artifact rather than case
-  registration or a source-inventory result; documented Go/Rust limitations do
-  not become bilateral claims.
+  direction, proven by the CMake-owned exact-`HEAD` runner invocation and its
+  immediate artifact validation rather than case registration, artifact replay
+  or a source-inventory result; documented Go/Rust limitations do not become
+  bilateral claims.
 - The implementation inventory contains no `stub`, `orphan`, unintended
   `manual-only`, `partial` or `unverified` production surface.
 

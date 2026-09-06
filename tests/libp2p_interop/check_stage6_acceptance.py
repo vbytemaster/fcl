@@ -37,6 +37,7 @@ ARTIFACT_SCHEMA = {
         "transport_stack",
         "result",
         "listener_process",
+        "effective_configuration",
     ],
     "evidence_index_required_fields": ["path", "size", "sha256"],
     "passing_status": "passed",
@@ -50,6 +51,23 @@ SHA256 = re.compile(r"[0-9a-f]{64}")
 PROFILE_TRANSPORT_STACKS = {
     "native": {("quic",), ("tcp", "yamux")},
     "private_network": {("tcp", "yamux", "pnet")},
+}
+RUNNER_FLAGS = (
+    "--enabled",
+    "--forge-fixture",
+    "--source-dir",
+    "--build-dir",
+    "--forge-root",
+    "--donors-root",
+    "--acceptance-manifest",
+)
+ENABLED_VALUES = {"1", "ON", "on", "true", "TRUE", "yes", "YES"}
+CAPABILITY_LISTENER_FEATURES = {
+    "protocol.autonat_v1_client": "autonatv1",
+    "protocol.autonat_v1_service": "autonatv1",
+    "protocol.autonat_v2_client": "autonatv2",
+    "protocol.autonat_v2_service": "autonatv2",
+    "relay.circuit_v2_service": "relay",
 }
 
 
@@ -72,7 +90,7 @@ def sha256_file(path: Path) -> str:
 
 def required_scenarios(
     manifest: object,
-) -> tuple[dict[tuple[str, str], tuple[set[str], str, str, tuple[str, ...], str]], list[str]]:
+) -> tuple[dict[tuple[str, str], tuple[set[str], str, str, tuple[str, ...], str, tuple[str, ...]]], list[str]]:
     errors: list[str] = []
     if not isinstance(manifest, dict):
         return {}, ["manifest must be a JSON object"]
@@ -85,7 +103,7 @@ def required_scenarios(
     if not isinstance(capabilities, dict) or not capabilities:
         return {}, ["manifest acceptance capabilities must be a non-empty object"]
 
-    required: dict[tuple[str, str], tuple[set[str], str, str, tuple[str, ...], str]] = {}
+    required: dict[tuple[str, str], tuple[set[str], str, str, tuple[str, ...], str, tuple[str, ...]]] = {}
     for capability_id, entry in capabilities.items():
         if not isinstance(capability_id, str) or not capability_id:
             errors.append("manifest acceptance capability id is invalid")
@@ -109,6 +127,7 @@ def required_scenarios(
             activation = scenario.get("activation")
             directions = scenario.get("required_directions")
             status = scenario.get("expected_status")
+            requires = scenario.get("requires_capabilities", [])
             stack = tuple(transport_stack) if isinstance(transport_stack, list) else ()
             if (
                 not isinstance(scenario_id, str)
@@ -122,6 +141,9 @@ def required_scenarios(
                 or not directions
                 or any(not isinstance(direction, str) or direction not in DIRECTIONS for direction in directions)
                 or len(set(directions)) != len(directions)
+                or not isinstance(requires, list)
+                or any(not isinstance(capability, str) or not capability for capability in requires)
+                or len(set(requires)) != len(requires)
                 or status not in {ARTIFACT_SCHEMA["passing_status"], ARTIFACT_SCHEMA["limited_status"]}
                 or (status == ARTIFACT_SCHEMA["limited_status"] and not has_limitation)
             ):
@@ -131,7 +153,9 @@ def required_scenarios(
             if key in required:
                 errors.append(f"manifest {capability_id}: duplicate acceptance scenario {scenario_id}")
             else:
-                required[key] = (set(directions), status, profile, stack, runner_scenario_id)
+                required[key] = (
+                    set(directions), status, profile, stack, runner_scenario_id, tuple(requires)
+                )
     return required, errors
 
 
@@ -170,30 +194,67 @@ def is_timestamp(value: object) -> bool:
     return type(value) in {int, float}
 
 
-def validate_runner_argv(root: Path, argv: object, manifest_path: Path) -> list[str]:
-    if not isinstance(argv, list) or len(argv) < 2 or any(
+def absolute_path(value: object) -> Optional[Path]:
+    if not isinstance(value, str) or not value:
+        return None
+    path = Path(value)
+    return path.resolve() if path.is_absolute() else None
+
+
+def validate_runner_inputs(root: Path, artifact_path: Path, artifact_root: Path, manifest_path: Path,
+                           provenance: object) -> tuple[dict[str, Path], list[str]]:
+    if not isinstance(provenance, dict):
+        return {}, ["artifact fixture_provenance must be an object"]
+    inputs = provenance.get("runner_inputs")
+    if not isinstance(inputs, dict) or set(inputs) != {
+        "source_dir", "build_dir", "forge_root", "donors_root", "acceptance_manifest"
+    }:
+        return {}, ["artifact runner input provenance has invalid schema"]
+    paths = {key: absolute_path(inputs.get(key)) for key in inputs}
+    if any(path is None for path in paths.values()):
+        return {}, ["artifact runner input provenance contains a non-absolute path"]
+    resolved = {key: path for key, path in paths.items() if path is not None}
+    build_dir = resolved["build_dir"]
+    if (
+        resolved["source_dir"] != (root / CANONICAL_RUNNER).parent.resolve()
+        or resolved["forge_root"] != root.resolve()
+        or resolved["acceptance_manifest"] != manifest_path.resolve()
+        or not resolved["donors_root"].is_dir()
+        or artifact_root != build_dir / "interop-run"
+        or artifact_path.resolve() != build_dir / "interop-artifacts.json"
+    ):
+        return {}, ["artifact runner input provenance does not bind canonical roots and artifact paths"]
+    return resolved, []
+
+
+def validate_runner_argv(root: Path, argv: object, manifest_path: Path, inputs: dict[str, Path],
+                         binary_paths: dict[str, Path]) -> list[str]:
+    if not isinstance(argv, list) or len(argv) != 2 + 2 * len(RUNNER_FLAGS) or any(
         not isinstance(argument, str) or not argument for argument in argv
     ):
-        return ["artifact runner_argv must record [sys.executable, *sys.argv]"]
-    executable = Path(argv[0])
-    if not executable.is_absolute():
-        return ["artifact runner_argv must begin with an absolute sys.executable path"]
+        return ["artifact runner_argv must record the complete canonical runner invocation"]
+    if Path(argv[0]).resolve() != Path(sys.executable).resolve():
+        return ["artifact runner_argv executable differs from the current resolved sys.executable"]
     runner_path = Path(argv[1])
-    if runner_path.is_absolute():
-        resolved = runner_path.resolve()
-    else:
-        if ".." in runner_path.parts or runner_path != CANONICAL_RUNNER:
-            return ["artifact runner argv must name the canonical runner under source root"]
-        resolved = (root / runner_path).resolve()
-    if resolved != (root / CANONICAL_RUNNER).resolve() or not resolved.is_file():
+    resolved_runner = runner_path.resolve() if runner_path.is_absolute() else (root / runner_path).resolve()
+    if resolved_runner != (root / CANONICAL_RUNNER).resolve() or not resolved_runner.is_file():
         return ["artifact runner argv does not execute the canonical runner under source root"]
-    try:
-        manifest_index = argv.index("--acceptance-manifest")
-        manifest_argument = Path(argv[manifest_index + 1]).resolve()
-    except (ValueError, IndexError):
-        return ["artifact runner argv does not record --acceptance-manifest"]
-    if manifest_argument != manifest_path.resolve():
-        return ["artifact runner argv acceptance manifest differs from the checked manifest"]
+    if tuple(argv[2::2]) != RUNNER_FLAGS:
+        return ["artifact runner argv flags differ from the canonical live runner mode"]
+    values = dict(zip(RUNNER_FLAGS, argv[3::2]))
+    if values["--enabled"] not in ENABLED_VALUES:
+        return ["artifact runner argv does not prove an enabled live execution"]
+    expected = {
+        "--forge-fixture": binary_paths.get("forge"),
+        "--source-dir": inputs.get("source_dir"),
+        "--build-dir": inputs.get("build_dir"),
+        "--forge-root": root.resolve(),
+        "--donors-root": inputs.get("donors_root"),
+        "--acceptance-manifest": manifest_path.resolve(),
+    }
+    for flag, expected_path in expected.items():
+        if expected_path is None or absolute_path(values[flag]) != expected_path:
+            return [f"artifact runner argv {flag} differs from canonical runner inputs"]
     return []
 
 
@@ -251,6 +312,48 @@ def validate_fixture_provenance(value: object, expected_head: str, current_ident
     ) or not isinstance(build_profile, str) or not build_profile:
         errors.append("artifact fixture build_info compiler or build profile is incomplete")
     return errors
+
+
+def validate_execution_provenance(value: object, expected_head: str,
+                                  current_identity: dict) -> tuple[dict[str, Path], list[str]]:
+    errors = validate_fixture_provenance(value, expected_head, current_identity)
+    if not isinstance(value, dict):
+        return {}, errors
+    tools = value.get("tools")
+    python_tool = tools.get("python") if isinstance(tools, dict) else None
+    expected_python = Path(sys.executable).resolve()
+    if not isinstance(python_tool, dict) or set(python_tool) != {"path", "version_output"}:
+        errors.append("artifact Python tool provenance has invalid schema")
+    elif absolute_path(python_tool.get("path")) != expected_python:
+        errors.append("artifact Python tool provenance differs from current sys.executable")
+    else:
+        try:
+            current_version = subprocess.check_output([str(expected_python), "--version"], text=True).strip()
+        except OSError as error:
+            errors.append(f"cannot read current Python tool provenance: {error}")
+        else:
+            if python_tool.get("version_output") != current_version:
+                errors.append("artifact Python tool version provenance differs from current sys.executable")
+
+    binaries = value.get("binaries")
+    if not isinstance(binaries, dict) or set(binaries) != {"forge", "go", "rust"}:
+        errors.append("artifact binary provenance must cover forge, go and rust exactly")
+        return {}, errors
+    paths: dict[str, Path] = {}
+    for implementation, binary in binaries.items():
+        path = absolute_path(binary.get("path")) if isinstance(binary, dict) else None
+        digest = binary.get("sha256") if isinstance(binary, dict) else None
+        if (
+            path is None
+            or not path.is_file()
+            or not isinstance(digest, str)
+            or SHA256.fullmatch(digest) is None
+            or sha256_file(path) != digest
+        ):
+            errors.append(f"artifact {implementation} binary path or SHA-256 provenance is invalid")
+        else:
+            paths[implementation] = path
+    return paths, errors
 
 
 def raw_evidence_paths(value: object) -> set[Path]:
@@ -322,6 +425,48 @@ def validate_evidence_index(
     return indexed, errors
 
 
+def raw_result_payloads(value: object):
+    if isinstance(value, dict):
+        if isinstance(value.get("result_file"), str):
+            yield value
+        for nested in value.values():
+            yield from raw_result_payloads(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from raw_result_payloads(nested)
+
+
+def validate_all_result_evidence(artifacts: list[object], indexed_evidence: dict[Path, str],
+                                 artifact_root: Path) -> list[str]:
+    errors: list[str] = []
+    for index, record in enumerate(artifacts):
+        if not isinstance(record, dict):
+            continue
+        for result in raw_result_payloads(record):
+            result_path = path_within(result["result_file"], artifact_root)
+            if result_path is None or result_path not in indexed_evidence:
+                errors.append(f"raw runner record {index} result evidence is absent from the verified index")
+            else:
+                payload, payload_errors = load_evidence_json(result_path, f"raw runner record {index} result file")
+                errors.extend(payload_errors)
+                expected = {key: value for key, value in result.items() if key not in {"result_file", "attempts"}}
+                if payload is not None and payload != expected:
+                    errors.append(f"raw runner record {index} result file does not match its raw payload")
+        listener_file = record.get("listener_result_file")
+        if listener_file is not None:
+            listener_path = path_within(listener_file, artifact_root)
+            if listener_path is None or listener_path not in indexed_evidence:
+                errors.append(f"raw runner record {index} listener result evidence is absent from the verified index")
+            else:
+                payload, payload_errors = load_evidence_json(
+                    listener_path, f"raw runner record {index} listener result file"
+                )
+                errors.extend(payload_errors)
+                if payload is not None and payload != record.get("listener_result"):
+                    errors.append(f"raw runner record {index} listener result file does not match its raw payload")
+    return errors
+
+
 def direction_of(record: dict) -> Optional[str]:
     dialer = record.get("dialer")
     listener = record.get("listener")
@@ -331,15 +476,127 @@ def direction_of(record: dict) -> Optional[str]:
     return direction if direction in DIRECTIONS else None
 
 
+def command_options(command: object, action: str) -> tuple[dict[str, str], list[str]]:
+    if not isinstance(command, list) or len(command) < 2 or any(
+        not isinstance(value, str) or not value for value in command
+    ):
+        return {}, ["command is not a non-empty string array"]
+    if command[1] != action or (len(command) - 2) % 2:
+        return {}, [f"command is not a {action} command with flag/value pairs"]
+    options: dict[str, str] = {}
+    for index in range(2, len(command), 2):
+        flag, value = command[index], command[index + 1]
+        if not flag.startswith("--") or flag in options:
+            return {}, ["command has a duplicate or malformed option"]
+        options[flag] = value
+    return options, []
+
+
+def path_within(path: object, root: Path) -> Optional[Path]:
+    resolved = absolute_path(path)
+    if resolved is None:
+        return None
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return None
+    return resolved
+
+
+def failure_text(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return any(
+        isinstance(value.get(key), str) and value[key].strip()
+        for key in ("error", "failure", "failure_class", "timeout_class")
+    )
+
+
+def load_evidence_json(path: Path, label: str) -> tuple[Optional[dict], list[str]]:
+    try:
+        payload = load_json(path)
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        return None, [f"{label} is not valid JSON: {error}"]
+    if not isinstance(payload, dict):
+        return None, [f"{label} must be a JSON object"]
+    if failure_text(payload):
+        return None, [f"{label} contains contradictory failure text"]
+    return payload, []
+
+
+def validate_result_semantics(result: dict, record: dict) -> list[str]:
+    errors: list[str] = []
+    if result.get("implementation") != record.get("dialer") or result.get("role") != "dialer":
+        errors.append("raw runner result does not identify the recorded dialer role")
+    if result.get("scenario") != record.get("scenario"):
+        errors.append("raw runner result scenario differs from the raw runner record")
+    scenario = record.get("scenario")
+    if scenario == "ping" and not (
+        type(result.get("rtt_ms")) is int and result["rtt_ms"] >= 0
+    ) and result.get("ping_ok") is not True:
+        errors.append("raw Ping result lacks an RTT or successful Ping evidence")
+    if scenario == "identify" and not (
+        result.get("signed_peer_record") is True
+        and (
+            type(result.get("protocol_count")) is int and result["protocol_count"] > 0
+            or type(result.get("payload_bytes")) is int and result["payload_bytes"] > 0
+        )
+    ):
+        errors.append("raw Identify result lacks signed-peer-record protocol evidence")
+    if isinstance(scenario, str) and scenario.startswith("dht_") and result.get("negotiated_protocol") != "/ipfs/kad/1.0.0":
+        errors.append("raw DHT result lacks the Amino Kademlia negotiated protocol")
+    if isinstance(scenario, str) and scenario.startswith("rendezvous_") and result.get("negotiated_protocol") != "/rendezvous/1.0.0":
+        errors.append("raw Rendezvous result lacks the negotiated protocol")
+    return errors
+
+
+def validate_effective_configuration(record: dict, capability_id: str, expected_profile: str,
+                                     expected_stack: tuple[str, ...], expected_requires: tuple[str, ...]) -> list[str]:
+    configuration = record.get("effective_configuration")
+    if not isinstance(configuration, dict) or set(configuration) != {
+        "activation", "profile", "transport_stack", "requires_capabilities", "roles"
+    }:
+        return ["raw runner effective configuration has invalid schema"]
+    if (
+        configuration.get("activation") != "enabled"
+        or configuration.get("profile") != expected_profile
+        or configuration.get("transport_stack") != list(expected_stack)
+        or configuration.get("requires_capabilities") != list(expected_requires)
+    ):
+        return ["raw runner effective configuration differs from the enabled capability requirements"]
+    roles = configuration.get("roles")
+    if not isinstance(roles, dict) or set(roles) != {"dialer", "listener"}:
+        return ["raw runner effective configuration lacks dialer/listener roles"]
+    required_enabled = {capability_id, *expected_requires}
+    for name in ("dialer", "listener"):
+        role = roles.get(name)
+        if not isinstance(role, dict) or set(role) != {"implementation", "role", "enabled_capabilities"}:
+            return ["raw runner effective configuration role has invalid schema"]
+        if role.get("implementation") != record.get(name) or role.get("role") != name:
+            return ["raw runner effective configuration role differs from the raw direction"]
+        enabled = role.get("enabled_capabilities")
+        if not isinstance(enabled, list) or set(enabled) != required_enabled or len(enabled) != len(set(enabled)):
+            return ["raw runner effective configuration does not enable the capability and its dependencies"]
+    if expected_profile == "private_network" and "autonat_" in str(record.get("scenario")) and (
+        "reachability.private_internet_policy" not in expected_requires
+    ):
+        return ["private AutoNAT acceptance must require reachability.private_internet_policy"]
+    return []
+
+
 def validate_successful_raw_record(
     record: object,
+    capability_id: str,
     expected_direction: str,
     expected_profile: str,
     expected_stack: tuple[str, ...],
     expected_runner_scenario: str,
     expected_acceptance_scenario: str,
+    expected_requires: tuple[str, ...],
     indexed_evidence: dict[Path, str],
     used_evidence: set[Path],
+    binary_paths: dict[str, Path],
+    artifact_root: Path,
 ) -> list[str]:
     if not isinstance(record, dict):
         return ["raw runner record must be an object"]
@@ -360,6 +617,9 @@ def validate_successful_raw_record(
         errors.append("raw runner acceptance scenario differs from the capability requirement")
     if record.get("scenario") != expected_runner_scenario.split("/", 1)[1]:
         errors.append("raw runner fixture scenario does not match runner_scenario_id")
+    errors.extend(validate_effective_configuration(
+        record, capability_id, expected_profile, expected_stack, expected_requires
+    ))
 
     result = record.get("result")
     if not isinstance(result, dict) or result.get("status") != "ok":
@@ -370,11 +630,44 @@ def validate_successful_raw_record(
     if not isinstance(result_file, str) or not isinstance(attempts, list) or not attempts:
         errors.append("raw runner result lacks a result file or successful command attempts")
         return errors
-    claim_paths = {Path(result_file).resolve()}
+    result_path = path_within(result_file, artifact_root)
+    if result_path is None:
+        errors.append("raw runner result file escapes the artifact directory")
+        return errors
+    payload, payload_errors = load_evidence_json(result_path, "raw runner result file")
+    errors.extend(payload_errors)
+    raw_payload = {key: value for key, value in result.items() if key not in {"result_file", "attempts"}}
+    if payload is not None and payload != raw_payload:
+        errors.append("raw runner result file does not match the recorded raw result payload")
+    if failure_text(result):
+        errors.append("raw runner result contains contradictory failure text")
+    errors.extend(validate_result_semantics(result, record))
+    claim_paths = {result_path}
     for attempt in attempts:
         if not isinstance(attempt, dict) or type(attempt.get("exit_code")) is not int or attempt["exit_code"] != 0:
             errors.append("raw runner command attempt did not exit with code 0")
             continue
+        if attempt.get("kind") != "dial" or attempt.get("scenario_id") != record.get("scenario") or failure_text(attempt):
+            errors.append("raw runner command attempt has contradictory execution status")
+            continue
+        command = attempt.get("command")
+        if not isinstance(command, list) or not command or absolute_path(command[0]) != binary_paths.get(record.get("dialer")):
+            errors.append("raw runner dial command executable differs from recorded dialer binary")
+            continue
+        options, command_errors = command_options(command, "dial")
+        errors.extend(command_errors)
+        required_options = {"--scenario", "--peer-id", "--addr", "--result-file", "--store-dir", "--transport"}
+        if set(options) - (required_options | {"--payload", "--target-peer-id"}) or not required_options <= set(options):
+            errors.append("raw runner dial command has an invalid option schema")
+        elif (
+            options["--scenario"] != record.get("scenario")
+            or path_within(options["--result-file"], artifact_root) != result_path
+            or path_within(options["--store-dir"], artifact_root) is None
+            or not options["--peer-id"]
+            or not options["--addr"]
+            or options["--transport"] != record.get("transport")
+        ):
+            errors.append("raw runner dial command does not match its recorded result")
         log_file = attempt.get("log_file")
         if not isinstance(log_file, str):
             errors.append("raw runner command attempt lacks a log file")
@@ -388,12 +681,46 @@ def validate_successful_raw_record(
         errors.append("raw runner listener lacks a clean terminal status")
     else:
         claim_paths.add(Path(listener_log).resolve())
+        command = listener.get("command") if isinstance(listener, dict) else None
+        if not isinstance(command, list) or not command or absolute_path(command[0]) != binary_paths.get(record.get("listener")):
+            errors.append("raw runner listener command executable differs from recorded listener binary")
+        else:
+            options, command_errors = command_options(command, "listen")
+            errors.extend(command_errors)
+            required_options = {"--ready-file", "--stop-file", "--store-dir", "--features", "--transport", "--scenario"}
+            if set(options) - (required_options | {"--result-file", "--seed-file", "--seed-peer-id", "--seed-addr", "--expected-messages"}) or not required_options <= set(options):
+                errors.append("raw runner listener command has an invalid option schema")
+            elif (
+                options["--scenario"] != record.get("scenario")
+                or options["--transport"] != record.get("transport")
+                or not options["--features"]
+                or any(path_within(options[field], artifact_root) is None for field in ("--ready-file", "--stop-file", "--store-dir"))
+                or (
+                    record.get("listener_result_file") is not None
+                    and path_within(options.get("--result-file"), artifact_root)
+                    != path_within(record.get("listener_result_file"), artifact_root)
+                )
+            ):
+                errors.append("raw runner listener command does not match the recorded listener")
+            expected_feature = CAPABILITY_LISTENER_FEATURES.get(capability_id)
+            if expected_feature is not None and expected_feature not in options.get("--features", "").split(","):
+                errors.append("raw runner listener command does not enable the required optional service")
     listener_result_file = record.get("listener_result_file")
     if listener_result_file is not None:
         if not isinstance(listener_result_file, str):
             errors.append("raw runner listener result file is malformed")
         else:
-            claim_paths.add(Path(listener_result_file).resolve())
+            listener_result_path = path_within(listener_result_file, artifact_root)
+            if listener_result_path is None:
+                errors.append("raw runner listener result file escapes the artifact directory")
+            else:
+                listener_payload, listener_errors = load_evidence_json(
+                    listener_result_path, "raw runner listener result file"
+                )
+                errors.extend(listener_errors)
+                if listener_payload is not None and listener_payload != record.get("listener_result"):
+                    errors.append("raw runner listener result file does not match the recorded listener payload")
+                claim_paths.add(listener_result_path)
 
     for path in claim_paths:
         if path not in indexed_evidence:
@@ -405,8 +732,36 @@ def validate_successful_raw_record(
     return errors
 
 
+def validate_execution_receipt(receipt: object, artifact_path: Path, artifact: dict) -> list[str]:
+    if not isinstance(receipt, dict) or set(receipt) != {
+        "schema_version", "runner_argv", "started_at_unix", "finished_at_unix", "returncode",
+        "artifact_path", "artifact_sha256",
+    }:
+        return ["promotion execution receipt has invalid schema"]
+    started = receipt.get("started_at_unix")
+    finished = receipt.get("finished_at_unix")
+    artifact_started = artifact.get("started_at_unix")
+    artifact_finished = artifact.get("finished_at_unix")
+    if (
+        receipt.get("schema_version") != 1
+        or receipt.get("runner_argv") != artifact.get("runner_argv")
+        or receipt.get("returncode") != 0
+        or absolute_path(receipt.get("artifact_path")) != artifact_path.resolve()
+        or receipt.get("artifact_sha256") != sha256_file(artifact_path)
+        or not is_timestamp(started)
+        or not is_timestamp(finished)
+        or not is_timestamp(artifact_started)
+        or not is_timestamp(artifact_finished)
+        or started > artifact_started
+        or finished < artifact_finished
+    ):
+        return ["promotion execution receipt does not bind this successful runner invocation"]
+    return []
+
+
 def validate(
-    root: Path, manifest_path: Path, artifact_path: Path, expected_head: str
+    root: Path, manifest_path: Path, artifact_path: Path, expected_head: str,
+    execution_receipt: Optional[dict] = None,
 ) -> tuple[list[str], bool]:
     if not root.is_dir():
         return ["source root is unavailable"], False
@@ -430,7 +785,14 @@ def validate(
         return [*errors, "artifact has invalid canonical runner schema"], False
     if artifact.get("schema_version") != ARTIFACT_SCHEMA["schema_version"]:
         errors.append("artifact schema_version is invalid")
-    errors.extend(validate_runner_argv(root, artifact.get("runner_argv"), manifest_path))
+    if execution_receipt is not None:
+        errors.extend(validate_execution_receipt(execution_receipt, artifact_path, artifact))
+    root_value = artifact.get("artifact_root")
+    if not isinstance(root_value, str) or not root_value or not Path(root_value).is_absolute():
+        return [*errors, "artifact_root must be an absolute runner artifact directory"], False
+    artifact_root = Path(root_value).resolve()
+    if not artifact_root.is_dir():
+        return [*errors, "artifact_root is unavailable"], False
     started = artifact.get("started_at_unix")
     finished = artifact.get("finished_at_unix")
     now = time.time()
@@ -459,25 +821,30 @@ def validate(
     except RuntimeError as error:
         errors.append(f"cannot fingerprint checked-out worktree: {error}")
         current_identity = {}
-    errors.extend(validate_fixture_provenance(
+    binary_paths, provenance_errors = validate_execution_provenance(
         artifact.get("fixture_provenance"), expected_head, current_identity
+    )
+    errors.extend(provenance_errors)
+    inputs, input_errors = validate_runner_inputs(
+        root, artifact_path, artifact_root, manifest_path, artifact.get("fixture_provenance")
+    )
+    errors.extend(input_errors)
+    errors.extend(validate_runner_argv(
+        root, artifact.get("runner_argv"), manifest_path, inputs, binary_paths
     ))
     failures = artifact.get("failures")
-    if not isinstance(failures, list) or failures:
+    if not isinstance(failures, list):
+        errors.append("canonical runner failures has invalid schema")
+    elif failures:
         errors.append("canonical runner failures must be exactly empty")
     artifacts = artifact.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
         return [*errors, "canonical runner artifacts must be a non-empty array"], False
-    root_value = artifact.get("artifact_root")
-    if not isinstance(root_value, str) or not root_value or not Path(root_value).is_absolute():
-        return [*errors, "artifact_root must be an absolute runner artifact directory"], False
-    artifact_root = Path(root_value).resolve()
-    if not artifact_root.is_dir():
-        return [*errors, "artifact_root is unavailable"], False
     indexed_evidence, evidence_errors = validate_evidence_index(
         artifact_path, artifact_root, artifacts, artifact.get("evidence_index")
     )
     errors.extend(evidence_errors)
+    errors.extend(validate_all_result_evidence(artifacts, indexed_evidence, artifact_root))
 
     used_records: set[int] = set()
     used_evidence: set[Path] = set()
@@ -487,6 +854,7 @@ def validate(
         expected_profile,
         expected_stack,
         expected_runner_scenario,
+        expected_requires,
     ) in required.items():
         for direction in expected_directions:
             matches = [
@@ -512,16 +880,22 @@ def validate(
                 f"{capability_id}/{scenario_id}/{direction}: {error}"
                 for error in validate_successful_raw_record(
                     artifacts[index],
+                    capability_id,
                     direction,
                     expected_profile,
                     expected_stack,
                     expected_runner_scenario,
                     scenario_id,
+                    expected_requires,
                     indexed_evidence,
                     used_evidence,
+                    binary_paths,
+                    artifact_root,
                 )
             )
-    return errors, any(status == ARTIFACT_SCHEMA["limited_status"] for _, status, _, _, _ in required.values())
+    return errors, any(
+        status == ARTIFACT_SCHEMA["limited_status"] for _, status, _, _, _, _ in required.values()
+    )
 
 
 def fixture_manifest(expected_status: str = "passed") -> dict[str, object]:
@@ -564,11 +938,12 @@ def fixture_identity(root: Path, head: str) -> dict[str, object]:
 
 
 def build_evidence_index(root: Path, artifacts: list[dict]) -> list[dict]:
+    root = root.resolve()
     return [
         {
-            "path": path.relative_to(root).as_posix(),
-            "size": path.stat().st_size,
-            "sha256": sha256_file(path),
+            "path": path.resolve().relative_to(root).as_posix(),
+            "size": path.resolve().stat().st_size,
+            "sha256": sha256_file(path.resolve()),
         }
         for path in sorted(raw_evidence_paths(artifacts), key=lambda value: str(value))
     ]
@@ -577,6 +952,13 @@ def build_evidence_index(root: Path, artifacts: list[dict]) -> list[dict]:
 def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: str) -> None:
     artifact_root = artifact_path.parent / "interop-run"
     artifact_root.mkdir(parents=True, exist_ok=True)
+    donors_root = root / "donors"
+    donors_root.mkdir(exist_ok=True)
+    binaries = {}
+    for implementation in ("forge", "go", "rust"):
+        binary = artifact_root / f"{implementation}-fixture"
+        binary.write_text(f"{implementation} fixture\n")
+        binaries[implementation] = binary
     timestamp = max(time.time(), float(subprocess.check_output(
         ["git", "-C", str(root), "show", "-s", "--format=%ct", "HEAD"], text=True
     ).strip()))
@@ -584,9 +966,18 @@ def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: s
     for dialer, listener in (("forge", "go"), ("go", "forge")):
         stem = f"{dialer}-to-{listener}"
         result_file = artifact_root / f"{stem}.json"
+        listener_result_file = artifact_root / f"{stem}-listener.json"
         command_log = artifact_root / f"{stem}-dial.log"
         listener_log = artifact_root / f"{stem}-listen.log"
-        result_file.write_text('{"status":"ok"}\n')
+        result_payload = {
+            "implementation": dialer,
+            "role": "dialer",
+            "scenario": "test_scenario",
+            "status": "ok",
+        }
+        result_file.write_text(json.dumps(result_payload) + "\n")
+        listener_payload = {"implementation": listener, "role": "listener", "status": "ok"}
+        listener_result_file.write_text(json.dumps(listener_payload) + "\n")
         command_log.write_text("dial finished\n")
         listener_log.write_text("listener stopped\n")
         artifacts.append({
@@ -598,31 +989,64 @@ def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: s
             "profile": "native",
             "transport_stack": ["tcp", "yamux"],
             "transport": "tcp",
+            "effective_configuration": {
+                "activation": "enabled",
+                "profile": "native",
+                "transport_stack": ["tcp", "yamux"],
+                "requires_capabilities": [],
+                "roles": {
+                    "dialer": {
+                        "implementation": dialer,
+                        "role": "dialer",
+                        "enabled_capabilities": ["test.protocol"],
+                    },
+                    "listener": {
+                        "implementation": listener,
+                        "role": "listener",
+                        "enabled_capabilities": ["test.protocol"],
+                    },
+                },
+            },
             "result": {
-                "status": "ok",
+                **result_payload,
                 "result_file": str(result_file),
                 "attempts": [{
-                    "command": ["fixture", "dial"],
+                    "kind": "dial",
+                    "scenario_id": "test_scenario",
+                    "command": [
+                        str(binaries[dialer]), "dial", "--scenario", "test_scenario", "--peer-id", "peer",
+                        "--addr", "/ip4/127.0.0.1/tcp/1", "--result-file", str(result_file),
+                        "--store-dir", str(artifact_root / f"{stem}-dial-store"), "--transport", "tcp",
+                    ],
                     "log_file": str(command_log),
                     "exit_code": 0,
                 }],
             },
             "listener_process": {
-                "command": ["fixture", "listen"],
+                "command": [
+                    str(binaries[listener]), "listen", "--ready-file", str(artifact_root / f"{stem}-ready.json"),
+                    "--stop-file", str(artifact_root / f"{stem}.stop"),
+                    "--store-dir", str(artifact_root / f"{stem}-listen-store"), "--features", "ping",
+                    "--transport", "tcp", "--scenario", "test_scenario", "--result-file", str(listener_result_file),
+                ],
                 "log_file": str(listener_log),
                 "terminal_status": {"exit_code": 0, "termination": "graceful"},
             },
+            "listener_result_file": str(listener_result_file),
+            "listener_result": listener_payload,
         })
     identity = fixture_identity(root, head)
     artifact = {
         "schema_version": 2,
         "runner_argv": [
-            sys.executable,
-            CANONICAL_RUNNER.as_posix(),
-            "--enabled",
-            "ON",
-            "--acceptance-manifest",
-            str(manifest_path.resolve()),
+            str(Path(sys.executable).resolve()), str((root / CANONICAL_RUNNER).resolve()),
+            "--enabled", "ON",
+            "--forge-fixture", str(binaries["forge"]),
+            "--source-dir", str((root / CANONICAL_RUNNER).parent.resolve()),
+            "--build-dir", str(artifact_path.parent.resolve()),
+            "--forge-root", str(root.resolve()),
+            "--donors-root", str(donors_root.resolve()),
+            "--acceptance-manifest", str(manifest_path.resolve()),
         ],
         "started_at_unix": timestamp,
         "finished_at_unix": time.time(),
@@ -635,6 +1059,25 @@ def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: s
                 "forge": identity,
                 "compiler": {"path": "/fixture/clang", "id": "Clang", "version": "22.1.8"},
                 "build_profile": "default",
+            },
+            "tools": {
+                "python": {
+                    "path": str(Path(sys.executable).resolve()),
+                    "version_output": subprocess.check_output(
+                        [str(Path(sys.executable).resolve()), "--version"], text=True
+                    ).strip(),
+                },
+            },
+            "binaries": {
+                implementation: {"path": str(binary), "sha256": sha256_file(binary)}
+                for implementation, binary in binaries.items()
+            },
+            "runner_inputs": {
+                "source_dir": str((root / CANONICAL_RUNNER).parent.resolve()),
+                "build_dir": str(artifact_path.parent.resolve()),
+                "forge_root": str(root.resolve()),
+                "donors_root": str(donors_root.resolve()),
+                "acceptance_manifest": str(manifest_path.resolve()),
             },
         },
         "artifacts": artifacts,
@@ -691,6 +1134,98 @@ def self_test() -> int:
         errors, has_limitations = validate(root, manifest_path, artifact_path, head)
         if errors or has_limitations:
             print("self-test failed: canonical runner artifact was not accepted", file=sys.stderr)
+            return 1
+        artifact = load_json(artifact_path)
+        assert isinstance(artifact, dict)
+        receipt = {
+            "schema_version": 1,
+            "runner_argv": artifact["runner_argv"],
+            "started_at_unix": artifact["started_at_unix"] - 1,
+            "finished_at_unix": artifact["finished_at_unix"] + 1,
+            "returncode": 0,
+            "artifact_path": str(artifact_path.resolve()),
+            "artifact_sha256": sha256_file(artifact_path),
+        }
+        errors, _ = validate(root, manifest_path, artifact_path, head, receipt)
+        if errors:
+            print("self-test failed: in-process promotion receipt was not accepted", file=sys.stderr)
+            return 1
+        receipt["runner_argv"] = ["/bin/false"]
+        errors, _ = validate(root, manifest_path, artifact_path, head, receipt)
+        if not errors:
+            print("self-test failed: forged promotion receipt argv was accepted", file=sys.stderr)
+            return 1
+
+        write_artifact(root, manifest_path, artifact_path, head)
+        artifact = load_json(artifact_path)
+        assert isinstance(artifact, dict)
+        artifact["runner_argv"] = artifact["runner_argv"][:-2]
+        artifact_path.write_text(json.dumps(artifact))
+        if not expect_rejected(root, manifest_path, artifact_path, head, "incomplete runner argv"):
+            return 1
+
+        write_artifact(root, manifest_path, artifact_path, head)
+        artifact = load_json(artifact_path)
+        assert isinstance(artifact, dict)
+        artifact["runner_argv"][0] = "/bin/false"
+        artifact_path.write_text(json.dumps(artifact))
+        if not expect_rejected(root, manifest_path, artifact_path, head, "forged runner executable"):
+            return 1
+
+        write_artifact(root, manifest_path, artifact_path, head)
+        artifact = load_json(artifact_path)
+        assert isinstance(artifact, dict)
+        artifact["runner_argv"].extend(["--provenance-only", "1"])
+        artifact_path.write_text(json.dumps(artifact))
+        if not expect_rejected(root, manifest_path, artifact_path, head, "provenance-only runner argv"):
+            return 1
+
+        write_artifact(root, manifest_path, artifact_path, head)
+        artifact = load_json(artifact_path)
+        assert isinstance(artifact, dict)
+        artifact["artifacts"][0]["result"]["attempts"][0]["command"][0] = "/bin/false"
+        artifact_path.write_text(json.dumps(artifact))
+        if not expect_rejected(root, manifest_path, artifact_path, head, "false dial executable"):
+            return 1
+
+        write_artifact(root, manifest_path, artifact_path, head)
+        artifact = load_json(artifact_path)
+        assert isinstance(artifact, dict)
+        artifact["fixture_provenance"]["binaries"]["forge"]["sha256"] = "0" * 64
+        artifact_path.write_text(json.dumps(artifact))
+        if not expect_rejected(root, manifest_path, artifact_path, head, "bad binary provenance hash"):
+            return 1
+
+        write_artifact(root, manifest_path, artifact_path, head)
+        artifact = load_json(artifact_path)
+        assert isinstance(artifact, dict)
+        result_path = Path(artifact["artifacts"][0]["result"]["result_file"])
+        result_path.write_text("not JSON\n")
+        artifact["evidence_index"] = build_evidence_index(Path(artifact["artifact_root"]).resolve(), artifact["artifacts"])
+        artifact_path.write_text(json.dumps(artifact))
+        if not expect_rejected(root, manifest_path, artifact_path, head, "non-JSON result evidence"):
+            return 1
+
+        write_artifact(root, manifest_path, artifact_path, head)
+        artifact = load_json(artifact_path)
+        assert isinstance(artifact, dict)
+        result_path = Path(artifact["artifacts"][0]["result"]["result_file"])
+        result_path.write_text(json.dumps({"status": "ok", "scenario": "different"}) + "\n")
+        artifact["evidence_index"] = build_evidence_index(Path(artifact["artifact_root"]).resolve(), artifact["artifacts"])
+        artifact_path.write_text(json.dumps(artifact))
+        if not expect_rejected(root, manifest_path, artifact_path, head, "mismatched result evidence"):
+            return 1
+
+        write_artifact(root, manifest_path, artifact_path, head)
+        artifact = load_json(artifact_path)
+        assert isinstance(artifact, dict)
+        result = artifact["artifacts"][0]["result"]
+        result["error"] = "fixture reported failure"
+        result_path = Path(result["result_file"])
+        result_path.write_text(json.dumps({key: value for key, value in result.items() if key not in {"result_file", "attempts"}}) + "\n")
+        artifact["evidence_index"] = build_evidence_index(Path(artifact["artifact_root"]).resolve(), artifact["artifacts"])
+        artifact_path.write_text(json.dumps(artifact))
+        if not expect_rejected(root, manifest_path, artifact_path, head, "contradictory failure text"):
             return 1
 
         write_artifact(root, manifest_path, artifact_path, head)
@@ -790,8 +1325,8 @@ def self_test() -> int:
             print("self-test failed: documented limitation was not distinguished", file=sys.stderr)
             return 1
     print(
-        "stage6 acceptance checker self-test ok: canonical schema, missing, stale, nonzero, failures, "
-        "wrong profile, missing and bad evidence, reuse, dirty tree, empty scenarios and limitations covered"
+        "stage6 acceptance checker self-test ok: canonical argv, forged executables, missing, stale, "
+        "nonzero, failures, result parsing, evidence hashes/reuse, dirty tree, empty scenarios and limitations covered"
     )
     return 0
 
@@ -813,12 +1348,13 @@ def main() -> int:
     )
     if errors:
         for error in errors:
-            print(f"NOT_RUN: {error}", file=sys.stderr)
+            status = "FAILED" if error == "canonical runner failures must be exactly empty" else "NOT_RUN"
+            print(f"{status}: {error}", file=sys.stderr)
         return 1
     if has_documented_limitations:
-        print("PASS_WITH_DOCUMENTED_LIMITATIONS: canonical runner acceptance artifact is complete")
+        print("CONSISTENT_WITH_DOCUMENTED_LIMITATIONS: standalone artifact consistency only; not promotion")
     else:
-        print("PASS: canonical runner acceptance artifact is complete")
+        print("CONSISTENT: standalone artifact consistency only; CMake promotion wrapper owns PASS")
     return 0
 
 

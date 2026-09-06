@@ -79,25 +79,25 @@ The registry also fixes dependencies and allowed capability owners; the roadmap,
 chrono and crypto prerequisite PRs own none.
 
 The source inventory checker validates this registration only and never emits a
-live interop PASS. Such a PASS requires a separate external artifact matching
-`interop_acceptance_registry.artifact_schema` at the exact reviewed `HEAD`, with
-the manifest SHA-256, canonical structured runner argv, commit-bound timestamps,
-each capability-specific scenario and a unique SHA-256-verified evidence file
-for every direction. The checked-out tracked tree must be clean. Current
-capability scenarios must also be registered in the live runner. Every artifact
-result repeats the registry's profile, transport stack and enabled-run state, so
-native QUIC, native TCP/Yamux and private TCP/Yamux+pnet are independent proofs.
-An optional capability is tested only as an explicit enabled run, never inferred
-to be a default. Planned Stage 6 scenario IDs are comprehensive acceptance
-requirements, not runner registration or evidence. Missing, stale or incomplete artifacts
-are `NOT_RUN`; a documented limitation reports
-`PASS_WITH_DOCUMENTED_LIMITATIONS`, never plain `PASS`.
+live interop PASS. A standalone artifact evaluator can report local consistency,
+but the CMake promotion target owns the canonical enabled runner invocation and
+immediately validates the artifact produced in that same invocation. It binds
+the reviewed clean `HEAD`, manifest, canonical argv and roots, current Python,
+fixture binaries, effective role/capability configuration and unique evidence
+per direction. Native QUIC, native TCP/Yamux and private TCP/Yamux+pnet are
+independent proofs; an optional capability is tested only as an explicit enabled
+run, never inferred to be default. Planned Stage 6 scenario IDs are comprehensive
+acceptance requirements, not runner registration or evidence. Missing or stale
+provenance is `NOT_RUN`; a canonical runner nonzero exit or recorded failure is
+`FAILED`; a documented limitation reports `PASS_WITH_DOCUMENTED_LIMITATIONS`.
 
-`test_forge_p2p_inventory` remains the paired source-manifest gate. CMake runs
-actual artifact validation only when
-`FORGE_P2P_STAGE6_ACCEPTANCE_ARTIFACT` is configured; without that cache path,
-PR0 runs only source validation and the deterministic acceptance-checker
-self-test.
+The SHA-256 evidence index is tamper-evident, self-consistent local evidence,
+not signed remote attestation or a claim that malicious artifacts are unforgeable.
+
+`test_forge_p2p_inventory` remains the paired source-manifest gate and PR0 runs
+only source validation plus the deterministic acceptance-checker self-test. The
+explicit `test_forge_p2p_stage6_acceptance` CMake target performs the live
+promotion; it never promotes a replayed externally supplied artifact.
 
 `discovery::policy` and `node::limits::discovery` remain Stable source
 compatibility surfaces. Node construction normalizes non-default legacy values

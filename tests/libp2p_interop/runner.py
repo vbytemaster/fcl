@@ -72,6 +72,66 @@ LOCKED_FORGE_FIXTURE_COMPILER = {
 }
 
 
+def load_acceptance_configurations(path: Optional[str]) -> dict[str, dict]:
+    if path is None:
+        return {}
+    registry = json.loads(Path(path).read_text()).get("interop_acceptance_registry", {})
+    capabilities = registry.get("capabilities", {}) if isinstance(registry, dict) else {}
+    if not isinstance(capabilities, dict):
+        raise RuntimeError("acceptance manifest capabilities are invalid")
+    configurations: dict[str, dict] = {}
+    for capability_id, entry in capabilities.items():
+        scenarios = entry.get("scenarios", []) if isinstance(entry, dict) else []
+        if not isinstance(capability_id, str) or not isinstance(scenarios, list):
+            raise RuntimeError("acceptance manifest scenario configuration is invalid")
+        for scenario in scenarios:
+            if not isinstance(scenario, dict):
+                raise RuntimeError("acceptance manifest scenario is invalid")
+            scenario_id = scenario.get("id")
+            requires = scenario.get("requires_capabilities", [])
+            if (
+                not isinstance(scenario_id, str)
+                or not scenario_id
+                or not isinstance(requires, list)
+                or any(not isinstance(value, str) or not value for value in requires)
+                or len(set(requires)) != len(requires)
+                or scenario_id in configurations
+            ):
+                raise RuntimeError("acceptance manifest capability requirements are invalid")
+            configurations[scenario_id] = {
+                "capability": capability_id,
+                "requires_capabilities": list(requires),
+            }
+    return configurations
+
+
+def effective_configuration(configurations: dict[str, dict], acceptance_scenario_id: str,
+                            dialer: str, listener: str, profile: str,
+                            transport_stack: tuple[str, ...]) -> dict:
+    configuration = configurations.get(acceptance_scenario_id, {})
+    capability = configuration.get("capability")
+    requires = configuration.get("requires_capabilities", [])
+    enabled = [capability, *requires] if isinstance(capability, str) else list(requires)
+    return {
+        "activation": "enabled",
+        "profile": profile,
+        "transport_stack": list(transport_stack),
+        "requires_capabilities": list(requires),
+        "roles": {
+            "dialer": {
+                "implementation": dialer,
+                "role": "dialer",
+                "enabled_capabilities": enabled,
+            },
+            "listener": {
+                "implementation": listener,
+                "role": "listener",
+                "enabled_capabilities": enabled,
+            },
+        },
+    }
+
+
 def run(command: list[str], cwd: Optional[Path] = None, env: Optional[dict[str, str]] = None) -> None:
     subprocess.run(command, cwd=cwd, env=env, check=True)
 
@@ -371,7 +431,6 @@ def run_command_with_attempts(command: list[str], log_file: Path, scenario: str,
 
 def attach_attempts(result: dict, attempts: list[dict]) -> dict:
     result["attempts"] = attempts
-    result["flaky_attempts"] = max(0, len(attempts) - 1)
     return result
 
 
@@ -874,7 +933,8 @@ def require_dht_provider_evidence(result: dict, dialer: str) -> None:
 
 
 def run_pair(dialer_binary: Path, dialer: str, listener_binary: Path, listener: str, scenario: str, root: Path,
-             acceptance_scenario_id: Optional[str] = None) -> dict:
+             acceptance_scenario_id: Optional[str] = None,
+             acceptance_configurations: Optional[dict[str, dict]] = None) -> dict:
     runner_profile = "quic_base"
     if scenario in DHT_SCENARIOS:
         runner_profile = "quic_dht"
@@ -894,6 +954,7 @@ def run_pair(dialer_binary: Path, dialer: str, listener_binary: Path, listener: 
         ("quic",),
         f"{runner_profile}/{scenario}",
         acceptance_scenario_id or scenario,
+        acceptance_configurations,
     )
 
 
@@ -948,7 +1009,8 @@ def run_dht_value_remote_get(binaries: dict[str, Path], writer: str, listener: s
 def run_pair_with_transport(dialer_binary: Path, dialer: str, listener_binary: Path, listener: str, scenario: str,
                             root: Path, transport: str, acceptance_profile: str,
                             transport_stack: tuple[str, ...], runner_scenario_id: str,
-                            acceptance_scenario_id: str) -> dict:
+                            acceptance_scenario_id: str,
+                            acceptance_configurations: Optional[dict[str, dict]] = None) -> dict:
     work = root / f"{transport}-{dialer}-to-{listener}-{acceptance_scenario_id}"
     work.mkdir(parents=True, exist_ok=True)
     listener_result = (
@@ -996,6 +1058,14 @@ def run_pair_with_transport(dialer_binary: Path, dialer: str, listener_binary: P
             },
             "result": result,
             "listener_result": delivered,
+            "effective_configuration": effective_configuration(
+                acceptance_configurations or {},
+                acceptance_scenario_id,
+                dialer,
+                listener,
+                acceptance_profile,
+                transport_stack,
+            ),
         }
         if transport == "tcp":
             out["negotiated_security"] = "/noise"
@@ -1206,13 +1276,23 @@ def main() -> int:
         "binaries": {},
         "tools": {},
         "commands": [],
+        "runner_inputs": {
+            "source_dir": str(source_dir),
+            "build_dir": str(build_dir),
+            "forge_root": str(forge_root),
+            "donors_root": str(donors_root),
+            "acceptance_manifest": (
+                str(Path(args.acceptance_manifest).resolve()) if args.acceptance_manifest is not None else None
+            ),
+        },
     }
     started_at_unix = time.time()
-    runner_argv = [sys.executable, *sys.argv]
+    runner_argv = [str(Path(sys.executable).resolve()), *sys.argv]
     start_identity = None
     acceptance_manifest = None
     try:
         acceptance_manifest = acceptance_manifest_metadata(args.acceptance_manifest)
+        acceptance_configurations = load_acceptance_configurations(args.acceptance_manifest)
         python_path = str(Path(sys.executable).resolve())
         git_path = str(Path(require_tool("git")).resolve())
         provenance["tools"]["python"] = {
@@ -1300,6 +1380,7 @@ def main() -> int:
                                         scenario,
                                         root,
                                         acceptance_scenario_id,
+                                        acceptance_configurations,
                                     )
                                 )
                             except Exception as error:
@@ -1321,6 +1402,7 @@ def main() -> int:
                                             scenario,
                                             root,
                                             acceptance_scenario_id,
+                                            acceptance_configurations,
                                         )
                                     )
                         except Exception as error:
@@ -1330,7 +1412,10 @@ def main() -> int:
                             continue
                         try:
                             artifacts.append(
-                                run_pair(binaries[dialer], dialer, binaries[listener], listener, scenario, root)
+                                run_pair(
+                                    binaries[dialer], dialer, binaries[listener], listener, scenario, root,
+                                    acceptance_configurations=acceptance_configurations,
+                                )
                             )
                         except Exception as error:
                             failures.append(f"{dialer}->{listener} {scenario}: {error}")
@@ -1354,6 +1439,7 @@ def main() -> int:
                                         ("tcp", "yamux"),
                                         f"{profile}/{scenario}",
                                         acceptance_scenario_id,
+                                        acceptance_configurations,
                                     )
                                 )
                             except Exception as error:
@@ -1379,6 +1465,7 @@ def main() -> int:
                                     scenario,
                                     root,
                                     acceptance_scenario_id,
+                                    acceptance_configurations,
                                 )
                             )
                         except Exception as error:

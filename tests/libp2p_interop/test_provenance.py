@@ -40,6 +40,21 @@ def add_submodule(root: Path, source: Path, destination: str) -> None:
 
 
 class WorktreeFingerprintTest(unittest.TestCase):
+    def make_uninitialized_gitlink(self, temporary: Path) -> Path:
+        source = temporary / "source"
+        initialize_repository(source)
+        (source / "source.txt").write_text("source\n")
+        source_head = commit(source, "source")
+
+        root = temporary / "root"
+        initialize_repository(root)
+        (root / "root.txt").write_text("root\n")
+        commit(root, "root")
+        git(root, "update-index", "--add", "--cacheinfo", f"160000,{source_head},vendor/empty")
+        git(root, "commit", "-m", "indexed gitlink")
+        (root / "vendor" / "empty").mkdir(parents=True)
+        return root
+
     def make_nested_worktree(self, temporary: Path) -> tuple[Path, str, str, str]:
         leaf = temporary / "leaf"
         initialize_repository(leaf)
@@ -115,6 +130,30 @@ class WorktreeFingerprintTest(unittest.TestCase):
             self.assertTrue(dirty_nested.dirty)
             self.restore_clean_submodules(root)
             self.assertEqual(worktree_identity(root), clean)
+
+    def test_empty_uninitialized_gitlink_is_clean_and_deterministic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_uninitialized_gitlink(Path(directory))
+            first = worktree_identity(root)
+            second = worktree_identity(root)
+            self.assertFalse(first.dirty)
+            self.assertEqual(first, second)
+
+    def test_nonempty_uninitialized_gitlink_is_dirty(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_uninitialized_gitlink(Path(directory))
+            clean = worktree_identity(root)
+            (root / "vendor" / "empty" / "unexpected.txt").write_text("not a repository\n")
+            invalid = worktree_identity(root)
+            self.assertTrue(invalid.dirty)
+            self.assertNotEqual(invalid.fingerprint, clean.fingerprint)
+
+    def test_initialized_nested_submodule_remains_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root, _, _, _ = self.make_nested_worktree(Path(directory))
+            self.assertTrue((root / "module" / ".git").is_file())
+            self.assertTrue((root / "module" / "nested" / ".git").is_file())
+            self.assertFalse(worktree_identity(root).dirty)
 
 
 class InteropCMakeConfigurationTest(unittest.TestCase):
