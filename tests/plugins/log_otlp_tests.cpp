@@ -19,9 +19,11 @@
 #include <vector>
 
 import forge.api.core.registry;
+import forge.app.application_shell;
 import forge.app.diagnostics;
 import forge.app.events;
 import forge.app.plugin_context;
+import forge.app.plugin_registry;
 import forge.app.signals;
 import forge.asio.blocking;
 import forge.asio.runtime;
@@ -204,6 +206,13 @@ struct plugin_harness {
    }
 };
 
+class shell_application final : public forge::app::application_shell {
+ protected:
+   void on_register_plugins(forge::app::plugin_registry& registry) override {
+      registry.register_plugin(log_otlp::descriptor());
+   }
+};
+
 class test_secrets_api final : public crypto_secrets::api {
  public:
    explicit test_secrets_api(bool deny = false, std::string value = "Bearer sensitive")
@@ -274,7 +283,7 @@ BOOST_AUTO_TEST_CASE(log_otlp_descriptor_api_and_config_are_nested) {
    BOOST_TEST(has("crash-spool"));
 }
 
-BOOST_AUTO_TEST_CASE(log_otlp_disabled_config_does_not_export_and_api_is_unavailable) {
+BOOST_AUTO_TEST_CASE(log_otlp_export_disabled_does_not_export_and_api_is_unavailable) {
    auto harness = plugin_harness{};
    auto document = forge::config::core::document{};
    document.set("plugins.log.otlp.export-enabled", false);
@@ -290,7 +299,7 @@ BOOST_AUTO_TEST_CASE(log_otlp_disabled_config_does_not_export_and_api_is_unavail
    harness.shutdown();
 }
 
-BOOST_AUTO_TEST_CASE(log_otlp_disabled_config_keeps_named_routes_on_the_console_parent_without_an_exporter) {
+BOOST_AUTO_TEST_CASE(log_otlp_export_disabled_keeps_named_routes_on_the_console_parent_without_an_exporter) {
    forge::configure_logging(forge::logging_config::default_config());
    auto shared_sink = std::make_shared<capture_sink>();
    auto console_parent = forge::logger::get("default");
@@ -316,6 +325,33 @@ BOOST_AUTO_TEST_CASE(log_otlp_disabled_config_keeps_named_routes_on_the_console_
                      log_otlp::exceptions::exporter_unavailable);
 
    harness.shutdown();
+}
+
+BOOST_AUTO_TEST_CASE(log_otlp_application_shell_separates_lifecycle_and_export_switches) {
+   auto application = shell_application{};
+   const auto registry = application.describe_config();
+   const auto has_field = [&](std::string_view section, std::string_view field) {
+      return std::ranges::any_of(registry.components(), [&](const auto& component) {
+         return component.section == section &&
+                std::ranges::any_of(component.fields, [&](const auto& value) { return value.name == field; });
+      });
+   };
+
+   BOOST_TEST(has_field("plugins", "log.otlp.enabled"));
+   BOOST_TEST(has_field("plugins.log.otlp", "export-enabled"));
+   BOOST_TEST(!has_field("plugins.log.otlp", "enabled"));
+
+   auto document = forge::config::core::document{};
+   document.set("plugins.log.otlp.enabled", true);
+   document.set("plugins.log.otlp.export-enabled", false);
+   application.configure(document);
+   forge::asio::blocking::run(application.runtime(), application.startup());
+
+   auto api = application.apis().get<log_otlp::api>(log_otlp::api::ref());
+   BOOST_CHECK_THROW(forge::asio::blocking::run(application.runtime(), api->metrics()),
+                     log_otlp::exceptions::exporter_unavailable);
+
+   forge::asio::blocking::run(application.runtime(), application.shutdown());
 }
 
 BOOST_AUTO_TEST_CASE(log_otlp_exports_default_and_named_logger_routes) {
