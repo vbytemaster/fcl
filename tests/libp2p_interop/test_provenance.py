@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import stat
 import subprocess
 import sys
@@ -10,7 +11,7 @@ from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 
-from provenance import donor_checkout_head_errors, worktree_identity
+from provenance import donor_checkout_head_errors, donor_revision_schema_errors, worktree_identity
 from check_p2p_feature_inventory import (
     registered_runner_acceptance_pairs,
     registered_runner_pair_errors,
@@ -192,6 +193,86 @@ class DonorCheckoutPinTest(unittest.TestCase):
                 donor_checkout_head_errors(donors_root, {"pinned-donor": pinned_head}),
                 ["donor pinned-donor: checkout does not match pinned revision"],
             )
+
+    def test_donor_revision_schema_is_fail_closed(self) -> None:
+        full_revision = "a" * 40
+        invalid_cases = (
+            (None, "donor_revisions must be a non-empty object"),
+            ({}, "donor_revisions must be a non-empty object"),
+            ({"": full_revision}, "invalid donor repository name ''"),
+            ({"../escape": full_revision}, "invalid donor repository name '../escape'"),
+            ({"pinned-donor": True}, "donor pinned-donor: revision must be a full lowercase commit SHA"),
+            ({"pinned-donor": 1}, "donor pinned-donor: revision must be a full lowercase commit SHA"),
+            ({"pinned-donor": "a" * 39}, "donor pinned-donor: revision must be a full lowercase commit SHA"),
+            ({"pinned-donor": "A" * 40}, "donor pinned-donor: revision must be a full lowercase commit SHA"),
+        )
+        for revisions, expected_error in invalid_cases:
+            with self.subTest(revisions=revisions):
+                self.assertEqual(donor_revision_schema_errors(revisions), [expected_error])
+                self.assertEqual(
+                    donor_checkout_head_errors(Path("/does-not-matter"), revisions),
+                    [expected_error],
+                )
+
+    def test_matching_invalid_revision_maps_block_inventory_and_donor_gates(self) -> None:
+        root = Path(__file__).parents[2]
+        donor_source = json.loads((root / "tests/libp2p_interop/donor_cases.json").read_text())
+        capability_source = json.loads(
+            (root / "tests/libp2p_interop/p2p_donor_capabilities.json").read_text()
+        )
+        original_revisions = donor_source["donor_revisions"]
+        cases = (
+            ("numeric", 1),
+            ("short", "deadbeef"),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            donor_path = temporary / "donor_cases.json"
+            capability_path = temporary / "p2p_donor_capabilities.json"
+            for name, invalid_revision in cases:
+                with self.subTest(revision=name):
+                    invalid_revisions = {
+                        repository: invalid_revision for repository in original_revisions
+                    }
+                    donor_source["donor_revisions"] = invalid_revisions
+                    capability_source["donor_revisions"] = invalid_revisions
+                    donor_path.write_text(json.dumps(donor_source))
+                    capability_path.write_text(json.dumps(capability_source))
+
+                    matrix = subprocess.run(
+                        [
+                            sys.executable,
+                            str(root / "tests/libp2p_interop/check_donor_matrix.py"),
+                            str(root),
+                            str(donor_path),
+                        ],
+                        capture_output=True,
+                        text=True,
+                    )
+                    inventory = subprocess.run(
+                        [
+                            sys.executable,
+                            str(root / "tests/libp2p_interop/check_p2p_feature_inventory.py"),
+                            str(root),
+                            str(root / "tests/libp2p_interop/p2p_feature_inventory.json"),
+                            str(capability_path),
+                            str(donor_path),
+                        ],
+                        capture_output=True,
+                        text=True,
+                    )
+                    expected_error = (
+                        "donor go-libp2p: revision must be a full lowercase commit SHA"
+                    )
+                    self.assertNotEqual(matrix.returncode, 0, matrix.stderr)
+                    self.assertIn(expected_error, matrix.stderr)
+                    self.assertNotEqual(inventory.returncode, 0, inventory.stderr)
+                    self.assertIn(expected_error, inventory.stderr)
+                    self.assertEqual(
+                        promotion_status(0, donor_checkout_head_errors(temporary, invalid_revisions)),
+                        "FAILED",
+                    )
 
 
 class InteropCMakeConfigurationTest(unittest.TestCase):

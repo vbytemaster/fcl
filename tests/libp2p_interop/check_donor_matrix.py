@@ -5,7 +5,7 @@ import re
 import sys
 from pathlib import Path
 
-from provenance import donor_checkout_head_errors
+from provenance import donor_checkout_head_errors, donor_revision_schema_errors
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -111,20 +111,12 @@ def main() -> int:
         errors.append("capability_inventory must reference the donor-first capability manifest")
 
     donor_revisions = data.get("donor_revisions", {})
-    if not isinstance(donor_revisions, dict) or not donor_revisions:
-        errors.append("donor_revisions must be a non-empty object")
+    donor_revision_errors = donor_revision_schema_errors(donor_revisions)
+    errors.extend(donor_revision_errors)
+    if not isinstance(donor_revisions, dict):
         donor_revisions = {}
-    valid_donor_revisions: dict[str, str] = {}
-    for repository, revision in donor_revisions.items():
-        if not isinstance(repository, str) or not repository or "/" in repository:
-            errors.append(f"invalid donor repository name {repository!r}")
-            continue
-        if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
-            errors.append(f"donor {repository}: revision must be a full lowercase commit SHA")
-            continue
-        valid_donor_revisions[repository] = revision
-    if donors_root is not None:
-        errors.extend(donor_checkout_head_errors(donors_root, valid_donor_revisions))
+    if donors_root is not None and not donor_revision_errors:
+        errors.extend(donor_checkout_head_errors(donors_root, donor_revisions))
 
     test_manifest = (root / "tests/CMakeLists.txt").read_text()
     registered_tests = set(

@@ -3,15 +3,19 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import stat
 import struct
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 
 WORKTREE_FINGERPRINT_FORMAT = b"forge-libp2p-interop-worktree-v2\0"
+DONOR_CHECKOUT_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+DONOR_REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 
 
 @dataclass(frozen=True)
@@ -65,14 +69,32 @@ def git_output(root: Path, *args: str) -> bytes:
         raise RuntimeError(f"Git command failed for {root}: {error}") from error
 
 
-def donor_checkout_head_errors(donors_root: Path, donor_revisions: dict[str, str]) -> list[str]:
-    """Return the existing donor-pin errors for unavailable or stale checkouts."""
+def donor_revision_schema_errors(donor_revisions: object) -> list[str]:
+    """Return fail-closed errors for the canonical donor revision map."""
+    if not isinstance(donor_revisions, Mapping) or not donor_revisions:
+        return ["donor_revisions must be a non-empty object"]
+
     errors: list[str] = []
     for repository, revision in donor_revisions.items():
-        if not isinstance(repository, str) or not repository or "/" in repository:
+        if not isinstance(repository, str) or not DONOR_CHECKOUT_KEY_PATTERN.fullmatch(repository):
+            errors.append(f"invalid donor repository name {repository!r}")
             continue
-        if not isinstance(revision, str):
-            continue
+        if not isinstance(revision, str) or not DONOR_REVISION_PATTERN.fullmatch(revision):
+            errors.append(f"donor {repository}: revision must be a full lowercase commit SHA")
+    return errors
+
+
+def donor_checkout_head_errors(donors_root: Path, donor_revisions: object) -> list[str]:
+    """Return the existing donor-pin errors for unavailable or stale checkouts."""
+    schema_errors = donor_revision_schema_errors(donor_revisions)
+    if schema_errors:
+        return schema_errors
+
+    assert isinstance(donor_revisions, Mapping)
+    errors: list[str] = []
+    for repository, revision in donor_revisions.items():
+        assert isinstance(repository, str)
+        assert isinstance(revision, str)
         repository_path = donors_root / repository
         if not repository_path.is_dir():
             errors.append(f"donor {repository}: repository is unavailable")

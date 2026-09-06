@@ -8,7 +8,7 @@ from collections import Counter
 from pathlib import Path
 
 from check_stage6_acceptance import EVIDENCE_CONTRACT_VALIDATORS, expected_launcher_transport
-from provenance import donor_checkout_head_errors
+from provenance import donor_checkout_head_errors, donor_revision_schema_errors
 from stage6_evidence_contract import (
     EVIDENCE_CONTRACT_PREFIX,
     EVIDENCE_CONTRACT_SUFFIX,
@@ -517,11 +517,15 @@ def main() -> int:
         profile_capability_locks[profile_id] = set(locked_ids)
 
     donor_revisions = donor.get("donor_revisions", {})
+    donor_revision_errors = donor_revision_schema_errors(donor_revisions)
+    errors.extend(donor_revision_errors)
+    if not isinstance(donor_revisions, dict):
+        donor_revisions = {}
     capability_revisions = capability_inventory.get("donor_revisions", {})
     if not isinstance(capability_revisions, dict) or capability_revisions != donor_revisions:
         errors.append("donor capabilities: donor_revisions must exactly match the donor case matrix")
         capability_revisions = {}
-    if donors_root is not None and isinstance(donor_revisions, dict):
+    if donors_root is not None and not donor_revision_errors:
         errors.extend(donor_checkout_head_errors(donors_root, donor_revisions))
 
     required_capability_fields = {
