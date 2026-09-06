@@ -622,6 +622,59 @@ def nonempty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value)
 
 
+MULTIADDR_VALUE_PROTOCOLS = {
+    "certhash",
+    "dns",
+    "dns4",
+    "dns6",
+    "dnsaddr",
+    "ip4",
+    "ip6",
+    "ip6zone",
+    "memory",
+    "onion",
+    "onion3",
+    "p2p",
+    "sctp",
+    "sni",
+    "tcp",
+    "udp",
+    "unix",
+}
+MULTIADDR_FLAG_PROTOCOLS = {
+    "http",
+    "https",
+    "p2p-circuit",
+    "quic",
+    "quic-v1",
+    "tls",
+    "webtransport",
+    "ws",
+    "wss",
+}
+
+
+def nonempty_multiaddr(value: object) -> bool:
+    """Validate the non-secret multiaddr shape carried by runner evidence."""
+    if not nonempty_string(value) or not value.startswith("/") or value.endswith("/"):
+        return False
+    components = value.split("/")[1:]
+    if not components:
+        return False
+    index = 0
+    while index < len(components):
+        protocol = components[index]
+        if protocol in MULTIADDR_FLAG_PROTOCOLS:
+            index += 1
+        elif protocol in MULTIADDR_VALUE_PROTOCOLS:
+            if index + 1 >= len(components) or not components[index + 1]:
+                return False
+            index += 2
+        else:
+            return False
+    return True
+
+
 def sha256_value(value: object) -> bool:
     return isinstance(value, str) and SHA256.fullmatch(value) is not None
 
@@ -732,16 +785,18 @@ def validate_tls_evidence(result: dict, record: dict, listener: Optional[dict]) 
     return errors
 
 
-def relay_transport_endpoint(value: object) -> Optional[str]:
-    """Match Rust's relay base-address construction without accepting a suffix."""
-    if not nonempty_string(value) or not value.startswith("/"):
-        return None
+def relay_transport_endpoint(value: object, relay_peer: object) -> tuple[Optional[str], list[str]]:
+    """Match Rust's relay base-address construction and bind any terminal peer."""
+    if not nonempty_multiaddr(value):
+        return None, ["Rust relay endpoint is not a valid non-empty multiaddr"]
     components = value.split("/")[1:]
-    if not components or any(not component for component in components) or "p2p-circuit" in components:
-        return None
+    if "p2p-circuit" in components:
+        return None, ["Rust relay endpoint must not already contain p2p-circuit"]
     if len(components) >= 2 and components[-2] == "p2p":
+        if components[-1] != relay_peer:
+            return None, ["Rust relay endpoint terminal peer differs from record.peer_id"]
         components = components[:-2]
-    return "/" + "/".join(components) if components else None
+    return ("/" + "/".join(components) if components else None), []
 
 
 def rust_relay_command_target_errors(record: dict, relay_peer: str, relay_endpoint: str) -> list[str]:
@@ -750,8 +805,17 @@ def rust_relay_command_target_errors(record: dict, relay_peer: str, relay_endpoi
     listener = record.get("listener_process")
     if not isinstance(listener, dict):
         return ["Rust relay record lacks listener endpoint evidence"]
-    if listener.get("peer_id") != relay_peer or relay_endpoint not in listener.get("listen_addrs", []):
-        errors.append("Rust relay listener evidence does not match the recorded relay endpoint")
+    listen_addrs = listener.get("listen_addrs")
+    if (
+        not isinstance(listen_addrs, list)
+        or not listen_addrs
+        or any(not nonempty_multiaddr(address) for address in listen_addrs)
+    ):
+        errors.append("Rust relay listener evidence lacks a valid non-empty multiaddr list")
+    elif not any(address == relay_endpoint for address in listen_addrs):
+        errors.append("Rust relay listener evidence does not contain the exact recorded relay endpoint")
+    if listener.get("peer_id") != relay_peer:
+        errors.append("Rust relay listener peer differs from the recorded relay peer")
 
     raw_result = record.get("result")
     attempts = raw_result.get("attempts") if isinstance(raw_result, dict) else None
@@ -784,7 +848,7 @@ def validate_relay_client_evidence(result: dict, record: dict, _listener: Option
         client_peer = result.get("relay_reservation_client_peer_id")
         circuit_addr = result.get("relay_reservation_circuit_addr")
         relay_endpoint = record.get("addr")
-        transport_endpoint = relay_transport_endpoint(relay_endpoint)
+        transport_endpoint, endpoint_errors = relay_transport_endpoint(relay_endpoint, relay_peer)
         expected_circuit_addr = (
             f"{transport_endpoint}/p2p/{relay_peer}/p2p-circuit/p2p/{client_peer}"
             if nonempty_string(relay_peer)
@@ -792,9 +856,11 @@ def validate_relay_client_evidence(result: dict, record: dict, _listener: Option
             and transport_endpoint is not None
             else None
         )
-        errors = rust_relay_command_target_errors(record, relay_peer, relay_endpoint) if (
-            nonempty_string(relay_peer) and nonempty_string(relay_endpoint)
-        ) else ["Rust relay record lacks a non-empty relay peer and endpoint"]
+        errors = list(endpoint_errors)
+        if nonempty_string(relay_peer) and nonempty_string(relay_endpoint):
+            errors.extend(rust_relay_command_target_errors(record, relay_peer, relay_endpoint))
+        else:
+            errors.append("Rust relay record lacks a non-empty relay peer and endpoint")
         if not (
             result.get("relay_reservation_accepted") is True
             and nonempty_string(relay_peer)
@@ -1667,6 +1733,20 @@ def self_test() -> int:
     command[command.index("--peer-id") + 1] = "wrong-relay-peer"
     if not validate_relay_client_evidence(rust_relay, relay_record, relay_listener):
         print("self-test failed: Rust relay reservation accepted a mismatched dial command peer", file=sys.stderr)
+        return 1
+    rust_relay, relay_record, relay_listener = rust_relay_reservation_fixture()
+    conflicting_endpoint = relay_record["addr"].replace("listener-peer", "other-relay-peer")
+    relay_record["addr"] = conflicting_endpoint
+    relay_record["listener_process"]["listen_addrs"] = [conflicting_endpoint]
+    command = relay_record["result"]["attempts"][0]["command"]
+    command[command.index("--addr") + 1] = conflicting_endpoint
+    if not validate_relay_client_evidence(rust_relay, relay_record, relay_listener):
+        print("self-test failed: Rust relay reservation accepted a conflicting endpoint peer suffix", file=sys.stderr)
+        return 1
+    rust_relay, relay_record, relay_listener = rust_relay_reservation_fixture()
+    relay_record["listener_process"]["listen_addrs"] = relay_record["addr"]
+    if not validate_relay_client_evidence(rust_relay, relay_record, relay_listener):
+        print("self-test failed: Rust relay reservation accepted string-valued listener addresses", file=sys.stderr)
         return 1
     rust_relay, relay_record, relay_listener = rust_relay_reservation_fixture()
     rust_relay["relay_reservation_renewal"] = True
