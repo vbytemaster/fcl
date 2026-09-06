@@ -54,6 +54,7 @@ import forge.net.p2p.pubsub;
 import forge.net.p2p.reachability;
 import forge.net.p2p.rendezvous;
 import forge.net.p2p.relay;
+import forge.net.p2p.scoring;
 import forge.net.p2p.stream;
 
 namespace {
