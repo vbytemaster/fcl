@@ -2437,8 +2437,7 @@ struct engine_connector::impl {
          resolution_changed.notify();
       }
 
-      [[nodiscard]] bool take_resolution(boost::system::error_code& error,
-                                         udp::resolver::results_type& results) {
+      [[nodiscard]] bool take_resolution(boost::system::error_code& error, udp::resolver::results_type& results) {
          auto lock = std::scoped_lock{mutex};
          if (!resolution_completed) {
             return false;
@@ -2667,25 +2666,25 @@ engine_connector::async_connect(engine_endpoint remote, engine_client_options op
    try {
       switch (remote.family) {
       case engine_endpoint::address_family::any:
-         resolver->async_resolve(remote.host, std::to_string(remote.port),
-                                 [active_connect](boost::system::error_code error,
-                                                  udp::resolver::results_type results) mutable {
-                                    active_connect->complete_resolution(error, std::move(results));
-                                 });
+         resolver->async_resolve(
+             remote.host, std::to_string(remote.port),
+             [active_connect](boost::system::error_code error, udp::resolver::results_type results) mutable {
+                active_connect->complete_resolution(error, std::move(results));
+             });
          break;
       case engine_endpoint::address_family::ipv4:
-         resolver->async_resolve(udp::v4(), remote.host, std::to_string(remote.port),
-                                 [active_connect](boost::system::error_code error,
-                                                  udp::resolver::results_type results) mutable {
-                                    active_connect->complete_resolution(error, std::move(results));
-                                 });
+         resolver->async_resolve(
+             udp::v4(), remote.host, std::to_string(remote.port),
+             [active_connect](boost::system::error_code error, udp::resolver::results_type results) mutable {
+                active_connect->complete_resolution(error, std::move(results));
+             });
          break;
       case engine_endpoint::address_family::ipv6:
-         resolver->async_resolve(udp::v6(), remote.host, std::to_string(remote.port),
-                                 [active_connect](boost::system::error_code error,
-                                                  udp::resolver::results_type results) mutable {
-                                    active_connect->complete_resolution(error, std::move(results));
-                                 });
+         resolver->async_resolve(
+             udp::v6(), remote.host, std::to_string(remote.port),
+             [active_connect](boost::system::error_code error, udp::resolver::results_type results) mutable {
+                active_connect->complete_resolution(error, std::move(results));
+             });
          break;
       }
    } catch (...) {
@@ -2752,6 +2751,9 @@ engine_connector::async_connect(engine_endpoint remote, engine_client_options op
 
    auto connection_impl = std::make_shared<engine_connection::impl>(impl_->context, socket, local_endpoint,
                                                                     remote_endpoint.endpoint(), options.limits);
+   // The opaque client owner remains attached to the native UDP connection
+   // until engine cleanup; it is never interpreted by QUIC.
+   connection_impl->inbound_admission = std::move(options.connection_lifetime);
    connection_impl->self = connection_impl;
    connection_impl->metrics.connections_opened.store(1, std::memory_order_relaxed);
    connection_impl->metrics.handshakes_started.store(1, std::memory_order_relaxed);
@@ -3295,6 +3297,20 @@ struct engine_listener::impl {
       }
       if (connection_count() >= options.limits.max_connections) {
          throw_engine(engine_error_kind::backpressure_rejected, "QUIC listener max connections exceeded");
+      }
+      if (options.inbound_connection_filter) {
+         try {
+            const auto local = server_socket->local_endpoint();
+            if (!options.inbound_connection_filter(
+                    engine_endpoint{.host = local.address().to_string(), .port = local.port()},
+                    engine_endpoint{.host = from.address().to_string(), .port = from.port()})) {
+               throw_engine(engine_error_kind::connection_rejected, "QUIC inbound connection rejected");
+            }
+         } catch (const engine_failure&) {
+            throw;
+         } catch (...) {
+            throw_engine(engine_error_kind::connection_rejected, "QUIC inbound connection rejected");
+         }
       }
       auto admission = std::shared_ptr<void>{};
       if (options.inbound_admission) {

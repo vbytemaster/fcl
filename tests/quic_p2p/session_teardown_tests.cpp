@@ -104,7 +104,8 @@ BOOST_AUTO_TEST_CASE(p2p_cancellation_latch_stop_before_throwing_arm_propagates_
    BOOST_CHECK_THROW(latch.arm([&] {
       invoked.fetch_add(1, std::memory_order_release);
       throw std::runtime_error{"injected cancellation failure"};
-   }), std::runtime_error);
+   }),
+                     std::runtime_error);
 
    BOOST_TEST(invoked.load(std::memory_order_acquire) == 1U);
    BOOST_TEST(!latch.finish());
@@ -579,8 +580,10 @@ BOOST_AUTO_TEST_CASE(p2p_direct_transport_teardown_continues_after_profile_failu
           .listen = [](endpoint value) { return value; },
           .stop = std::move(stop),
           .async_stop = std::move(async_stop),
-          .async_connect = [](endpoint, const node::connect_options&, std::shared_ptr<cancellation_latch>)
-              -> boost::asio::awaitable<direct::connection> { co_return direct::connection{}; },
+          .async_connect = [](endpoint, const node::connect_options&, std::shared_ptr<cancellation_latch>,
+                              std::shared_ptr<void>) -> boost::asio::awaitable<direct::connection> {
+             co_return direct::connection{};
+          },
           .async_accept = [](endpoint) -> boost::asio::awaitable<direct::connection> {
              co_return direct::connection{};
           },

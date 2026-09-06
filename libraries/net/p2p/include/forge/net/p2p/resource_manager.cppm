@@ -47,7 +47,8 @@ class resource_manager {
    };
 
    struct limits {
-      // Static donor-base limits. Preview does not implement donor AutoScale.
+      // Forge keeps fixed system concurrency until donor-style AutoScale is
+      // available. Transient and subordinate scopes use the donor base limits.
       scope_limits system{
           .max_memory = 128 * 1024 * 1024,
           .max_file_descriptors = 256,
@@ -61,18 +62,22 @@ class resource_manager {
       scope_limits transient{
           .max_memory = 32 * 1024 * 1024,
           .max_file_descriptors = 64,
-          .max_inbound_connections = 1024,
-          .max_outbound_connections = 1024,
-          .max_connections = 2048,
-          .max_inbound_streams = 4096,
-          .max_outbound_streams = 4096,
-          .max_streams = 4096,
+          .max_inbound_connections = 32,
+          .max_outbound_connections = 64,
+          .max_connections = 64,
+          .max_inbound_streams = 128,
+          .max_outbound_streams = 256,
+          .max_streams = 256,
       };
       scope_limits peer{
           .max_memory = 64 * 1024 * 1024,
           .max_file_descriptors = 4,
-          .max_connections = 4,
-          .max_streams = 256,
+          .max_inbound_connections = 8,
+          .max_outbound_connections = 8,
+          .max_connections = 8,
+          .max_inbound_streams = 256,
+          .max_outbound_streams = 512,
+          .max_streams = 512,
       };
       scope_limits protocol{
           .max_memory = 64 * 1024 * 1024,
@@ -190,6 +195,7 @@ class resource_manager {
  private:
    struct state;
    struct ledger;
+   struct dial_ledger;
    std::shared_ptr<state> state_;
 };
 
@@ -257,10 +263,10 @@ class resource_manager::dial_reservation {
 
  private:
    friend class resource_manager;
-   explicit dial_reservation(std::shared_ptr<state> owner) noexcept;
+   dial_reservation(std::shared_ptr<state> owner, std::shared_ptr<dial_ledger> ledger) noexcept;
 
    std::shared_ptr<state> owner_;
-   std::optional<peer_id> peer_;
+   std::shared_ptr<dial_ledger> ledger_;
 };
 
 class resource_manager::stream_reservation {

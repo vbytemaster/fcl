@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -17,15 +18,22 @@ struct upgraded_session {
    peer_authentication authentication = peer_authentication::unverified;
 };
 
+struct upgrade_callbacks {
+   std::function<void(const peer_id&)> secured;
+   std::function<void(const peer_id&)> upgraded;
+};
+
 boost::asio::awaitable<upgraded_session> upgrade_outbound_stream(forge::net::p2p::stream stream,
                                                                  const node::options& options,
                                                                  const libp2p_identity_material& identity,
-                                                                 std::optional<peer_id> expected_peer);
+                                                                 std::optional<peer_id> expected_peer,
+                                                                 upgrade_callbacks callbacks = {});
 
 boost::asio::awaitable<upgraded_session> upgrade_inbound_stream(forge::net::p2p::stream stream,
                                                                 const node::options& options,
                                                                 const libp2p_identity_material& identity,
-                                                                std::optional<peer_id> expected_peer);
+                                                                std::optional<peer_id> expected_peer,
+                                                                upgrade_callbacks callbacks = {});
 
 struct tcp_upgrade_deadline {
    boost::asio::io_context* context = nullptr;
@@ -43,16 +51,14 @@ boost::asio::awaitable<upgraded_session> upgrade_inbound_tcp(forge::net::tcp::co
                                                              const libp2p_identity_material& identity,
                                                              std::optional<peer_id> expected_peer);
 
-boost::asio::awaitable<upgraded_session> upgrade_outbound_tcp(forge::net::tcp::connection connection,
-                                                              const node::options& options,
-                                                              const libp2p_identity_material& identity,
-                                                              std::optional<peer_id> expected_peer,
-                                                              tcp_upgrade_deadline deadline);
+boost::asio::awaitable<upgraded_session>
+upgrade_outbound_tcp(forge::net::tcp::connection connection, const node::options& options,
+                     const libp2p_identity_material& identity, std::optional<peer_id> expected_peer,
+                     tcp_upgrade_deadline deadline, upgrade_callbacks callbacks = {});
 
-boost::asio::awaitable<upgraded_session> upgrade_inbound_tcp(forge::net::tcp::connection connection,
-                                                             const node::options& options,
-                                                             const libp2p_identity_material& identity,
-                                                             std::optional<peer_id> expected_peer,
-                                                             tcp_upgrade_deadline deadline);
+boost::asio::awaitable<upgraded_session>
+upgrade_inbound_tcp(forge::net::tcp::connection connection, const node::options& options,
+                    const libp2p_identity_material& identity, std::optional<peer_id> expected_peer,
+                    tcp_upgrade_deadline deadline, upgrade_callbacks callbacks = {});
 
 } // namespace forge::net::p2p

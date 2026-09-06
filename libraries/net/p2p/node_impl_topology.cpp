@@ -336,6 +336,7 @@ boost::asio::awaitable<void> node::impl::async_close_topology_sessions(std::vect
    for (const auto& session : removed) {
       auto ticket = teardown.track([session] { session->connection.cancel(); });
       if (!ticket.active()) {
+         session->native_lifetime.reset();
          session->resource.release();
          continue;
       }
@@ -344,6 +345,7 @@ boost::asio::awaitable<void> node::impl::async_close_topology_sessions(std::vect
       } catch (...) {
          session->connection.cancel();
       }
+      session->native_lifetime.reset();
       session->resource.release();
       ticket.release();
    }

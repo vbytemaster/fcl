@@ -58,10 +58,14 @@ resource_manager::reserve_session(session_direction direction) noexcept {
 }
 
 std::optional<resource_manager::dial_reservation> resource_manager::reserve_dial() noexcept {
-   if (!state_ || !state_->reserve_dial()) {
+   if (!state_) {
       return std::nullopt;
    }
-   return dial_reservation{state_};
+   auto ledger = state_->reserve_dial();
+   if (!ledger) {
+      return std::nullopt;
+   }
+   return dial_reservation{state_, std::move(ledger)};
 }
 
 std::optional<resource_manager::dial_reservation> resource_manager::reserve_dial(peer_id peer) noexcept {
@@ -215,46 +219,43 @@ void resource_manager::session_reservation::release() noexcept {
 
 resource_manager::dial_reservation::dial_reservation() noexcept = default;
 
-resource_manager::dial_reservation::dial_reservation(std::shared_ptr<state> owner) noexcept
-    : owner_(std::move(owner)) {}
+resource_manager::dial_reservation::dial_reservation(std::shared_ptr<state> owner,
+                                                     std::shared_ptr<dial_ledger> ledger) noexcept
+    : owner_(std::move(owner)), ledger_(std::move(ledger)) {}
 
 resource_manager::dial_reservation::~dial_reservation() {
    release();
 }
 
 resource_manager::dial_reservation::dial_reservation(dial_reservation&& other) noexcept
-    : owner_(std::move(other.owner_)), peer_(std::move(other.peer_)) {}
+    : owner_(std::move(other.owner_)), ledger_(std::move(other.ledger_)) {}
 
 resource_manager::dial_reservation& resource_manager::dial_reservation::operator=(dial_reservation&& other) noexcept {
    if (this != &other) {
       release();
       owner_ = std::move(other.owner_);
-      peer_ = std::move(other.peer_);
+      ledger_ = std::move(other.ledger_);
    }
    return *this;
 }
 
 bool resource_manager::dial_reservation::active() const noexcept {
-   return owner_ != nullptr;
+   return owner_ && owner_->dial_active(ledger_);
 }
 
 bool resource_manager::dial_reservation::bound() const noexcept {
-   return peer_.has_value();
+   return owner_ && owner_->dial_bound(ledger_);
 }
 
 bool resource_manager::dial_reservation::bind(peer_id peer) noexcept {
-   if (!owner_ || peer_ || !owner_->bind_dial(peer)) {
-      return false;
-   }
-   peer_.emplace(std::move(peer));
-   return true;
+   return owner_ && owner_->bind_dial(ledger_, std::move(peer));
 }
 
 void resource_manager::dial_reservation::release() noexcept {
    if (owner_) {
-      owner_->release_dial(peer_);
+      owner_->release_dial(ledger_);
    }
-   peer_.reset();
+   ledger_.reset();
    owner_.reset();
 }
 

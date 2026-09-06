@@ -11,6 +11,7 @@ struct engine_server_options {
    engine_security_options security{};
    std::string certificate_pem;
    forge::crypto::core::secret_string private_key_pem;
+   std::function<bool(const engine_endpoint& local, const engine_endpoint& remote)> inbound_connection_filter;
    std::function<std::shared_ptr<void>()> inbound_admission;
 };
 

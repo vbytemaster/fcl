@@ -32,6 +32,7 @@ enum class code : std::uint16_t {
    canceled = 16,
    unsupported = 17,
    internal = 18,
+   connection_rejected = 19,
 };
 
 FORGE_DECLARE_EXCEPTION_CATEGORY(code, "forge.net.quic")
@@ -48,6 +49,7 @@ using alpn_mismatch = forge::exceptions::coded_exception<code, code::alpn_mismat
 using frame_too_large = forge::exceptions::coded_exception<code, code::frame_too_large>;
 using malformed_frame = forge::exceptions::coded_exception<code, code::malformed_frame>;
 using backpressure_rejected = forge::exceptions::coded_exception<code, code::backpressure_rejected>;
+using connection_rejected = forge::exceptions::coded_exception<code, code::connection_rejected>;
 using connection_closed = forge::exceptions::coded_exception<code, code::connection_closed>;
 using stream_closed = forge::exceptions::coded_exception<code, code::stream_closed>;
 using stream_reset = forge::exceptions::coded_exception<code, code::stream_reset>;

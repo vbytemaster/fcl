@@ -46,6 +46,8 @@ namespace {
       return exceptions::code::malformed_frame;
    case detail::engine_error_kind::backpressure_rejected:
       return exceptions::code::backpressure_rejected;
+   case detail::engine_error_kind::connection_rejected:
+      return exceptions::code::connection_rejected;
    case detail::engine_error_kind::connection_closed:
       return exceptions::code::connection_closed;
    case detail::engine_error_kind::stream_closed:

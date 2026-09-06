@@ -16,6 +16,11 @@ struct resource_manager::ledger {
    bool transient = false;
 };
 
+struct resource_manager::dial_ledger {
+   std::optional<peer_id> peer;
+   bool active = true;
+};
+
 struct resource_manager::state {
    explicit state(limits value) noexcept;
 
@@ -24,9 +29,11 @@ struct resource_manager::state {
    [[nodiscard]] std::shared_ptr<ledger> reserve_lifecycle() noexcept;
    [[nodiscard]] std::shared_ptr<ledger> reserve_session(session_direction direction) noexcept;
    [[nodiscard]] std::shared_ptr<ledger> reserve_stream(peer_id peer, session_direction direction) noexcept;
-   [[nodiscard]] bool reserve_dial() noexcept;
-   [[nodiscard]] bool bind_dial(const peer_id& peer) noexcept;
-   void release_dial(const std::optional<peer_id>& peer) noexcept;
+   [[nodiscard]] std::shared_ptr<dial_ledger> reserve_dial() noexcept;
+   [[nodiscard]] bool dial_active(const std::shared_ptr<dial_ledger>& value) const noexcept;
+   [[nodiscard]] bool dial_bound(const std::shared_ptr<dial_ledger>& value) const noexcept;
+   [[nodiscard]] bool bind_dial(const std::shared_ptr<dial_ledger>& value, peer_id peer) noexcept;
+   void release_dial(const std::shared_ptr<dial_ledger>& value) noexcept;
    [[nodiscard]] bool reserve_relay(const peer_id& peer) noexcept;
    void release_relay(const peer_id& peer) noexcept;
    [[nodiscard]] bool record_malformed(const peer_id& peer) noexcept;

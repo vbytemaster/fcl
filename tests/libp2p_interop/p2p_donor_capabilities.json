@@ -1176,7 +1176,7 @@
       "interop_applicability": "not_applicable",
       "decision": "stage_6",
       "planned_branch": "forge-p2p-host-protection-v1",
-      "forge_feature_ids": [],
+      "forge_feature_ids": [ "security.connection_gater" ],
       "donor_sources": [ "donors/go-libp2p/core/connmgr/gater.go" ],
       "rationale": "Policy needs staged rejection points for peer dial, address dial, accept, secured identity and upgraded connection."
     },
@@ -1189,7 +1189,7 @@
       "interop_applicability": "not_applicable",
       "decision": "stage_6",
       "planned_branch": "forge-p2p-host-protection-v1",
-      "forge_feature_ids": [],
+      "forge_feature_ids": [ "resource.host_scopes" ],
       "donor_sources": [ "donors/go-libp2p/p2p/host/resource-manager/rcmgr.go", "donors/go-libp2p/core/network/rcmgr.go" ],
       "rationale": "Production limits must account for memory, file descriptors, transient work and per-service resources, not only sessions and streams."
     },

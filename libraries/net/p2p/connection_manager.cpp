@@ -186,22 +186,22 @@ connection_manager::plan_peer_prune(std::size_t target_peers, std::size_t max_vi
       });
    }
 
-   std::sort(candidates.begin(), candidates.end(), [](const peer_prune_candidate& left,
-                                                       const peer_prune_candidate& right) {
-      if (left.tag_value != right.tag_value) {
-         return left.tag_value < right.tag_value;
-      }
-      if (left.network_score != right.network_score) {
-         return left.network_score < right.network_score;
-      }
-      if (left.last_used_at != right.last_used_at) {
-         return left.last_used_at < right.last_used_at;
-      }
-      if (left.opened_at != right.opened_at) {
-         return left.opened_at < right.opened_at;
-      }
-      return left.peer.to_string() < right.peer.to_string();
-   });
+   std::sort(candidates.begin(), candidates.end(),
+             [](const peer_prune_candidate& left, const peer_prune_candidate& right) {
+                if (left.tag_value != right.tag_value) {
+                   return left.tag_value < right.tag_value;
+                }
+                if (left.network_score != right.network_score) {
+                   return left.network_score < right.network_score;
+                }
+                if (left.last_used_at != right.last_used_at) {
+                   return left.last_used_at < right.last_used_at;
+                }
+                if (left.opened_at != right.opened_at) {
+                   return left.opened_at < right.opened_at;
+                }
+                return left.peer.to_string() < right.peer.to_string();
+             });
 
    const auto required_victims = result.connected_peers - target_peers;
    const auto selected = std::min(required_victims, max_victims);
@@ -278,21 +278,6 @@ bool connection_manager::prune_one(std::vector<std::uint64_t>& pruned, std::chro
    return true;
 }
 
-std::size_t connection_manager::count_peer_sessions(const peer_id& peer) const {
-   const auto found = sessions_by_peer_.find(peer);
-   return found == sessions_by_peer_.end() ? 0 : found->second.size();
-}
-
-std::size_t connection_manager::count_direction_sessions(direction value) const {
-   auto count = std::size_t{};
-   for (const auto& [_, session] : sessions_) {
-      if (session.direction == value) {
-         ++count;
-      }
-   }
-   return count;
-}
-
 connection_manager::admission connection_manager::remember(session_record record,
                                                            std::chrono::steady_clock::time_point now) {
    if (record.peer.value.empty()) {
@@ -311,21 +296,9 @@ connection_manager::admission connection_manager::remember(session_record record
       record.last_used_at = record.opened_at;
    }
 
-   const auto direction_limit =
-       record.direction == direction::inbound ? policy_.max_inbound_sessions : policy_.max_outbound_sessions;
-   if (count_peer_sessions(record.peer) >= policy_.max_sessions_per_peer) {
-      return admission{.accepted = false, .reason = "P2P session resource limit reached"};
-   }
-
    auto result = admission{};
    const auto may_prune = !last_prune_ || now - *last_prune_ >= policy_.prune_silence;
-   const auto direction_saturated = count_direction_sessions(record.direction) >= direction_limit;
    const auto global_saturated = sessions_.size() >= policy_.max_sessions;
-   if (direction_saturated) {
-      if (!may_prune || !prune_one(result.pruned, now, record.direction)) {
-         return admission{.accepted = false, .reason = "P2P session resource limit reached"};
-      }
-   }
 
    if (global_saturated) {
       while (may_prune && sessions_.size() > policy_.low_watermark && prune_one(result.pruned, now)) {
@@ -334,8 +307,7 @@ connection_manager::admission connection_manager::remember(session_record record
          last_prune_ = now;
       }
       if (sessions_.size() >= policy_.max_sessions) {
-         return admission{.accepted = false, .pruned = std::move(result.pruned),
-                          .reason = "P2P max sessions reached"};
+         return admission{.accepted = false, .pruned = std::move(result.pruned), .reason = "P2P max sessions reached"};
       }
    } else if (!result.pruned.empty()) {
       last_prune_ = now;
@@ -379,8 +351,8 @@ void connection_manager::clear() {
 
 connection_manager::snapshot connection_manager::current(std::size_t max_sessions) const {
    auto out = snapshot{
-      .active_sessions = sessions_.size(),
-      .active_peers = sessions_by_peer_.size(),
+       .active_sessions = sessions_.size(),
+       .active_peers = sessions_by_peer_.size(),
    };
    out.protected_peers.reserve(protected_.size());
    for (const auto& [peer, tags] : protected_) {
@@ -406,9 +378,6 @@ connection_manager::policy connection_policy_for(const node::limits& limits) {
    return connection_manager::policy{
        .max_sessions = limits.max_sessions,
        .low_watermark = limits.session_low_watermark,
-       .max_inbound_sessions = limits.max_inbound_sessions,
-       .max_outbound_sessions = limits.max_outbound_sessions,
-       .max_sessions_per_peer = limits.max_sessions_per_peer,
        .max_tagged_peers = limits.topology.max_tagged_peers,
        .max_tags_per_peer = limits.topology.max_tags_per_peer,
        .max_tag_size = limits.topology.max_tag_size,

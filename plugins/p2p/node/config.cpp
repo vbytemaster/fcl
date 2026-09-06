@@ -47,6 +47,10 @@ import forge.plugins.db.store.api;
 namespace forge::plugins::p2p::node {
 namespace {
 
+[[nodiscard]] std::size_t with_provisional_session(std::size_t active_limit) noexcept {
+   return active_limit == (std::numeric_limits<std::size_t>::max)() ? active_limit : active_limit + 1;
+}
+
 [[nodiscard]] forge::net::p2p::path::policy parse_path_policy(path_policy value, bool relay_client_enabled,
                                                               std::size_t relay_max_candidates) {
    if (relay_max_candidates == 0) {
@@ -240,11 +244,12 @@ void apply_config(plugin::impl& state, const config& config) {
    state.options.dht_profiles = parse_dht_profiles(config.dht_profiles);
    state.options.limits.topology = forge::net::p2p::topology::policy{
        .operating_mode = parse_topology_mode(config.topology_mode),
-       .peers = forge::net::p2p::topology::watermarks{
-           .low = static_cast<std::size_t>(config.topology_low),
-           .target = static_cast<std::size_t>(config.topology_target),
-           .high = static_cast<std::size_t>(config.topology_high),
-       },
+       .peers =
+           forge::net::p2p::topology::watermarks{
+               .low = static_cast<std::size_t>(config.topology_low),
+               .target = static_cast<std::size_t>(config.topology_target),
+               .high = static_cast<std::size_t>(config.topology_high),
+           },
        .refresh_interval = to_ms(config.topology_refresh_interval_ms),
        .query_timeout = to_ms(config.topology_query_timeout_ms),
        .max_candidates = static_cast<std::size_t>(config.topology_max_candidates),
@@ -307,10 +312,11 @@ void apply_config(plugin::impl& state, const config& config) {
    state.options.limits.max_sessions = static_cast<std::size_t>(config.max_sessions);
    state.options.limits.session_low_watermark =
        std::min(state.options.limits.session_low_watermark, state.options.limits.max_sessions);
-   state.options.limits.max_inbound_sessions =
-       std::min(state.options.limits.max_inbound_sessions, state.options.limits.max_sessions);
-   state.options.limits.max_outbound_sessions =
-       std::min(state.options.limits.max_outbound_sessions, state.options.limits.max_sessions);
+   auto& session_limits = state.options.limits.resources.system;
+   const auto admission_limit = with_provisional_session(state.options.limits.max_sessions);
+   session_limits.max_connections = admission_limit;
+   session_limits.max_inbound_connections = std::min(session_limits.max_inbound_connections, admission_limit);
+   session_limits.max_outbound_connections = std::min(session_limits.max_outbound_connections, admission_limit);
    state.options.limits.max_protocol_handlers = static_cast<std::size_t>(config.max_protocol_handlers);
    state.options.allow_insecure_test_mode = config.allow_insecure_test_mode;
    const auto has_identity = !state.certificate_secret.empty() && !state.private_key_secret.empty();

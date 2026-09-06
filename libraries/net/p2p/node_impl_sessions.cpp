@@ -99,6 +99,7 @@ void node::impl::launch_pruned_session_teardown(const std::shared_ptr<session_st
    auto ticket = teardown.track([session] { session->connection.cancel(); });
    if (!ticket.active()) {
       session->connection.cancel();
+      session->native_lifetime.reset();
       session->resource.release();
       return;
    }
@@ -111,12 +112,14 @@ void node::impl::launch_pruned_session_teardown(const std::shared_ptr<session_st
              } catch (...) {
                 session->connection.cancel();
              }
+             session->native_lifetime.reset();
              session->resource.release();
              ticket.release();
           },
           boost::asio::detached);
    } catch (...) {
       session->connection.cancel();
+      session->native_lifetime.reset();
       session->resource.release();
    }
 }
@@ -126,7 +129,6 @@ boost::asio::awaitable<void> node::impl::remember_session(std::shared_ptr<node::
    enum class rejection {
       none,
       admission,
-      established_limit,
       stopped,
    };
 
@@ -136,11 +138,28 @@ boost::asio::awaitable<void> node::impl::remember_session(std::shared_ptr<node::
    } catch (const forge::asio::exceptions::canceled&) {
       detail::mark_rejected_session(session);
       detail::cancel_rejected_session(session);
+      session->native_lifetime.reset();
       FORGE_THROW_EXCEPTION(exceptions::canceled, "P2P session admission was canceled");
    } catch (const forge::asio::exceptions::rejected&) {
       detail::mark_rejected_session(session);
       detail::cancel_rejected_session(session);
+      session->native_lifetime.reset();
       FORGE_THROW_EXCEPTION(exceptions::closed, "P2P node is stopped");
+   }
+
+   const auto resource_direction = direction == connection_manager::direction::inbound
+                                       ? resource_manager::session_direction::inbound
+                                       : resource_manager::session_direction::outbound;
+   if (!session->resource.establish(resource_manager::session_scope{
+           .peer = session->info.remote_peer,
+           .direction = resource_direction,
+       })) {
+      detail::cancel_rejected_session(session);
+      session->native_lifetime.reset();
+      auto lock = std::scoped_lock{mutex};
+      ++metrics_value.backpressure_rejections;
+      ++metrics_value.connection_rejections;
+      FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P established session limit reached");
    }
 
    auto rejected = rejection::none;
@@ -215,6 +234,8 @@ boost::asio::awaitable<void> node::impl::remember_session(std::shared_ptr<node::
 
    if (rejected == rejection::stopped || rejected == rejection::admission) {
       detail::cancel_marked_session(session);
+      session->native_lifetime.reset();
+      session->resource.release();
    }
 
    // identify_service owns a separate mutex; never take it while holding the
@@ -231,6 +252,7 @@ boost::asio::awaitable<void> node::impl::remember_session(std::shared_ptr<node::
       for (const auto& pruned : pruned_sessions) {
          auto teardown_ticket = teardown.track([pruned] { pruned->connection.cancel(); });
          if (!teardown_ticket.active()) {
+            pruned->native_lifetime.reset();
             pruned->resource.release();
             continue;
          }
@@ -239,6 +261,7 @@ boost::asio::awaitable<void> node::impl::remember_session(std::shared_ptr<node::
          } catch (...) {
             pruned->connection.cancel();
          }
+         pruned->native_lifetime.reset();
          pruned->resource.release();
          teardown_ticket.release();
       }
@@ -259,34 +282,18 @@ boost::asio::awaitable<void> node::impl::remember_session(std::shared_ptr<node::
          detail::mark_rejected_session(session);
          rejected = rejection::stopped;
       } else {
-         const auto resource_direction = direction == connection_manager::direction::inbound
-                                             ? resource_manager::session_direction::inbound
-                                             : resource_manager::session_direction::outbound;
-         if (!session->resource.establish(resource_manager::session_scope{
-                 .peer = session->info.remote_peer,
-                 .direction = resource_direction,
-             })) {
-            connections.forget(session->id);
-            detail::mark_rejected_session(session);
-            ++metrics_value.backpressure_rejections;
-            ++metrics_value.connection_rejections;
-            rejected = rejection::established_limit;
-         } else {
-            sessions[session->id] = session;
-            ++metrics_value.sessions_opened;
-            ++metrics_value.handshakes_completed;
-         }
+         sessions[session->id] = session;
+         ++metrics_value.sessions_opened;
+         ++metrics_value.handshakes_completed;
       }
       metrics_value.active_sessions = sessions.size();
    }
 
    if (rejected == rejection::stopped) {
       detail::cancel_marked_session(session);
+      session->native_lifetime.reset();
+      session->resource.release();
       FORGE_THROW_EXCEPTION(exceptions::closed, "P2P node is stopped");
-   }
-   if (rejected == rejection::established_limit) {
-      detail::cancel_marked_session(session);
-      FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P established session limit reached");
    }
    co_return;
 }
@@ -403,6 +410,13 @@ node::impl::connect_direct(forge::net::p2p::endpoint endpoint, node::connect_opt
    validate_operation_timeout(connect_options_value.timeout, "P2P connect timeout");
    const auto deadline_at = std::chrono::steady_clock::now() + connect_options_value.timeout;
    auto endpoint_copy = endpoint;
+   const auto expected_peer = connect_options_value.expected_peer ? connect_options_value.expected_peer : endpoint.peer;
+   if (expected_peer && logical_dial == nullptr) {
+      connection_gate->peer_dial(*expected_peer);
+   }
+   if (expected_peer) {
+      connection_gate->address_dial(*expected_peer, endpoint_copy);
+   }
    auto owned_dial = std::optional<resource_manager::dial_reservation>{};
    if (logical_dial == nullptr) {
       owned_dial = resources.reserve_dial();
@@ -414,7 +428,6 @@ node::impl::connect_direct(forge::net::p2p::endpoint endpoint, node::connect_opt
       }
       logical_dial = &*owned_dial;
    }
-   const auto expected_peer = connect_options_value.expected_peer ? connect_options_value.expected_peer : endpoint.peer;
    if (expected_peer && !logical_dial->bound() && !logical_dial->bind(*expected_peer)) {
       auto lock = std::scoped_lock{mutex};
       ++metrics_value.backpressure_rejections;
@@ -428,17 +441,22 @@ node::impl::connect_direct(forge::net::p2p::endpoint endpoint, node::connect_opt
       ++metrics_value.connection_rejections;
       FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P pending outbound session limit reached");
    }
+   auto descriptor = reservation->reserve_file_descriptors(1);
+   if (!descriptor) {
+      auto lock = std::scoped_lock{mutex};
+      ++metrics_value.backpressure_rejections;
+      ++metrics_value.connection_rejections;
+      FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P outbound TCP/QUIC file descriptor limit reached");
+   }
+   auto native_lifetime = std::make_shared<resource_manager::file_descriptor_reservation>(std::move(*descriptor));
    try {
       auto started = std::chrono::steady_clock::now();
-      auto result =
-          co_await direct_registry.async_connect(std::move(endpoint), connect_options_value, std::move(cancellation));
+      auto result = co_await direct_registry.async_connect(std::move(endpoint), connect_options_value,
+                                                           std::move(cancellation), native_lifetime);
       if (!logical_dial->bound() && !logical_dial->bind(result.peer)) {
          result.session.cancel();
          FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P authenticated peer dial limit reached");
       }
-      store.mark_endpoint_success(
-          result.peer, endpoint_copy, path::kind::direct,
-          std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started));
       auto session = std::make_shared<session_state>();
       session->info = node::session_info{
           .remote_peer = result.peer,
@@ -447,9 +465,13 @@ node::impl::connect_direct(forge::net::p2p::endpoint endpoint, node::connect_opt
       session->authentication = result.authentication;
       session->connection = std::move(result.session);
       session->resource = std::move(*reservation);
+      session->native_lifetime = std::move(native_lifetime);
       session->direct_endpoint = endpoint_copy;
       session->remote_endpoint = result.remote_endpoint;
       co_await remember_session(session, connection_manager::direction::outbound);
+      store.mark_endpoint_success(
+          result.peer, endpoint_copy, path::kind::direct,
+          std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started));
       launch_session_accept_loop(session);
       launch_identify(session);
       co_await announce_pubsub_subscriptions(result.peer);
@@ -477,6 +499,7 @@ node::impl::ensure_direct_session(const peer_id& peer, std::chrono::milliseconds
    if (auto existing = session_for_path(peer, path::kind::direct)) {
       co_return existing;
    }
+   connection_gate->peer_dial(peer);
    const auto record = store.find(peer);
    if (!record || record->endpoints.empty()) {
       FORGE_THROW_EXCEPTION(exceptions::peer_not_found, "P2P peer has no known direct endpoint");
@@ -572,10 +595,14 @@ void node::impl::launch_accept_loop(forge::net::p2p::endpoint local_endpoint) {
                 })) {
                accepted->session.cancel();
             }
-         } catch (const forge::exceptions::base&) {
+         } catch (const forge::exceptions::base& error) {
             auto lock = std::scoped_lock{self->mutex};
             if (self->stopped || !listener_is_active(self->direct_registry, local_endpoint)) {
                co_return;
+            }
+            const auto kind = p2p_code(error);
+            if (kind == exceptions::code::connection_rejected || kind == exceptions::code::backpressure_rejected) {
+               continue;
             }
             ++self->metrics_value.handshakes_failed;
          } catch (const std::exception&) {
@@ -619,6 +646,7 @@ boost::asio::awaitable<void> node::impl::handle_inbound_connection(direct::conne
       session->authentication = connection.authentication;
       session->connection = std::move(connection.session);
       session->resource = std::move(reservation);
+      session->native_lifetime = std::move(connection.native_lifetime);
       session->direct_endpoint = connection.local_endpoint;
       session->remote_endpoint = connection.remote_endpoint;
       co_await remember_session(session, connection_manager::direction::inbound);
@@ -655,8 +683,8 @@ void node::impl::launch_session_accept_loop(std::shared_ptr<node::impl::session_
          }
          try {
             auto stream = co_await session->connection.async_accept_stream();
-            auto reservation = session->info.path == path::kind::relay ? self->resources.reserve_relay_stream()
-                                                                       : self->resources.reserve_stream();
+            auto reservation =
+                self->resources.reserve_stream(session->info.remote_peer, resource_manager::session_direction::inbound);
             if (!reservation) {
                stream.cancel();
                auto lock = std::scoped_lock{self->mutex};

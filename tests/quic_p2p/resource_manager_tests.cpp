@@ -4,6 +4,7 @@ module;
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <string>
 #include <thread>
@@ -250,11 +251,20 @@ BOOST_AUTO_TEST_CASE(resource_manager_has_one_scope_limit_authority_and_progress
    BOOST_TEST(configured.system.max_streams == 4096U);
    BOOST_TEST(configured.transient.max_memory == 32U * mib);
    BOOST_TEST(configured.transient.max_file_descriptors == 64U);
-   BOOST_TEST(configured.transient.max_connections == 2048U);
+   BOOST_TEST(configured.transient.max_inbound_connections == 32U);
+   BOOST_TEST(configured.transient.max_outbound_connections == 64U);
+   BOOST_TEST(configured.transient.max_connections == 64U);
+   BOOST_TEST(configured.transient.max_inbound_streams == 128U);
+   BOOST_TEST(configured.transient.max_outbound_streams == 256U);
+   BOOST_TEST(configured.transient.max_streams == 256U);
    BOOST_TEST(configured.peer.max_memory == 64U * mib);
    BOOST_TEST(configured.peer.max_file_descriptors == 4U);
-   BOOST_TEST(configured.peer.max_connections == 4U);
-   BOOST_TEST(configured.peer.max_streams == 256U);
+   BOOST_TEST(configured.peer.max_inbound_connections == 8U);
+   BOOST_TEST(configured.peer.max_outbound_connections == 8U);
+   BOOST_TEST(configured.peer.max_connections == 8U);
+   BOOST_TEST(configured.peer.max_inbound_streams == 256U);
+   BOOST_TEST(configured.peer.max_outbound_streams == 512U);
+   BOOST_TEST(configured.peer.max_streams == 512U);
    BOOST_TEST(configured.protocol.max_memory == 64U * mib);
    BOOST_TEST(configured.protocol.max_inbound_streams == 512U);
    BOOST_TEST(configured.protocol.max_outbound_streams == 2048U);
@@ -479,11 +489,44 @@ BOOST_AUTO_TEST_CASE(resource_manager_preserves_independent_operational_budgets)
    BOOST_TEST(invalid_operations.invalid_transitions == 3U);
 }
 
+BOOST_AUTO_TEST_CASE(resource_manager_serializes_concurrent_dial_binding) {
+   auto manager = resource_manager{resource_manager::limits{
+       .max_dial_attempts = 1,
+       .max_dial_attempts_per_peer = 1,
+   }};
+   auto dial = manager.reserve_dial();
+   BOOST_REQUIRE(dial);
+
+   auto start = std::atomic_bool{false};
+   auto first = std::atomic_bool{false};
+   auto second = std::atomic_bool{false};
+   auto bind = [&](std::atomic_bool& result, std::string peer) {
+      while (!start.load(std::memory_order_acquire)) {
+      }
+      result.store(dial->bind(test_peer(std::move(peer))), std::memory_order_release);
+   };
+   auto first_thread = std::thread{bind, std::ref(first), "dial-race-a"};
+   auto second_thread = std::thread{bind, std::ref(second), "dial-race-b"};
+   start.store(true, std::memory_order_release);
+   first_thread.join();
+   second_thread.join();
+
+   const auto exactly_one_bound = first.load(std::memory_order_acquire) != second.load(std::memory_order_acquire);
+   BOOST_TEST(exactly_one_bound);
+   BOOST_TEST(dial->bound());
+   BOOST_TEST(manager.current().active_dials == 1U);
+   BOOST_TEST(manager.current().dial_attempt_scopes == 1U);
+   dial.reset();
+   BOOST_TEST(manager.current().active_dials == 0U);
+   BOOST_TEST(manager.current().dial_attempt_scopes == 0U);
+}
+
 BOOST_AUTO_TEST_CASE(resource_manager_children_survive_parent_facades_and_check_overflow) {
    constexpr auto maximum_memory = (std::numeric_limits<std::uint64_t>::max)();
    constexpr auto maximum_descriptors = (std::numeric_limits<std::size_t>::max)();
    auto manager = resource_manager{resource_manager::limits{
        .system = {.max_memory = maximum_memory, .max_file_descriptors = maximum_descriptors},
+       .transient = {.max_memory = maximum_memory, .max_file_descriptors = maximum_descriptors},
        .connection = {.max_memory = maximum_memory, .max_file_descriptors = maximum_descriptors},
    }};
    auto session = manager.reserve_session(resource_manager::session_direction::outbound);

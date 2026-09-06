@@ -1,18 +1,23 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <functional>
+#include <memory>
+#include <string>
 
 namespace forge::net::p2p::detail {
 
 class resource_stream final : public forge::net::transport::detail::stream_concept {
  public:
-   resource_stream(resource_manager manager, resource_manager::stream_reservation reservation);
+   explicit resource_stream(resource_manager::stream_reservation reservation);
    ~resource_stream() noexcept override;
 
    void attach(forge::net::transport::stream stream) noexcept;
    [[nodiscard]] bool valid() const noexcept override;
    [[nodiscard]] std::int64_t id() const noexcept override;
-   [[nodiscard]] bool bind(resource_manager::scope value) noexcept;
+   [[nodiscard]] bool bind_protocol(protocol_id value) noexcept;
+   [[nodiscard]] bool bind_service(std::string value) noexcept;
 
    boost::asio::awaitable<void> async_write(std::span<const std::uint8_t> bytes) override;
    boost::asio::awaitable<void> async_write_chunk(forge::net::transport::chunk bytes) override;
@@ -37,7 +42,6 @@ class resource_stream final : public forge::net::transport::detail::stream_conce
    void release_terminal_owner() noexcept;
 
    forge::net::transport::stream stream_;
-   resource_manager manager_;
    resource_manager::stream_reservation reservation_;
    std::atomic<terminal_state> terminal_{terminal_state::active};
 };
@@ -60,7 +64,7 @@ class stream_admission_handler final {
 };
 
 [[nodiscard]] std::pair<forge::net::transport::stream, std::shared_ptr<resource_stream>>
-prepare_resource_stream(resource_manager manager, resource_manager::stream_reservation reservation);
+prepare_resource_stream(resource_manager::stream_reservation reservation);
 
 boost::asio::awaitable<void> async_close_unescaped(const std::shared_ptr<resource_stream>& resource);
 

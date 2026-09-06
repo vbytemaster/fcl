@@ -322,8 +322,15 @@ void stop_owned(auto self) {
       self->protocol_open_deadlines.clear();
       for (auto& [_, session] : self->sessions) {
          operations.push_back(detail::session_teardown::operation{
-             .close = [session]() -> boost::asio::awaitable<void> { co_await session->connection.async_close(); },
-             .cancel = [session] { session->connection.cancel(); },
+             .close = [session]() -> boost::asio::awaitable<void> {
+                co_await session->connection.async_close();
+                session->native_lifetime.reset();
+             },
+             .cancel =
+                 [session] {
+                    session->connection.cancel();
+                    session->native_lifetime.reset();
+                 },
          });
       }
       self->stop_requested_at = std::chrono::steady_clock::now();
@@ -467,6 +474,11 @@ node::metrics_snapshot node::metrics() const {
    auto lock = std::scoped_lock{impl_->mutex};
    impl_->cleanup_expired_relay_reservations_locked();
    auto out = impl_->metrics_value;
+   out.gater_peer_dial_rejections = impl_->connection_gate->denied(detail::connection_gater_stage::peer_dial);
+   out.gater_address_dial_rejections = impl_->connection_gate->denied(detail::connection_gater_stage::address_dial);
+   out.gater_accept_rejections = impl_->connection_gate->denied(detail::connection_gater_stage::accept);
+   out.gater_secured_rejections = impl_->connection_gate->denied(detail::connection_gater_stage::secured);
+   out.gater_upgraded_rejections = impl_->connection_gate->denied(detail::connection_gater_stage::upgraded);
    out.active_sessions = impl_->sessions.size();
    out.active_relay_reservations = impl_->inbound_relay_reservations.size();
    out.stopped = impl_->stopped;
@@ -537,6 +549,12 @@ forge::net::p2p::diagnostics::snapshot node::diagnostics(forge::net::p2p::diagno
    out.lifecycle = lifecycle;
    out.effective_limits = impl_->resources.configured_limits();
    out.metrics = impl_->metrics_value;
+   out.metrics.gater_peer_dial_rejections = impl_->connection_gate->denied(detail::connection_gater_stage::peer_dial);
+   out.metrics.gater_address_dial_rejections =
+       impl_->connection_gate->denied(detail::connection_gater_stage::address_dial);
+   out.metrics.gater_accept_rejections = impl_->connection_gate->denied(detail::connection_gater_stage::accept);
+   out.metrics.gater_secured_rejections = impl_->connection_gate->denied(detail::connection_gater_stage::secured);
+   out.metrics.gater_upgraded_rejections = impl_->connection_gate->denied(detail::connection_gater_stage::upgraded);
    out.metrics.active_sessions = impl_->sessions.size();
    out.metrics.active_relay_reservations = impl_->inbound_relay_reservations.size();
    out.metrics.stopped = impl_->stopped;

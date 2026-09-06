@@ -17,6 +17,7 @@ module;
 #include <deque>
 #include <exception>
 #include <future>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <memory>
@@ -93,6 +94,7 @@ import forge.crypto.asymmetric.secp256k1;
 import forge.crypto.pki.x509;
 import forge.net.p2p.dht;
 import forge.net.p2p.dht.record_store;
+import forge.net.p2p.connection_gater;
 import forge.net.p2p.discovery;
 import forge.net.p2p.endpoint;
 import forge.net.p2p.envelope;
@@ -154,8 +156,7 @@ template <> struct server_supplied<p2p_live_types::caller_peer> {
       value = {};
    }
 
-   [[nodiscard]] static bool apply(p2p_live_types::caller_peer& value,
-                                   const trusted_invocation& trusted) {
+   [[nodiscard]] static bool apply(p2p_live_types::caller_peer& value, const trusted_invocation& trusted) {
       const auto* peer = trusted.find<forge::api::p2p::authenticated_peer>();
       if (peer == nullptr) {
          return false;
@@ -174,9 +175,8 @@ class live_api : public forge::api::core::contract<live_api, forge::api::core::s
  public:
    virtual ~live_api() = default;
 
-   virtual boost::asio::awaitable<void>
-   exchange(caller_peer,
-            forge::api::core::duplex_stream<std::uint32_t, std::uint32_t>) = 0;
+   virtual boost::asio::awaitable<void> exchange(caller_peer,
+                                                 forge::api::core::duplex_stream<std::uint32_t, std::uint32_t>) = 0;
 };
 
 } // namespace p2p_live_types
@@ -765,6 +765,155 @@ node::options options_for(peer_id id, capability_set capabilities = capability_s
    };
 }
 
+[[nodiscard]] std::size_t active_stream_count(const resource_manager::snapshot& snapshot) {
+   return snapshot.streams.inbound_streams + snapshot.streams.outbound_streams;
+}
+
+enum class session_admission_headroom {
+   none,
+   one_session,
+};
+
+void set_resource_session_limits(node::options& options, std::size_t total, std::size_t inbound, std::size_t outbound,
+                                 std::size_t per_peer,
+                                 session_admission_headroom headroom = session_admission_headroom::none) {
+   options.limits.max_sessions = total;
+   const auto admission_limit = [headroom](std::size_t value) {
+      return headroom == session_admission_headroom::one_session && value != (std::numeric_limits<std::size_t>::max)()
+                 ? value + 1
+                 : value;
+   };
+   auto& system = options.limits.resources.system;
+   system.max_connections = admission_limit(total);
+   system.max_inbound_connections = admission_limit(inbound);
+   system.max_outbound_connections = admission_limit(outbound);
+   auto& peer = options.limits.resources.peer;
+   peer.max_connections = per_peer;
+   peer.max_inbound_connections = per_peer;
+   peer.max_outbound_connections = per_peer;
+}
+
+enum class recorded_gater_stage {
+   peer_dial,
+   address_dial,
+   accept,
+   secured,
+   upgraded,
+};
+
+struct recorded_gater_call {
+   recorded_gater_stage stage;
+   std::optional<peer_id> peer;
+};
+
+class recording_connection_gater final : public connection_gater {
+ public:
+   explicit recording_connection_gater(std::optional<recorded_gater_stage> rejected = {}) : rejected_(rejected) {}
+
+   [[nodiscard]] std::vector<recorded_gater_stage> stages() const {
+      auto lock = std::scoped_lock{mutex_};
+      auto result = std::vector<recorded_gater_stage>{};
+      result.reserve(calls_.size());
+      for (const auto& call : calls_) {
+         result.push_back(call.stage);
+      }
+      return result;
+   }
+
+   [[nodiscard]] std::vector<recorded_gater_stage> stages_for(const peer_id& peer) const {
+      auto lock = std::scoped_lock{mutex_};
+      auto result = std::vector<recorded_gater_stage>{};
+      for (const auto& call : calls_) {
+         if (call.peer == peer) {
+            result.push_back(call.stage);
+         }
+      }
+      return result;
+   }
+
+   void clear() {
+      auto lock = std::scoped_lock{mutex_};
+      calls_.clear();
+   }
+
+   void allow() {
+      auto lock = std::scoped_lock{mutex_};
+      rejected_.reset();
+   }
+
+   bool intercept_peer_dial(const peer_id& peer) noexcept override {
+      return record(recorded_gater_stage::peer_dial, peer);
+   }
+
+   bool intercept_address_dial(const peer_id& peer, const endpoint&) noexcept override {
+      return record(recorded_gater_stage::address_dial, peer);
+   }
+
+   bool intercept_accept(const connection_endpoints&) noexcept override {
+      return record(recorded_gater_stage::accept);
+   }
+
+   bool intercept_secured(connection_direction, const peer_id& peer, const connection_endpoints&) noexcept override {
+      return record(recorded_gater_stage::secured, peer);
+   }
+
+   bool intercept_upgraded(connection_direction, const peer_id& peer, const connection_endpoints&) noexcept override {
+      return record(recorded_gater_stage::upgraded, peer);
+   }
+
+ private:
+   [[nodiscard]] bool record(recorded_gater_stage stage, std::optional<peer_id> peer = {}) noexcept {
+      auto lock = std::scoped_lock{mutex_};
+      calls_.push_back(recorded_gater_call{.stage = stage, .peer = std::move(peer)});
+      return rejected_ != stage;
+   }
+
+   std::optional<recorded_gater_stage> rejected_;
+   mutable std::mutex mutex_;
+   std::vector<recorded_gater_call> calls_;
+};
+
+[[nodiscard]] std::uint64_t gater_rejections(const node::metrics_snapshot& metrics, recorded_gater_stage stage) {
+   switch (stage) {
+   case recorded_gater_stage::peer_dial:
+      return metrics.gater_peer_dial_rejections;
+   case recorded_gater_stage::address_dial:
+      return metrics.gater_address_dial_rejections;
+   case recorded_gater_stage::accept:
+      return metrics.gater_accept_rejections;
+   case recorded_gater_stage::secured:
+      return metrics.gater_secured_rejections;
+   case recorded_gater_stage::upgraded:
+      return metrics.gater_upgraded_rejections;
+   }
+   return 0;
+}
+
+[[nodiscard]] std::size_t inbound_gater_stage_count(recorded_gater_stage stage) {
+   switch (stage) {
+   case recorded_gater_stage::accept:
+      return 1;
+   case recorded_gater_stage::secured:
+      return 2;
+   case recorded_gater_stage::upgraded:
+      return 3;
+   case recorded_gater_stage::peer_dial:
+   case recorded_gater_stage::address_dial:
+      return 0;
+   }
+   return 0;
+}
+
+void check_gater_stages(const std::vector<recorded_gater_stage>& actual,
+                        std::initializer_list<recorded_gater_stage> expected) {
+   BOOST_REQUIRE_EQUAL(actual.size(), expected.size());
+   auto index = std::size_t{};
+   for (const auto stage : expected) {
+      BOOST_TEST(static_cast<int>(actual[index]) == static_cast<int>(stage));
+      ++index;
+   }
+}
+
 node::options options_for(const test_certificate_identity& identity,
                           capability_set capabilities = capability_set{.bits = capabilities::direct_quic |
                                                                                capabilities::peer_exchange}) {
@@ -933,8 +1082,7 @@ void verify_dht_server(forge::asio::runtime& runtime, node& client, const node& 
 
 boost::asio::awaitable<void> exercise_live_api(forge::api::transport::connection& connection) {
    auto remote = co_await connection.get_remote_api<live_api>();
-   auto call = co_await remote.async_open<&live_api::exchange>(
-      p2p_live_types::caller_peer{.id = peer(244)});
+   auto call = co_await remote.async_open<&live_api::exchange>(p2p_live_types::caller_peer{.id = peer(244)});
    co_await call.async_write(3U);
    auto first = co_await call.async_read();
    BOOST_REQUIRE(first.has_value());
@@ -965,11 +1113,11 @@ boost::asio::awaitable<void> exercise_unverified_live_api(forge::api::transport:
 void run_live_api_over(endpoint::protocol_kind transport) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
    auto server_options = transport == endpoint::protocol_kind::quic_v1
-                            ? options_for(make_test_certificate_identity("api-live-server"))
-                            : options_for(make_test_identity());
+                             ? options_for(make_test_certificate_identity("api-live-server"))
+                             : options_for(make_test_identity());
    auto client_options = transport == endpoint::protocol_kind::quic_v1
-                            ? options_for(make_test_certificate_identity("api-live-client"))
-                            : options_for(make_test_identity());
+                             ? options_for(make_test_certificate_identity("api-live-client"))
+                             : options_for(make_test_identity());
    if (transport == endpoint::protocol_kind::quic_v1) {
       server_options.allow_insecure_test_mode = false;
       client_options.allow_insecure_test_mode = false;
@@ -993,14 +1141,12 @@ void run_live_api_over(endpoint::protocol_kind transport) {
                                                           .allow_relay = false,
                                                       }));
    BOOST_TEST(session.remote_peer.value == server.local_peer().value);
-   const auto expected_authentication = transport == endpoint::protocol_kind::quic_v1
-                                            ? peer_authentication::quic_tls
-                                            : peer_authentication::libp2p_tls;
+   const auto expected_authentication =
+       transport == endpoint::protocol_kind::quic_v1 ? peer_authentication::quic_tls : peer_authentication::libp2p_tls;
    auto stream =
        forge::asio::blocking::run(runtime, client.async_open_protocol_stream(server.local_peer(), binding.protocol(),
                                                                              node::open_options{.allow_relay = false}));
-   BOOST_TEST(static_cast<std::uint8_t>(stream.authentication()) ==
-              static_cast<std::uint8_t>(expected_authentication));
+   BOOST_TEST(static_cast<std::uint8_t>(stream.authentication()) == static_cast<std::uint8_t>(expected_authentication));
    auto connection = forge::api::transport::connection{std::move(stream).into_transport_stream(), binding.options()};
    forge::asio::blocking::run(runtime, exercise_live_api(connection));
    BOOST_TEST(implementation->caller.value == client.local_peer().value);
@@ -1854,12 +2000,10 @@ void seed_dht_provider_records(forge::asio::runtime& runtime, const dht::profile
 } // namespace
 
 BOOST_AUTO_TEST_CASE(p2p_session_info_preserves_legacy_structured_binding_shape) {
-   auto [remote_peer, capabilities, path, relay_peer, identify_state] =
-      node::session_info{};
+   auto [remote_peer, capabilities, path, relay_peer, identify_state] = node::session_info{};
    BOOST_TEST(remote_peer.value.empty());
    BOOST_TEST(capabilities.bits == 0U);
-   BOOST_TEST(static_cast<std::uint8_t>(path) ==
-              static_cast<std::uint8_t>(forge::net::p2p::path::kind::direct));
+   BOOST_TEST(static_cast<std::uint8_t>(path) == static_cast<std::uint8_t>(forge::net::p2p::path::kind::direct));
    BOOST_TEST(!relay_peer.has_value());
    BOOST_TEST(static_cast<std::uint8_t>(identify_state) ==
               static_cast<std::uint8_t>(forge::net::p2p::identify::state::unknown));
@@ -2237,22 +2381,205 @@ BOOST_AUTO_TEST_CASE(p2p_identify_peer_record_sequence_advances_across_node_rest
 BOOST_AUTO_TEST_CASE(p2p_idle_listeners_do_not_consume_pending_inbound_session_budget) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
    auto server_options = options_for(peer(198));
-   server_options.limits.max_pending_inbound_sessions = 1;
+   server_options.limits.resources.transient.max_inbound_connections = 1;
+   server_options.limits.resources.transient.max_connections = 1;
    auto server = node{runtime, std::move(server_options)};
 
    forge::asio::blocking::run(runtime, server.async_listen(make_quic_endpoint(0)));
    forge::asio::blocking::run(runtime, server.async_listen(make_tcp_endpoint(0)));
    wait_on_runtime(runtime, std::chrono::milliseconds{20}, "idle P2P listeners");
 
-   BOOST_TEST(server.diagnostics().resources.pending_inbound_sessions == 0U);
+   BOOST_TEST(server.diagnostics().resources.transient.inbound_connections == 0U);
+   BOOST_TEST(server.diagnostics().resources.transient.file_descriptors == 0U);
 
    forge::asio::blocking::run(runtime, server.async_stop());
+}
+
+BOOST_AUTO_TEST_CASE(p2p_connection_gater_orders_all_direct_stages_for_tcp_and_quic) {
+   for (const auto transport : {endpoint::protocol_kind::tcp, endpoint::protocol_kind::quic_v1}) {
+      auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
+      auto server_gater = std::make_shared<recording_connection_gater>();
+      auto client_gater = std::make_shared<recording_connection_gater>();
+      auto server_options = options_for(peer(193));
+      auto client_options = options_for(peer(194));
+      server_options.connection_gater = server_gater;
+      client_options.connection_gater = client_gater;
+      auto server = node{runtime, std::move(server_options)};
+      auto client = node{runtime, std::move(client_options)};
+
+      forge::asio::blocking::run(runtime, server.async_listen(transport == endpoint::protocol_kind::tcp
+                                                                  ? make_tcp_endpoint(0)
+                                                                  : make_quic_endpoint(0)));
+      const auto server_endpoint = require_endpoint_for(server.local_endpoints(), transport);
+      static_cast<void>(forge::asio::blocking::run(
+          runtime, client.async_connect(server_endpoint, node::connect_options{.expected_peer = server.local_peer()})));
+
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+      while (server_gater->stages().size() != 3U && std::chrono::steady_clock::now() < deadline) {
+         wait_on_runtime(runtime, std::chrono::milliseconds{1}, "P2P connection gater inbound stages");
+      }
+      check_gater_stages(client_gater->stages(), {recorded_gater_stage::peer_dial, recorded_gater_stage::address_dial,
+                                                  recorded_gater_stage::secured, recorded_gater_stage::upgraded});
+      check_gater_stages(server_gater->stages(),
+                         {recorded_gater_stage::accept, recorded_gater_stage::secured, recorded_gater_stage::upgraded});
+      BOOST_TEST(client.metrics().active_sessions == 1U);
+      BOOST_TEST(server.metrics().active_sessions == 1U);
+
+      forge::asio::blocking::run(runtime, client.async_stop());
+      forge::asio::blocking::run(runtime, server.async_stop());
+   }
+}
+
+BOOST_AUTO_TEST_CASE(p2p_connection_gater_local_denials_are_typed_and_leave_no_client_state_for_tcp_and_quic) {
+   for (const auto transport : {endpoint::protocol_kind::tcp, endpoint::protocol_kind::quic_v1}) {
+      for (const auto rejected : {recorded_gater_stage::peer_dial, recorded_gater_stage::address_dial,
+                                  recorded_gater_stage::secured, recorded_gater_stage::upgraded}) {
+         auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
+         auto client_gater = std::make_shared<recording_connection_gater>(rejected);
+         auto server_options = options_for(peer(195));
+         auto client_options = options_for(peer(196));
+         client_options.connection_gater = client_gater;
+         auto server = node{runtime, std::move(server_options)};
+         auto client = node{runtime, std::move(client_options)};
+
+         forge::asio::blocking::run(runtime, server.async_listen(transport == endpoint::protocol_kind::tcp
+                                                                     ? make_tcp_endpoint(0)
+                                                                     : make_quic_endpoint(0)));
+         const auto server_endpoint = require_endpoint_for(server.local_endpoints(), transport);
+         auto rejected_typed = false;
+         try {
+            static_cast<void>(forge::asio::blocking::run(
+                runtime,
+                client.async_connect(server_endpoint, node::connect_options{.expected_peer = server.local_peer()})));
+         } catch (const forge::exceptions::base& error) {
+            rejected_typed = exceptions::code_of(error) == exceptions::code::connection_rejected;
+         }
+
+         BOOST_TEST(rejected_typed);
+         BOOST_TEST(gater_rejections(client.metrics(), rejected) == 1U);
+         BOOST_TEST(client.metrics().active_sessions == 0U);
+         BOOST_TEST(client.diagnostics().sessions.empty());
+         BOOST_TEST(client.diagnostics().resources.transient.outbound_connections == 0U);
+         BOOST_TEST(client.diagnostics().resources.system.outbound_connections == 0U);
+         BOOST_TEST(client.diagnostics().resources.denied_connections == 0U);
+         BOOST_TEST(!client.peers().find(server.local_peer()).has_value());
+
+         forge::asio::blocking::run(runtime, client.async_stop());
+         forge::asio::blocking::run(runtime, server.async_stop());
+      }
+   }
+}
+
+BOOST_AUTO_TEST_CASE(p2p_tcp_session_fd_reservation_survives_tls_handoff_until_transport_close) {
+   auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
+   auto server = node{runtime, options_for(peer(199))};
+   auto client = node{runtime, options_for(peer(200))};
+
+   forge::asio::blocking::run(runtime, server.async_listen(make_tcp_endpoint(0)));
+   const auto endpoint = require_endpoint_for(server.local_endpoints(), endpoint::protocol_kind::tcp);
+   static_cast<void>(forge::asio::blocking::run(
+       runtime, client.async_connect(endpoint, node::connect_options{.expected_peer = server.local_peer()})));
+
+   BOOST_TEST(client.diagnostics().resources.system.file_descriptors == 1U);
+   forge::asio::blocking::run(runtime, client.async_stop());
+   BOOST_TEST(client.diagnostics().resources.system.file_descriptors == 0U);
+
+   forge::asio::blocking::run(runtime, server.async_stop());
+}
+
+BOOST_AUTO_TEST_CASE(p2p_connection_gater_inbound_denials_leave_no_server_state_for_tcp_and_quic) {
+   for (const auto transport : {endpoint::protocol_kind::tcp, endpoint::protocol_kind::quic_v1}) {
+      for (const auto rejected :
+           {recorded_gater_stage::accept, recorded_gater_stage::secured, recorded_gater_stage::upgraded}) {
+         auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
+         auto server_gater = std::make_shared<recording_connection_gater>(rejected);
+         auto server_options = options_for(peer(197));
+         auto client_options = options_for(peer(198));
+         server_options.connection_gater = server_gater;
+         auto server = node{runtime, std::move(server_options)};
+         auto client = node{runtime, std::move(client_options)};
+
+         forge::asio::blocking::run(runtime, server.async_listen(transport == endpoint::protocol_kind::tcp
+                                                                     ? make_tcp_endpoint(0)
+                                                                     : make_quic_endpoint(0)));
+         const auto server_endpoint = require_endpoint_for(server.local_endpoints(), transport);
+         try {
+            static_cast<void>(forge::asio::blocking::run(
+                runtime,
+                client.async_connect(server_endpoint, node::connect_options{.expected_peer = server.local_peer()})));
+         } catch (const forge::exceptions::base&) {
+            // TCP reports a remote close during connect. QUIC may complete the
+            // authenticated dial before the server-side Accept hook runs.
+         }
+
+         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+         while (gater_rejections(server.metrics(), rejected) == 0U && std::chrono::steady_clock::now() < deadline) {
+            wait_on_runtime(runtime, std::chrono::milliseconds{1}, "P2P inbound connection gater rejection");
+         }
+         BOOST_TEST(gater_rejections(server.metrics(), rejected) == 1U);
+         const auto stages = server_gater->stages();
+         const auto expected_count = inbound_gater_stage_count(rejected);
+         BOOST_REQUIRE_EQUAL(stages.size(), expected_count);
+         BOOST_TEST(static_cast<int>(stages.back()) == static_cast<int>(rejected));
+         BOOST_TEST(server.metrics().active_sessions == 0U);
+         BOOST_TEST(server.diagnostics().sessions.empty());
+         BOOST_TEST(!server.peers().find(client.local_peer()).has_value());
+
+         forge::asio::blocking::run(runtime, client.async_stop());
+         forge::asio::blocking::run(runtime, server.async_stop());
+      }
+   }
+}
+
+BOOST_AUTO_TEST_CASE(p2p_connection_gater_accept_denial_does_not_retire_direct_listener) {
+   for (const auto transport : {endpoint::protocol_kind::tcp, endpoint::protocol_kind::quic_v1}) {
+      auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
+      auto server_gater = std::make_shared<recording_connection_gater>(recorded_gater_stage::accept);
+      auto server_options = options_for(peer(201));
+      auto client_options = options_for(peer(202));
+      server_options.connection_gater = server_gater;
+      auto server = node{runtime, std::move(server_options)};
+      auto client = node{runtime, std::move(client_options)};
+
+      forge::asio::blocking::run(runtime, server.async_listen(transport == endpoint::protocol_kind::tcp
+                                                                  ? make_tcp_endpoint(0)
+                                                                  : make_quic_endpoint(0)));
+      const auto server_endpoint = require_endpoint_for(server.local_endpoints(), transport);
+      try {
+         static_cast<void>(forge::asio::blocking::run(
+             runtime,
+             client.async_connect(server_endpoint, node::connect_options{.expected_peer = server.local_peer()})));
+      } catch (const forge::exceptions::base&) {
+         // A TCP dial observes the remote close synchronously. A QUIC dial may
+         // complete before the server-side Accept hook rejects its connection.
+      }
+
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+      while (gater_rejections(server.metrics(), recorded_gater_stage::accept) == 0U &&
+             std::chrono::steady_clock::now() < deadline) {
+         wait_on_runtime(runtime, std::chrono::milliseconds{1}, "P2P inbound accept gater rejection");
+      }
+      BOOST_TEST(gater_rejections(server.metrics(), recorded_gater_stage::accept) == 1U);
+      server_gater->allow();
+
+      static_cast<void>(forge::asio::blocking::run(
+          runtime, client.async_connect(server_endpoint, node::connect_options{.expected_peer = server.local_peer()})));
+      const auto established_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+      while (server.metrics().active_sessions != 1U && std::chrono::steady_clock::now() < established_deadline) {
+         wait_on_runtime(runtime, std::chrono::milliseconds{1}, "P2P direct listener recovery after gater denial");
+      }
+      BOOST_TEST(server.metrics().active_sessions == 1U);
+
+      forge::asio::blocking::run(runtime, client.async_stop());
+      forge::asio::blocking::run(runtime, server.async_stop());
+   }
 }
 
 BOOST_AUTO_TEST_CASE(p2p_tcp_handshake_is_admitted_before_security_upgrade) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 4}};
    auto server_options = options_for(peer(199));
-   server_options.limits.max_pending_inbound_sessions = 1;
+   server_options.limits.resources.transient.max_inbound_connections = 1;
+   server_options.limits.resources.transient.max_connections = 1;
    auto server = node{runtime, std::move(server_options)};
 
    forge::asio::blocking::run(runtime, server.async_listen(make_tcp_endpoint(0)));
@@ -2272,26 +2599,26 @@ BOOST_AUTO_TEST_CASE(p2p_tcp_handshake_is_admitted_before_security_upgrade) {
 
    forge::asio::blocking::run(runtime, connect_raw(first, listeners[0]));
    const auto admitted_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
-   while (server.diagnostics().resources.pending_inbound_sessions != 1U) {
+   while (server.diagnostics().resources.transient.inbound_connections != 1U) {
       BOOST_REQUIRE(std::chrono::steady_clock::now() < admitted_deadline);
       wait_on_runtime(runtime, std::chrono::milliseconds{1}, "first raw TCP admission");
    }
 
    forge::asio::blocking::run(runtime, connect_raw(second, listeners[1]));
    const auto rejected_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
-   while (server.diagnostics().resources.denied_sessions == 0U) {
+   while (server.diagnostics().resources.denied_connections == 0U) {
       BOOST_REQUIRE(std::chrono::steady_clock::now() < rejected_deadline);
       wait_on_runtime(runtime, std::chrono::milliseconds{1}, "second raw TCP admission rejection");
    }
    const auto bounded = server.diagnostics().resources;
-   BOOST_TEST(bounded.pending_inbound_sessions == 1U);
-   BOOST_TEST(bounded.denied_sessions >= 1U);
+   BOOST_TEST(bounded.transient.inbound_connections == 1U);
+   BOOST_TEST(bounded.denied_connections >= 1U);
 
    auto ignored = boost::system::error_code{};
    first.close(ignored);
    second.close(ignored);
    forge::asio::blocking::run(runtime, server.async_stop());
-   BOOST_TEST(server.diagnostics().resources.pending_inbound_sessions == 0U);
+   BOOST_TEST(server.diagnostics().resources.transient.inbound_connections == 0U);
 }
 
 BOOST_AUTO_TEST_CASE(p2p_duplicate_direct_listen_rejects_typed) {
@@ -3556,7 +3883,7 @@ BOOST_AUTO_TEST_CASE(p2p_dht_add_provider_preserves_identity_and_continues_rpc_s
    BOOST_TEST(static_cast<int>(response.type) == static_cast<int>(dht::message_type::ping));
    forge::asio::blocking::run(runtime, stream.async_close());
    for (auto attempt = 0U; attempt < 40U && (server_store->provider_upsert_attempts.load() == 0U ||
-                                             server.diagnostics().resources.active_streams != 0U);
+                                             active_stream_count(server.diagnostics().resources) != 0U);
         ++attempt) {
       wait_on_runtime(runtime, std::chrono::milliseconds{50}, "DHT ADD_PROVIDER handling");
    }
@@ -3564,7 +3891,7 @@ BOOST_AUTO_TEST_CASE(p2p_dht_add_provider_preserves_identity_and_continues_rpc_s
    BOOST_TEST(server.metrics().dht_queries >= 2U);
    BOOST_TEST(server.metrics().dht_responses == responses_before + 1U);
    BOOST_TEST(server.metrics().protocol_rejections == rejections_before);
-   BOOST_TEST(server.diagnostics().resources.active_streams == 0U);
+   BOOST_TEST(active_stream_count(server.diagnostics().resources) == 0U);
    BOOST_TEST(server_store->provider_upsert_attempts.load(std::memory_order_relaxed) == 1U);
    const auto page =
        forge::asio::blocking::run(runtime, server_store->async_hydrate(dht::record_store::hydration_request{
@@ -3627,10 +3954,10 @@ BOOST_AUTO_TEST_CASE(p2p_dht_add_provider_retains_identity_when_address_is_filte
        wrap_length_delimited(forge::asio::blocking::run(runtime, read_length_delimited(stream))), server_profile);
    BOOST_TEST(static_cast<int>(response.type) == static_cast<int>(dht::message_type::ping));
    forge::asio::blocking::run(runtime, stream.async_close());
-   for (auto attempt = 0U; attempt < 40U && server.diagnostics().resources.active_streams != 0U; ++attempt) {
+   for (auto attempt = 0U; attempt < 40U && active_stream_count(server.diagnostics().resources) != 0U; ++attempt) {
       wait_on_runtime(runtime, std::chrono::milliseconds{25}, "DHT addressless provider stream close");
    }
-   BOOST_TEST(server.diagnostics().resources.active_streams == 0U);
+   BOOST_TEST(active_stream_count(server.diagnostics().resources) == 0U);
    BOOST_TEST(server_store->provider_upsert_attempts.load(std::memory_order_relaxed) == 1U);
    const auto page =
        forge::asio::blocking::run(runtime, server_store->async_hydrate(dht::record_store::hydration_request{
@@ -4844,7 +5171,7 @@ BOOST_AUTO_TEST_CASE(p2p_reachability_relay_public_types_are_owner_scoped) {
    static_assert(std::is_same_v<decltype(relay::reservation::info{}.relay_peer), peer_id>);
    static_assert(std::is_same_v<decltype(path::policy{}.allow_relay), bool>);
    static_assert(std::is_same_v<decltype(path::result{}.kind), path::kind>);
-   static_assert(std::is_same_v<decltype(resource_manager::snapshot{}.active_streams), std::size_t>);
+   static_assert(std::is_same_v<decltype(resource_manager::snapshot{}.streams.inbound_streams), std::size_t>);
    static_assert(std::is_same_v<decltype(dht::options{}.replication), std::size_t>);
    static_assert(std::is_same_v<decltype(dht::query_result{}.target), dht::key>);
    static_assert(std::is_same_v<decltype(rendezvous::registration{}.peer), peer_id>);
@@ -6490,91 +6817,93 @@ BOOST_AUTO_TEST_CASE(p2p_relay_voucher_uses_signed_envelope_and_rejects_stale_or
                      forge::exceptions::base);
 }
 
-BOOST_AUTO_TEST_CASE(p2p_resource_manager_enforces_relay_stream_and_queue_limits) {
-   auto manager = resource_manager{resource_manager::limits{
-       .max_streams = 2,
-       .max_relay_streams = 1,
-       .max_queued_bytes = 8,
-   }};
-   auto relay_stream = manager.reserve_relay_stream();
-   BOOST_REQUIRE(relay_stream);
-   BOOST_TEST(!manager.reserve_relay_stream());
-   auto queued = manager.reserve_queued_bytes(8);
-   BOOST_REQUIRE(queued);
-   BOOST_TEST(!manager.reserve_queued_bytes(1));
-   auto snapshot = manager.current();
-   BOOST_TEST(snapshot.active_streams == 1U);
-   BOOST_TEST(snapshot.active_relay_streams == 1U);
-   BOOST_TEST(snapshot.queued_bytes == 8U);
-   BOOST_TEST(snapshot.denied == 2U);
-   BOOST_TEST(snapshot.denied_streams == 1U);
-   BOOST_TEST(snapshot.denied_queued_bytes == 1U);
-   BOOST_TEST(snapshot.denied_relays == 0U);
-   relay_stream.reset();
-   queued.reset();
-   snapshot = manager.current();
-   BOOST_TEST(snapshot.active_streams == 0U);
-   BOOST_TEST(snapshot.active_relay_streams == 0U);
-   BOOST_TEST(snapshot.queued_bytes == 0U);
+[[nodiscard]] std::optional<resource_manager::stream_reservation> reserve_resource_stream_for_test(
+    resource_manager& manager, const peer_id& owner,
+    resource_manager::session_direction direction = resource_manager::session_direction::outbound,
+    protocol_id protocol = builtins::echo, std::string service = "p2p.echo") {
+   auto reservation = manager.reserve_stream(owner, direction);
+   if (!reservation || !reservation->bind_protocol(std::move(protocol)) ||
+       !reservation->bind_service(std::move(service))) {
+      return std::nullopt;
+   }
+   return reservation;
+}
 
-   auto saturated = resource_manager{resource_manager::limits{
-       .max_streams = 1,
-       .max_relay_streams = 4,
+BOOST_AUTO_TEST_CASE(p2p_resource_manager_relay_stream_uses_normal_stream_and_memory_limits) {
+   auto manager = resource_manager{resource_manager::limits{
+       .system = {.max_memory = 8, .max_streams = 2},
+       .stream = {.max_memory = 8},
    }};
-   auto regular_stream = saturated.reserve_stream();
+   auto relay_stream = reserve_resource_stream_for_test(manager, peer(90), resource_manager::session_direction::inbound,
+                                                        builtins::relay_hop, "p2p.relay");
+   BOOST_REQUIRE(relay_stream);
+   auto queued = relay_stream->reserve_memory(8);
+   BOOST_REQUIRE(queued);
+   BOOST_TEST(!relay_stream->reserve_memory(1));
+
+   auto regular_stream = reserve_resource_stream_for_test(manager, peer(91));
    BOOST_REQUIRE(regular_stream);
-   auto before = saturated.current();
-   BOOST_TEST(!saturated.reserve_relay_stream());
-   auto after = saturated.current();
-   BOOST_TEST(after.denied == before.denied + 1U);
-   BOOST_TEST(after.active_streams == 1U);
-   BOOST_TEST(after.active_relay_streams == 0U);
+   BOOST_TEST(!manager.reserve_stream(peer(92), resource_manager::session_direction::outbound));
+
+   auto snapshot = manager.current();
+   BOOST_TEST(snapshot.streams.inbound_streams == 1U);
+   BOOST_TEST(snapshot.streams.outbound_streams == 1U);
+   BOOST_TEST(snapshot.streams.memory == 8U);
+   BOOST_TEST(snapshot.denied_memory >= 1U);
+   BOOST_TEST(snapshot.denied_streams >= 1U);
+
+   regular_stream.reset();
+   queued.reset();
+   relay_stream.reset();
+   snapshot = manager.current();
+   BOOST_TEST(active_stream_count(snapshot) == 0U);
+   BOOST_TEST(snapshot.streams.memory == 0U);
 }
 
 BOOST_AUTO_TEST_CASE(p2p_resource_stream_cancel_releases_reservation_when_transport_cancel_throws) {
-   auto manager = resource_manager{resource_manager::limits{.max_streams = 1}};
-   auto reservation = manager.reserve_stream();
+   auto manager = resource_manager{resource_manager::limits{.system = {.max_streams = 1}}};
+   auto reservation = reserve_resource_stream_for_test(manager, peer(93));
    BOOST_REQUIRE(reservation);
    auto backend = std::make_shared<queued_transport_stream>(503);
    backend->throw_on_cancel = true;
-   auto resource = std::make_shared<detail::resource_stream>(manager, std::move(*reservation));
+   auto resource = std::make_shared<detail::resource_stream>(std::move(*reservation));
    resource->attach(forge::net::transport::detail::stream_access::make(backend));
 
-   BOOST_TEST(manager.current().active_streams == 1U);
+   BOOST_TEST(active_stream_count(manager.current()) == 1U);
    BOOST_CHECK_THROW(resource->cancel(), std::runtime_error);
    BOOST_TEST(backend->cancel_calls == 1U);
-   BOOST_TEST(manager.current().active_streams == 0U);
+   BOOST_TEST(active_stream_count(manager.current()) == 0U);
 }
 
 BOOST_AUTO_TEST_CASE(p2p_resource_stream_foreign_request_cancel_defers_reservation_release_to_owner) {
-   auto manager = resource_manager{resource_manager::limits{.max_streams = 1}};
-   auto reservation = manager.reserve_stream();
+   auto manager = resource_manager{resource_manager::limits{.system = {.max_streams = 1}}};
+   auto reservation = reserve_resource_stream_for_test(manager, peer(94));
    BOOST_REQUIRE(reservation);
    auto backend = std::make_shared<queued_transport_stream>(506);
    backend->throw_on_cancel = true;
-   auto resource = std::make_shared<detail::resource_stream>(manager, std::move(*reservation));
+   auto resource = std::make_shared<detail::resource_stream>(std::move(*reservation));
    resource->attach(forge::net::transport::detail::stream_access::make(backend));
 
    auto requester = std::thread{[resource] { resource->request_cancel(); }};
    requester.join();
    BOOST_TEST(backend->cancel_calls == 1U);
-   BOOST_TEST(manager.current().active_streams == 1U);
+   BOOST_TEST(active_stream_count(manager.current()) == 1U);
    resource.reset();
-   BOOST_TEST(manager.current().active_streams == 0U);
+   BOOST_TEST(active_stream_count(manager.current()) == 0U);
    BOOST_TEST(backend->cancel_calls == 1U);
 }
 
 BOOST_AUTO_TEST_CASE(p2p_resource_stream_close_forwards_cancel_without_releasing_owner_reservation) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
-   auto manager = resource_manager{resource_manager::limits{.max_streams = 1}};
-   auto reservation = manager.reserve_stream();
+   auto manager = resource_manager{resource_manager::limits{.system = {.max_streams = 1}}};
+   auto reservation = reserve_resource_stream_for_test(manager, peer(95));
    BOOST_REQUIRE(reservation);
    auto close_entered = std::barrier{2};
    auto close_release = std::barrier{2};
    auto backend = std::make_shared<queued_transport_stream>(507);
    backend->close_entered = &close_entered;
    backend->close_release = &close_release;
-   auto resource = std::make_shared<detail::resource_stream>(manager, std::move(*reservation));
+   auto resource = std::make_shared<detail::resource_stream>(std::move(*reservation));
    resource->attach(forge::net::transport::detail::stream_access::make(backend));
 
    auto closed = boost::asio::co_spawn(runtime.context(), resource->async_close(), boost::asio::use_future);
@@ -6582,13 +6911,251 @@ BOOST_AUTO_TEST_CASE(p2p_resource_stream_close_forwards_cancel_without_releasing
    auto requester = std::thread{[resource] { resource->request_cancel(); }};
    requester.join();
 
-   BOOST_TEST(manager.current().active_streams == 1U);
+   BOOST_TEST(active_stream_count(manager.current()) == 1U);
    BOOST_TEST(backend->cancel_calls == 1U);
    close_release.arrive_and_wait();
    BOOST_CHECK_NO_THROW(closed.get());
-   BOOST_TEST(manager.current().active_streams == 0U);
+   BOOST_TEST(active_stream_count(manager.current()) == 0U);
    BOOST_TEST(backend->close_calls == 1U);
    BOOST_TEST(backend->cancel_calls == 1U);
+}
+
+BOOST_AUTO_TEST_CASE(p2p_owner_admission_commit_detaches_negotiation_cancellation) {
+   auto manager = resource_manager{resource_manager::limits{.system = {.max_streams = 1}}};
+   auto reservation = reserve_resource_stream_for_test(manager, peer(96));
+   BOOST_REQUIRE(reservation);
+   auto backend = std::make_shared<queued_transport_stream>(509);
+   auto resource = std::make_shared<detail::resource_stream>(std::move(*reservation));
+   resource->attach(forge::net::transport::detail::stream_access::make(backend));
+   auto signal = boost::asio::cancellation_signal{};
+   auto stop = std::make_shared<detail::worker_stop_bridge>();
+   auto admission =
+       detail::make_owner_stream_admission(signal.slot(), stop, detail::owner_stream_lifetime::negotiation);
+
+   admission(resource);
+   BOOST_CHECK_NO_THROW(admission.commit());
+   signal.emit(boost::asio::cancellation_type::all);
+
+   BOOST_TEST(!backend->closed);
+   BOOST_TEST(active_stream_count(manager.current()) == 1U);
+   resource.reset();
+   BOOST_TEST(backend->closed);
+   BOOST_TEST(active_stream_count(manager.current()) == 0U);
+}
+
+BOOST_AUTO_TEST_CASE(p2p_owner_admission_commit_rejects_sticky_stop_before_publication) {
+   auto manager = resource_manager{resource_manager::limits{.system = {.max_streams = 1}}};
+   auto reservation = reserve_resource_stream_for_test(manager, peer(97));
+   BOOST_REQUIRE(reservation);
+   auto backend = std::make_shared<queued_transport_stream>(510);
+   auto resource = std::make_shared<detail::resource_stream>(std::move(*reservation));
+   resource->attach(forge::net::transport::detail::stream_access::make(backend));
+   auto signal = boost::asio::cancellation_signal{};
+   auto stop = std::make_shared<detail::worker_stop_bridge>();
+   auto admission =
+       detail::make_owner_stream_admission(signal.slot(), stop, detail::owner_stream_lifetime::negotiation);
+
+   admission(resource);
+   stop->request_stop();
+
+   BOOST_CHECK_THROW(admission.commit(), forge::exceptions::base);
+   BOOST_TEST(backend->closed);
+   resource.reset();
+   BOOST_TEST(active_stream_count(manager.current()) == 0U);
+}
+
+BOOST_AUTO_TEST_CASE(p2p_owner_admission_commit_preserves_operation_cancellation) {
+   auto manager = resource_manager{resource_manager::limits{.system = {.max_streams = 1}}};
+   auto reservation = reserve_resource_stream_for_test(manager, peer(98));
+   BOOST_REQUIRE(reservation);
+   auto backend = std::make_shared<queued_transport_stream>(511);
+   auto resource = std::make_shared<detail::resource_stream>(std::move(*reservation));
+   resource->attach(forge::net::transport::detail::stream_access::make(backend));
+   auto signal = boost::asio::cancellation_signal{};
+   auto stop = std::make_shared<detail::worker_stop_bridge>();
+   auto admission = detail::make_owner_stream_admission(signal.slot(), stop);
+
+   admission(resource);
+   BOOST_CHECK_NO_THROW(admission.commit());
+   stop->request_stop();
+   signal.emit(boost::asio::cancellation_type::all);
+
+   BOOST_TEST(backend->closed);
+   resource.reset();
+   BOOST_TEST(active_stream_count(manager.current()) == 0U);
+}
+
+BOOST_AUTO_TEST_CASE(p2p_resource_stream_close_preserves_error_and_releases_reservation_when_cancel_throws) {
+   auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 1}};
+   auto manager = resource_manager{resource_manager::limits{.system = {.max_streams = 1}}};
+   auto reservation = reserve_resource_stream_for_test(manager, peer(99));
+   BOOST_REQUIRE(reservation);
+   auto backend = std::make_shared<queued_transport_stream>(504);
+   backend->throw_on_close = true;
+   backend->throw_on_cancel = true;
+   auto resource = std::make_shared<detail::resource_stream>(std::move(*reservation));
+   resource->attach(forge::net::transport::detail::stream_access::make(backend));
+
+   try {
+      forge::asio::blocking::run(runtime, resource->async_close());
+      BOOST_FAIL("expected injected stream close failure");
+   } catch (const std::runtime_error& error) {
+      BOOST_TEST(std::string_view{error.what()} == "injected stream close failure");
+   }
+   BOOST_TEST(backend->close_calls == 1U);
+   BOOST_TEST(backend->cancel_calls == 1U);
+   BOOST_TEST(active_stream_count(manager.current()) == 0U);
+}
+
+BOOST_AUTO_TEST_CASE(p2p_resource_stream_destructor_absorbs_cancel_failure_and_releases_reservation) {
+   auto manager = resource_manager{resource_manager::limits{.system = {.max_streams = 1}}};
+   auto backend = std::make_shared<queued_transport_stream>(505);
+   backend->throw_on_cancel = true;
+   {
+      auto reservation = reserve_resource_stream_for_test(manager, peer(100));
+      BOOST_REQUIRE(reservation);
+      auto resource = std::make_shared<detail::resource_stream>(std::move(*reservation));
+      resource->attach(forge::net::transport::detail::stream_access::make(backend));
+      BOOST_TEST(active_stream_count(manager.current()) == 1U);
+   }
+
+   BOOST_TEST(backend->cancel_calls == 1U);
+   BOOST_TEST(active_stream_count(manager.current()) == 0U);
+}
+
+BOOST_AUTO_TEST_CASE(p2p_resource_manager_enforces_peer_protocol_dial_and_reservation_scopes) {
+   auto manager = resource_manager{resource_manager::limits{
+       .system = {.max_streams = 4},
+       .peer = {.max_streams = 1},
+       .protocol = {.max_streams = 1},
+       .max_dial_attempts_per_peer = 1,
+       .max_relay_reservations = 1,
+       .max_malformed_messages_per_peer = 1,
+   }};
+   const auto owner = peer(101);
+   const auto other = peer(102);
+
+   auto scoped = manager.reserve_stream(owner, resource_manager::session_direction::outbound);
+   BOOST_REQUIRE(scoped);
+   BOOST_REQUIRE(scoped->bind_protocol(builtins::relay_hop));
+   BOOST_REQUIRE(scoped->bind_service("p2p.relay"));
+   BOOST_TEST(!manager.reserve_stream(owner, resource_manager::session_direction::outbound));
+
+   auto other_stream = manager.reserve_stream(other, resource_manager::session_direction::outbound);
+   BOOST_REQUIRE(other_stream);
+   BOOST_TEST(!other_stream->bind_protocol(builtins::relay_hop));
+   BOOST_REQUIRE(other_stream->bind_protocol(builtins::ping));
+   BOOST_REQUIRE(other_stream->bind_service("p2p.ping"));
+   other_stream.reset();
+   scoped.reset();
+   const auto scoped_snapshot = manager.current();
+   BOOST_TEST(active_stream_count(scoped_snapshot) == 0U);
+   BOOST_TEST(scoped_snapshot.active_peer_scopes == 0U);
+   BOOST_TEST(scoped_snapshot.active_protocol_scopes == 0U);
+
+   auto saturated = resource_manager{resource_manager::limits{
+       .system = {.max_streams = 1},
+   }};
+   auto saturated_stream = saturated.reserve_stream(owner, resource_manager::session_direction::outbound);
+   BOOST_REQUIRE(saturated_stream);
+   BOOST_TEST(!saturated.reserve_stream(other, resource_manager::session_direction::outbound));
+   const auto saturated_snapshot = saturated.current();
+   BOOST_TEST(active_stream_count(saturated_snapshot) == 1U);
+   BOOST_TEST(saturated_snapshot.active_peer_scopes == 1U);
+
+   auto relay = manager.reserve_relay(owner);
+   BOOST_REQUIRE(relay);
+   BOOST_TEST(!manager.reserve_relay(other));
+   relay.reset();
+
+   auto dial = manager.reserve_dial();
+   BOOST_REQUIRE(dial);
+   BOOST_TEST(dial->bind(owner));
+   BOOST_TEST(!manager.reserve_dial(owner));
+   BOOST_TEST(manager.current().active_dials == 1U);
+   dial.reset();
+   BOOST_TEST(manager.current().active_dials == 0U);
+   BOOST_TEST(manager.record_malformed(owner));
+   BOOST_TEST(!manager.record_malformed(owner));
+
+   const auto snapshot = manager.current();
+   BOOST_TEST(snapshot.denied_streams >= 1U);
+   BOOST_TEST(snapshot.denied_scope_migrations >= 1U);
+   BOOST_TEST(snapshot.denied_dials >= 1U);
+   BOOST_TEST(snapshot.denied_relays >= 1U);
+   BOOST_TEST(snapshot.denied_malformed >= 1U);
+}
+
+BOOST_AUTO_TEST_CASE(p2p_resource_manager_enforces_connection_session_scopes) {
+   auto manager = resource_manager{resource_manager::limits{
+       .system = {.max_inbound_connections = 2, .max_outbound_connections = 1, .max_connections = 2},
+       .transient = {.max_inbound_connections = 1, .max_outbound_connections = 1, .max_connections = 2},
+       .peer = {.max_inbound_connections = 1, .max_outbound_connections = 1, .max_connections = 1},
+       .max_dial_attempts_per_peer = 1,
+   }};
+   const auto inbound = resource_manager::session_scope{
+       .peer = peer(103),
+       .direction = resource_manager::session_direction::inbound,
+   };
+   const auto outbound = resource_manager::session_scope{
+       .peer = peer(104),
+       .direction = resource_manager::session_direction::outbound,
+   };
+
+   auto pending_inbound = manager.reserve_session(resource_manager::session_direction::inbound);
+   BOOST_REQUIRE(pending_inbound);
+   BOOST_TEST(!manager.reserve_session(resource_manager::session_direction::inbound));
+   pending_inbound.reset();
+   auto pending_outbound = manager.reserve_session(resource_manager::session_direction::outbound);
+   BOOST_REQUIRE(pending_outbound);
+   BOOST_TEST(!manager.reserve_session(resource_manager::session_direction::outbound));
+   pending_outbound.reset();
+
+   auto logical_dial = manager.reserve_dial(outbound.peer);
+   BOOST_REQUIRE(logical_dial);
+   BOOST_TEST(!manager.reserve_dial(outbound.peer));
+   BOOST_TEST(manager.current().active_dials == 1U);
+   BOOST_TEST(manager.current().dial_attempt_scopes == 1U);
+   logical_dial.reset();
+   BOOST_TEST(manager.current().active_dials == 0U);
+   BOOST_TEST(manager.current().dial_attempt_scopes == 0U);
+
+   auto active_inbound = manager.reserve_session(resource_manager::session_direction::inbound);
+   BOOST_REQUIRE(active_inbound);
+   BOOST_TEST(active_inbound->establish(inbound));
+   auto duplicate = manager.reserve_session(resource_manager::session_direction::inbound);
+   BOOST_REQUIRE(duplicate);
+   BOOST_TEST(!duplicate->establish(inbound));
+   duplicate.reset();
+   auto active_outbound = manager.reserve_session(resource_manager::session_direction::outbound);
+   BOOST_REQUIRE(active_outbound);
+   BOOST_TEST(active_outbound->establish(outbound));
+   active_inbound.reset();
+   active_outbound.reset();
+
+   const auto snapshot = manager.current();
+   BOOST_TEST(snapshot.system.inbound_connections == 0U);
+   BOOST_TEST(snapshot.system.outbound_connections == 0U);
+   BOOST_TEST(snapshot.transient.inbound_connections == 0U);
+   BOOST_TEST(snapshot.transient.outbound_connections == 0U);
+   BOOST_TEST(snapshot.denied_connections >= 2U);
+   BOOST_TEST(snapshot.denied_scope_migrations >= 1U);
+
+   auto saturated = resource_manager{resource_manager::limits{
+       .system = {.max_inbound_connections = 1, .max_outbound_connections = 0, .max_connections = 1},
+       .peer = {.max_inbound_connections = 1, .max_connections = 1},
+   }};
+   auto saturated_session = saturated.reserve_session(resource_manager::session_direction::inbound);
+   BOOST_REQUIRE(saturated_session);
+   BOOST_TEST(saturated_session->establish(
+       resource_manager::session_scope{.peer = peer(105), .direction = resource_manager::session_direction::inbound}));
+   auto rejected_session = saturated.reserve_session(resource_manager::session_direction::inbound);
+   BOOST_TEST(!rejected_session);
+   auto saturated_snapshot = saturated.current();
+   BOOST_TEST(saturated_snapshot.peers.inbound_connections == 1U);
+   saturated_session.reset();
+   saturated_snapshot = saturated.current();
+   BOOST_TEST(saturated_snapshot.peers.inbound_connections == 0U);
 }
 
 BOOST_AUTO_TEST_CASE(p2p_owner_cancellation_reaches_published_stream) {
@@ -6619,109 +7186,6 @@ BOOST_AUTO_TEST_CASE(p2p_owner_cancellation_reaches_published_stream) {
    BOOST_TEST(backend->closed);
 }
 
-BOOST_AUTO_TEST_CASE(p2p_owner_admission_commit_detaches_negotiation_cancellation) {
-   auto manager = resource_manager{resource_manager::limits{.max_streams = 1}};
-   auto reservation = manager.reserve_stream();
-   BOOST_REQUIRE(reservation);
-   auto backend = std::make_shared<queued_transport_stream>(509);
-   auto resource = std::make_shared<detail::resource_stream>(manager, std::move(*reservation));
-   resource->attach(forge::net::transport::detail::stream_access::make(backend));
-   auto signal = boost::asio::cancellation_signal{};
-   auto stop = std::make_shared<detail::worker_stop_bridge>();
-   auto admission =
-       detail::make_owner_stream_admission(signal.slot(), stop, detail::owner_stream_lifetime::negotiation);
-
-   admission(resource);
-   BOOST_CHECK_NO_THROW(admission.commit());
-   signal.emit(boost::asio::cancellation_type::all);
-
-   BOOST_TEST(!backend->closed);
-   BOOST_TEST(manager.current().active_streams == 1U);
-   resource.reset();
-   BOOST_TEST(backend->closed);
-   BOOST_TEST(manager.current().active_streams == 0U);
-}
-
-BOOST_AUTO_TEST_CASE(p2p_owner_admission_commit_rejects_sticky_stop_before_publication) {
-   auto manager = resource_manager{resource_manager::limits{.max_streams = 1}};
-   auto reservation = manager.reserve_stream();
-   BOOST_REQUIRE(reservation);
-   auto backend = std::make_shared<queued_transport_stream>(510);
-   auto resource = std::make_shared<detail::resource_stream>(manager, std::move(*reservation));
-   resource->attach(forge::net::transport::detail::stream_access::make(backend));
-   auto signal = boost::asio::cancellation_signal{};
-   auto stop = std::make_shared<detail::worker_stop_bridge>();
-   auto admission =
-       detail::make_owner_stream_admission(signal.slot(), stop, detail::owner_stream_lifetime::negotiation);
-
-   admission(resource);
-   stop->request_stop();
-
-   BOOST_CHECK_THROW(admission.commit(), forge::exceptions::base);
-   BOOST_TEST(backend->closed);
-   resource.reset();
-   BOOST_TEST(manager.current().active_streams == 0U);
-}
-
-BOOST_AUTO_TEST_CASE(p2p_owner_admission_commit_preserves_operation_cancellation) {
-   auto manager = resource_manager{resource_manager::limits{.max_streams = 1}};
-   auto reservation = manager.reserve_stream();
-   BOOST_REQUIRE(reservation);
-   auto backend = std::make_shared<queued_transport_stream>(511);
-   auto resource = std::make_shared<detail::resource_stream>(manager, std::move(*reservation));
-   resource->attach(forge::net::transport::detail::stream_access::make(backend));
-   auto signal = boost::asio::cancellation_signal{};
-   auto stop = std::make_shared<detail::worker_stop_bridge>();
-   auto admission = detail::make_owner_stream_admission(signal.slot(), stop);
-
-   admission(resource);
-   BOOST_CHECK_NO_THROW(admission.commit());
-   stop->request_stop();
-   signal.emit(boost::asio::cancellation_type::all);
-
-   BOOST_TEST(backend->closed);
-   resource.reset();
-   BOOST_TEST(manager.current().active_streams == 0U);
-}
-
-BOOST_AUTO_TEST_CASE(p2p_resource_stream_close_preserves_error_and_releases_reservation_when_cancel_throws) {
-   auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 1}};
-   auto manager = resource_manager{resource_manager::limits{.max_streams = 1}};
-   auto reservation = manager.reserve_stream();
-   BOOST_REQUIRE(reservation);
-   auto backend = std::make_shared<queued_transport_stream>(504);
-   backend->throw_on_close = true;
-   backend->throw_on_cancel = true;
-   auto resource = std::make_shared<detail::resource_stream>(manager, std::move(*reservation));
-   resource->attach(forge::net::transport::detail::stream_access::make(backend));
-
-   try {
-      forge::asio::blocking::run(runtime, resource->async_close());
-      BOOST_FAIL("expected injected stream close failure");
-   } catch (const std::runtime_error& error) {
-      BOOST_TEST(std::string_view{error.what()} == "injected stream close failure");
-   }
-   BOOST_TEST(backend->close_calls == 1U);
-   BOOST_TEST(backend->cancel_calls == 1U);
-   BOOST_TEST(manager.current().active_streams == 0U);
-}
-
-BOOST_AUTO_TEST_CASE(p2p_resource_stream_destructor_absorbs_cancel_failure_and_releases_reservation) {
-   auto manager = resource_manager{resource_manager::limits{.max_streams = 1}};
-   auto backend = std::make_shared<queued_transport_stream>(505);
-   backend->throw_on_cancel = true;
-   {
-      auto reservation = manager.reserve_stream();
-      BOOST_REQUIRE(reservation);
-      auto resource = std::make_shared<detail::resource_stream>(manager, std::move(*reservation));
-      resource->attach(forge::net::transport::detail::stream_access::make(backend));
-      BOOST_TEST(manager.current().active_streams == 1U);
-   }
-
-   BOOST_TEST(backend->cancel_calls == 1U);
-   BOOST_TEST(manager.current().active_streams == 0U);
-}
-
 BOOST_AUTO_TEST_CASE(p2p_relay_byte_limits_are_independent_per_circuit_direction) {
    auto left_to_right = detail::relay_budget{4};
    auto right_to_left = detail::relay_budget{4};
@@ -6739,10 +7203,24 @@ BOOST_AUTO_TEST_CASE(p2p_relay_byte_limits_are_independent_per_circuit_direction
    BOOST_TEST(next_circuit.consume(4));
 }
 
+[[nodiscard]] std::optional<resource_manager::relay_reservation>
+reserve_relay_circuit_for_test(resource_manager& manager, const peer_id& owner) {
+   return manager.reserve_relay(owner);
+}
+
+[[nodiscard]] std::optional<resource_manager::stream_reservation>
+reserve_relay_hop_stream_for_test(resource_manager& manager, const peer_id& owner) {
+   auto reservation = manager.reserve_stream(owner, resource_manager::session_direction::inbound);
+   if (!reservation || !reservation->bind_protocol(builtins::relay_hop) || !reservation->bind_service("p2p.relay")) {
+      return std::nullopt;
+   }
+   return reservation;
+}
+
 BOOST_AUTO_TEST_CASE(p2p_relay_deadline_cancel_before_wait_is_latched) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 1}};
    auto manager = resource_manager{};
-   auto reservation = manager.reserve_relay_stream();
+   auto reservation = reserve_relay_circuit_for_test(manager, peer(50));
    BOOST_REQUIRE(reservation);
    auto left_backend = std::make_shared<queued_transport_stream>(501);
    auto right_backend = std::make_shared<queued_transport_stream>(502);
@@ -6756,9 +7234,10 @@ BOOST_AUTO_TEST_CASE(p2p_relay_deadline_cancel_before_wait_is_latched) {
    auto deadline = boost::asio::co_spawn(runtime.context(), pair->async_wait_deadline(), boost::asio::use_future);
    BOOST_REQUIRE(deadline.wait_for(std::chrono::seconds{1}) == std::future_status::ready);
    BOOST_TEST(!deadline.get());
-   BOOST_TEST(manager.current().active_relay_streams == 1U);
+   BOOST_TEST(active_stream_count(manager.current()) == 0U);
+   BOOST_TEST(manager.current().active_relay_reservations == 1U);
    pair.reset();
-   BOOST_TEST(manager.current().active_relay_streams == 0U);
+   BOOST_TEST(manager.current().active_relay_reservations == 0U);
 }
 
 BOOST_AUTO_TEST_CASE(p2p_relay_hop_timeout_cancels_only_the_owned_stream) {
@@ -6813,9 +7292,9 @@ BOOST_AUTO_TEST_CASE(p2p_relay_hop_timeout_cancels_before_stream_publication) {
                  auto timer = boost::asio::steady_timer{co_await boost::asio::this_coro::executor};
                  timer.expires_after(std::chrono::milliseconds{50});
                  co_await timer.async_wait(boost::asio::use_awaitable);
-                 auto reservation = manager.reserve_relay_stream();
+                 auto reservation = reserve_relay_hop_stream_for_test(manager, peer(50));
                  BOOST_REQUIRE(reservation);
-                 auto [guarded, resource] = detail::prepare_resource_stream(manager, std::move(*reservation));
+                 auto [guarded, resource] = detail::prepare_resource_stream(std::move(*reservation));
                  resource->attach(forge::net::transport::detail::stream_access::make(backend));
                  admitted(resource);
                  admitted.commit();
@@ -6829,7 +7308,7 @@ BOOST_AUTO_TEST_CASE(p2p_relay_hop_timeout_cancels_before_stream_publication) {
 
    BOOST_TEST(open_started->load(std::memory_order_acquire));
    BOOST_TEST(backend->closed);
-   BOOST_TEST(manager.current().active_relay_streams == 0U);
+   BOOST_TEST(manager.current().streams.inbound_streams == 0U);
    BOOST_TEST(
        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count() <
        1000);
@@ -6846,9 +7325,9 @@ BOOST_AUTO_TEST_CASE(p2p_relay_hop_timeout_cancels_admitted_stream_during_negoti
                        runtime.context(), std::chrono::milliseconds{20}, "test relay HOP negotiation",
                        [manager, backend](detail::stream_admission_handler admitted) mutable
                            -> boost::asio::awaitable<forge::net::p2p::stream> {
-                          auto reservation = manager.reserve_relay_stream();
+                          auto reservation = reserve_relay_hop_stream_for_test(manager, peer(50));
                           BOOST_REQUIRE(reservation);
-                          auto [guarded, resource] = detail::prepare_resource_stream(manager, std::move(*reservation));
+                          auto [guarded, resource] = detail::prepare_resource_stream(std::move(*reservation));
                           resource->attach(forge::net::transport::detail::stream_access::make(backend));
                           admitted(resource);
                           (void)co_await guarded.async_read();
@@ -6862,7 +7341,7 @@ BOOST_AUTO_TEST_CASE(p2p_relay_hop_timeout_cancels_admitted_stream_during_negoti
    }
 
    BOOST_TEST(backend->closed);
-   BOOST_TEST(manager.current().active_relay_streams == 0U);
+   BOOST_TEST(manager.current().streams.inbound_streams == 0U);
 }
 
 BOOST_AUTO_TEST_CASE(p2p_relay_hop_inherits_caller_cancellation) {
@@ -6913,9 +7392,9 @@ BOOST_AUTO_TEST_CASE(p2p_relay_hop_caller_cancellation_is_sticky_until_stream_ad
               auto timer = boost::asio::steady_timer{co_await boost::asio::this_coro::executor};
               timer.expires_after(std::chrono::milliseconds{50});
               co_await timer.async_wait(boost::asio::use_awaitable);
-              auto reservation = manager.reserve_relay_stream();
+              auto reservation = reserve_relay_hop_stream_for_test(manager, peer(50));
               BOOST_REQUIRE(reservation);
-              auto [guarded, resource] = detail::prepare_resource_stream(manager, std::move(*reservation));
+              auto [guarded, resource] = detail::prepare_resource_stream(std::move(*reservation));
               resource->attach(forge::net::transport::detail::stream_access::make(backend));
               admitted(resource);
               admitted.commit();
@@ -6934,143 +7413,7 @@ BOOST_AUTO_TEST_CASE(p2p_relay_hop_caller_cancellation_is_sticky_until_stream_ad
       BOOST_TEST(static_cast<int>(exceptions::code_of(error).value()) == static_cast<int>(exceptions::code::canceled));
    }
    BOOST_TEST(backend->closed);
-   BOOST_TEST(manager.current().active_relay_streams == 0U);
-}
-
-static_assert(requires { diagnostics::connection_state{std::size_t{1}, std::vector<peer_id>{peer(51)}}; });
-
-BOOST_AUTO_TEST_CASE(p2p_resource_manager_enforces_peer_protocol_dial_and_reservation_scopes) {
-   auto manager = resource_manager{resource_manager::limits{
-       .max_streams = 4,
-       .max_streams_per_peer = 1,
-       .max_streams_per_protocol = 1,
-       .max_relay_reservations = 1,
-       .max_dial_attempts_per_peer = 1,
-       .max_malformed_messages_per_peer = 1,
-   }};
-   const auto scope = resource_manager::scope{.peer = peer(93), .protocol = builtins::relay_hop};
-   const auto other = resource_manager::scope{.peer = peer(94), .protocol = builtins::relay_hop};
-
-   auto scoped = manager.reserve_stream(scope);
-   BOOST_REQUIRE(scoped);
-   BOOST_TEST(!manager.reserve_stream(scope));
-   scoped.reset();
-   scoped = manager.reserve_stream(scope);
-   BOOST_REQUIRE(scoped);
-   scoped.reset();
-
-   auto other_stream = manager.reserve_stream(other);
-   BOOST_REQUIRE(other_stream);
-   BOOST_TEST(!manager.reserve_stream(scope));
-   other_stream.reset();
-   auto scoped_snapshot = manager.current();
-   BOOST_TEST(scoped_snapshot.active_streams == 0U);
-   BOOST_TEST(scoped_snapshot.active_peer_scopes == 0U);
-   BOOST_TEST(scoped_snapshot.active_protocol_scopes == 0U);
-
-   auto saturated = resource_manager{resource_manager::limits{
-       .max_streams = 1,
-       .max_streams_per_peer = 4,
-       .max_streams_per_protocol = 4,
-   }};
-   auto saturated_stream =
-       saturated.reserve_stream(resource_manager::scope{.peer = peer(96), .protocol = builtins::relay_hop});
-   BOOST_REQUIRE(saturated_stream);
-   BOOST_TEST(!saturated.reserve_stream(resource_manager::scope{.peer = peer(97), .protocol = builtins::ping}));
-   auto saturated_snapshot = saturated.current();
-   BOOST_TEST(saturated_snapshot.active_streams == 1U);
-   BOOST_TEST(saturated_snapshot.active_peer_scopes == 1U);
-   BOOST_TEST(saturated_snapshot.active_protocol_scopes == 1U);
-
-   auto relay = manager.reserve_relay(scope);
-   BOOST_REQUIRE(relay);
-   BOOST_TEST(!manager.reserve_relay(resource_manager::scope{.peer = peer(95), .protocol = builtins::relay_hop}));
-   relay.reset();
-
-   auto dial = manager.reserve_dial();
-   BOOST_REQUIRE(dial);
-   BOOST_TEST(dial->bind(scope.peer));
-   BOOST_TEST(!manager.reserve_dial(scope.peer));
-   BOOST_TEST(manager.current().active_dials == 1U);
-   dial.reset();
-   BOOST_TEST(manager.current().active_dials == 0U);
-   BOOST_TEST(manager.record_malformed(scope));
-   BOOST_TEST(!manager.record_malformed(scope));
-
-   const auto snapshot = manager.current();
-   BOOST_TEST(snapshot.denied >= 4U);
-   BOOST_TEST(snapshot.denied_streams >= 2U);
-   BOOST_TEST(snapshot.denied_dials >= 1U);
-   BOOST_TEST(snapshot.denied_relays >= 1U);
-   BOOST_TEST(snapshot.denied_malformed >= 1U);
-}
-
-BOOST_AUTO_TEST_CASE(p2p_resource_manager_enforces_connection_session_scopes) {
-   auto manager = resource_manager{resource_manager::limits{
-       .max_pending_inbound_sessions = 1,
-       .max_pending_outbound_sessions = 1,
-       .max_inbound_sessions = 1,
-       .max_outbound_sessions = 1,
-       .max_sessions_per_peer = 1,
-   }};
-   const auto inbound = resource_manager::session_scope{
-       .peer = peer(231),
-       .direction = resource_manager::session_direction::inbound,
-   };
-   const auto outbound = resource_manager::session_scope{
-       .peer = peer(232),
-       .direction = resource_manager::session_direction::outbound,
-   };
-
-   auto pending_inbound = manager.reserve_session(resource_manager::session_direction::inbound);
-   BOOST_REQUIRE(pending_inbound);
-   BOOST_TEST(!manager.reserve_session(resource_manager::session_direction::inbound));
-   pending_inbound.reset();
-   auto pending_outbound = manager.reserve_session(resource_manager::session_direction::outbound);
-   BOOST_REQUIRE(pending_outbound);
-   BOOST_TEST(!manager.reserve_session(resource_manager::session_direction::outbound));
-   pending_outbound.reset();
-
-   auto active_inbound = manager.reserve_session(resource_manager::session_direction::inbound);
-   BOOST_REQUIRE(active_inbound);
-   BOOST_TEST(active_inbound->establish(inbound));
-   auto duplicate = manager.reserve_session(resource_manager::session_direction::inbound);
-   BOOST_REQUIRE(duplicate);
-   BOOST_TEST(!duplicate->establish(inbound));
-   duplicate.reset();
-   auto active_outbound = manager.reserve_session(resource_manager::session_direction::outbound);
-   BOOST_REQUIRE(active_outbound);
-   BOOST_TEST(active_outbound->establish(outbound));
-   active_inbound.reset();
-   active_outbound.reset();
-
-   const auto snapshot = manager.current();
-   BOOST_TEST(snapshot.active_inbound_sessions == 0U);
-   BOOST_TEST(snapshot.active_outbound_sessions == 0U);
-   BOOST_TEST(snapshot.pending_inbound_sessions == 0U);
-   BOOST_TEST(snapshot.pending_outbound_sessions == 0U);
-   BOOST_TEST(snapshot.denied >= 3U);
-   BOOST_TEST(snapshot.denied_sessions >= 3U);
-
-   auto saturated = resource_manager{resource_manager::limits{
-       .max_inbound_sessions = 1,
-       .max_outbound_sessions = 0,
-       .max_sessions_per_peer = 1,
-   }};
-   auto saturated_session = saturated.reserve_session(resource_manager::session_direction::inbound);
-   BOOST_REQUIRE(saturated_session);
-   BOOST_TEST(saturated_session->establish(
-       resource_manager::session_scope{.peer = peer(233), .direction = resource_manager::session_direction::inbound}));
-   auto rejected_session = saturated.reserve_session(resource_manager::session_direction::inbound);
-   BOOST_REQUIRE(rejected_session);
-   BOOST_TEST(!rejected_session->establish(
-       resource_manager::session_scope{.peer = peer(234), .direction = resource_manager::session_direction::inbound}));
-   auto saturated_snapshot = saturated.current();
-   BOOST_TEST(saturated_snapshot.active_session_peer_scopes == 1U);
-   rejected_session.reset();
-   saturated_session.reset();
-   saturated_snapshot = saturated.current();
-   BOOST_TEST(saturated_snapshot.active_session_peer_scopes == 0U);
+   BOOST_TEST(manager.current().streams.inbound_streams == 0U);
 }
 
 BOOST_AUTO_TEST_CASE(p2p_node_peer_protection_api_is_tagged_and_additive) {
@@ -7132,7 +7475,7 @@ BOOST_AUTO_TEST_CASE(p2p_diagnostics_snapshot_reports_live_network_state_without
    BOOST_TEST(!snapshot.network.local_endpoints.empty());
    BOOST_TEST(snapshot.metrics.active_sessions == before.active_sessions);
    BOOST_TEST(snapshot.metrics.active_sessions == after.active_sessions);
-   BOOST_TEST(snapshot.resources.active_outbound_sessions >= 1U);
+   BOOST_TEST(snapshot.resources.system.outbound_connections >= 1U);
    BOOST_TEST(snapshot.pubsub.topics == before_pubsub.topics);
    BOOST_REQUIRE_EQUAL(snapshot.peers.size(), 1U);
    BOOST_TEST(snapshot.peers.front().peer.to_string() == server.local_peer().to_string());
@@ -7174,8 +7517,8 @@ BOOST_AUTO_TEST_CASE(p2p_diagnostics_snapshot_caps_are_deterministic) {
 BOOST_AUTO_TEST_CASE(p2p_connection_manager_prunes_unprotected_sessions_and_keeps_protected_peer) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 4}};
    auto client_options = options_for(peer(235));
-   client_options.limits.max_sessions = 2;
-   client_options.limits.max_outbound_sessions = 2;
+   set_resource_session_limits(client_options, 2, (std::numeric_limits<std::size_t>::max)(), 2,
+                               (std::numeric_limits<std::size_t>::max)(), session_admission_headroom::one_session);
    client_options.limits.session_low_watermark = 1;
    client_options.limits.session_grace_period = std::chrono::milliseconds{0};
    client_options.limits.session_prune_silence = std::chrono::milliseconds{1};
@@ -7223,8 +7566,8 @@ BOOST_AUTO_TEST_CASE(p2p_connection_manager_prunes_unprotected_sessions_and_keep
 BOOST_AUTO_TEST_CASE(p2p_connection_manager_prunes_batch_to_low_watermark) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 6}};
    auto client_options = options_for(peer(60));
-   client_options.limits.max_sessions = 4;
-   client_options.limits.max_outbound_sessions = 4;
+   set_resource_session_limits(client_options, 4, (std::numeric_limits<std::size_t>::max)(), 4,
+                               (std::numeric_limits<std::size_t>::max)(), session_admission_headroom::one_session);
    client_options.limits.session_low_watermark = 1;
    client_options.limits.session_grace_period = std::chrono::milliseconds{0};
    client_options.limits.session_prune_silence = std::chrono::milliseconds{60'000};
@@ -7278,8 +7621,8 @@ BOOST_AUTO_TEST_CASE(p2p_connection_manager_prunes_batch_to_low_watermark) {
 BOOST_AUTO_TEST_CASE(p2p_connection_manager_rejects_when_all_sessions_are_protected) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 4}};
    auto client_options = options_for(peer(239));
-   client_options.limits.max_sessions = 2;
-   client_options.limits.max_outbound_sessions = 2;
+   set_resource_session_limits(client_options, 2, (std::numeric_limits<std::size_t>::max)(), 2,
+                               (std::numeric_limits<std::size_t>::max)(), session_admission_headroom::one_session);
    client_options.limits.session_low_watermark = 1;
    client_options.limits.session_grace_period = std::chrono::milliseconds{0};
    client_options.limits.session_prune_silence = std::chrono::milliseconds{1};
@@ -7310,6 +7653,7 @@ BOOST_AUTO_TEST_CASE(p2p_connection_manager_rejects_when_all_sessions_are_protec
    const auto metrics = client.metrics();
    BOOST_TEST(metrics.active_sessions == 2U);
    BOOST_TEST(metrics.connection_rejections >= 1U);
+   BOOST_TEST(client.diagnostics().resources.system.outbound_connections == 2U);
 
    forge::asio::blocking::run(runtime, client.async_stop());
    forge::asio::blocking::run(runtime, third.async_stop());
@@ -7320,10 +7664,7 @@ BOOST_AUTO_TEST_CASE(p2p_connection_manager_rejects_when_all_sessions_are_protec
 BOOST_AUTO_TEST_CASE(p2p_connection_manager_rejects_direction_limit_before_pruning_unrelated_sessions) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 4}};
    auto client_options = options_for(peer(254));
-   client_options.limits.max_sessions = 2;
-   client_options.limits.max_inbound_sessions = 4;
-   client_options.limits.max_outbound_sessions = 1;
-   client_options.limits.max_sessions_per_peer = 4;
+   set_resource_session_limits(client_options, 2, 4, 1, 4);
    client_options.limits.session_low_watermark = 1;
    client_options.limits.session_grace_period = std::chrono::milliseconds{0};
    client_options.limits.session_prune_silence = std::chrono::milliseconds{1};
@@ -7375,13 +7716,10 @@ BOOST_AUTO_TEST_CASE(p2p_connection_manager_rejects_direction_limit_before_pruni
    forge::asio::blocking::run(runtime, first.async_stop());
 }
 
-BOOST_AUTO_TEST_CASE(p2p_connection_manager_prunes_direction_saturated_stale_session_before_global_cap) {
+BOOST_AUTO_TEST_CASE(p2p_resource_manager_rejects_direction_saturation_before_global_soft_cap) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 4}};
    auto client_options = options_for(peer(3));
-   client_options.limits.max_sessions = 4;
-   client_options.limits.max_inbound_sessions = 4;
-   client_options.limits.max_outbound_sessions = 1;
-   client_options.limits.max_sessions_per_peer = 4;
+   set_resource_session_limits(client_options, 4, 4, 1, 4);
    client_options.limits.session_low_watermark = 1;
    client_options.limits.session_grace_period = std::chrono::milliseconds{0};
    client_options.limits.session_prune_silence = std::chrono::milliseconds{1};
@@ -7399,16 +7737,18 @@ BOOST_AUTO_TEST_CASE(p2p_connection_manager_prunes_direction_saturated_stale_ses
    const auto before = client.metrics();
    BOOST_TEST(before.active_sessions == 1U);
 
-   (void)forge::asio::blocking::run(
-       runtime, client.async_connect(second_endpoint, node::connect_options{.expected_peer = second.local_peer()}));
+   BOOST_CHECK_THROW(
+       forge::asio::blocking::run(
+           runtime, client.async_connect(second_endpoint, node::connect_options{.expected_peer = second.local_peer()})),
+       forge::exceptions::base);
 
    const auto after = client.metrics();
    BOOST_TEST(after.active_sessions == 1U);
-   BOOST_TEST(after.sessions_pruned >= before.sessions_pruned + 1U);
-   BOOST_TEST(after.connection_rejections == before.connection_rejections);
+   BOOST_TEST(after.sessions_pruned == before.sessions_pruned);
+   BOOST_TEST(after.connection_rejections >= before.connection_rejections + 1U);
 
    auto stream =
-       forge::asio::blocking::run(runtime, client.async_open_protocol_stream(second.local_peer(), builtins::echo,
+       forge::asio::blocking::run(runtime, client.async_open_protocol_stream(first.local_peer(), builtins::echo,
                                                                              node::open_options{.allow_relay = false}));
    const auto payload = std::vector<std::uint8_t>{'d', 'i', 'r'};
    forge::asio::blocking::run(runtime, stream.async_write_frame(payload));
@@ -7420,13 +7760,10 @@ BOOST_AUTO_TEST_CASE(p2p_connection_manager_prunes_direction_saturated_stale_ses
    forge::asio::blocking::run(runtime, first.async_stop());
 }
 
-BOOST_AUTO_TEST_CASE(p2p_connection_manager_prunes_direction_saturated_session_below_low_watermark) {
+BOOST_AUTO_TEST_CASE(p2p_resource_manager_direction_cap_is_independent_of_soft_low_watermark) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 4}};
    auto client_options = options_for(peer(6));
-   client_options.limits.max_sessions = 100;
-   client_options.limits.max_inbound_sessions = 100;
-   client_options.limits.max_outbound_sessions = 1;
-   client_options.limits.max_sessions_per_peer = 4;
+   set_resource_session_limits(client_options, 100, 100, 1, 4);
    client_options.limits.session_low_watermark = 50;
    client_options.limits.session_grace_period = std::chrono::milliseconds{0};
    client_options.limits.session_prune_silence = std::chrono::milliseconds{1};
@@ -7444,16 +7781,18 @@ BOOST_AUTO_TEST_CASE(p2p_connection_manager_prunes_direction_saturated_session_b
    const auto before = client.metrics();
    BOOST_TEST(before.active_sessions == 1U);
 
-   (void)forge::asio::blocking::run(
-       runtime, client.async_connect(second_endpoint, node::connect_options{.expected_peer = second.local_peer()}));
+   BOOST_CHECK_THROW(
+       forge::asio::blocking::run(
+           runtime, client.async_connect(second_endpoint, node::connect_options{.expected_peer = second.local_peer()})),
+       forge::exceptions::base);
 
    const auto after = client.metrics();
    BOOST_TEST(after.active_sessions == 1U);
-   BOOST_TEST(after.sessions_pruned >= before.sessions_pruned + 1U);
-   BOOST_TEST(after.connection_rejections == before.connection_rejections);
+   BOOST_TEST(after.sessions_pruned == before.sessions_pruned);
+   BOOST_TEST(after.connection_rejections >= before.connection_rejections + 1U);
 
    auto stream =
-       forge::asio::blocking::run(runtime, client.async_open_protocol_stream(second.local_peer(), builtins::echo,
+       forge::asio::blocking::run(runtime, client.async_open_protocol_stream(first.local_peer(), builtins::echo,
                                                                              node::open_options{.allow_relay = false}));
    const auto payload = std::vector<std::uint8_t>{'l', 'o', 'w'};
    forge::asio::blocking::run(runtime, stream.async_write_frame(payload));
@@ -7465,11 +7804,11 @@ BOOST_AUTO_TEST_CASE(p2p_connection_manager_prunes_direction_saturated_session_b
    forge::asio::blocking::run(runtime, first.async_stop());
 }
 
-BOOST_AUTO_TEST_CASE(p2p_connection_manager_low_hard_session_limit_is_independent_of_topology_watermarks) {
+BOOST_AUTO_TEST_CASE(p2p_connection_manager_low_active_limit_is_independent_of_topology_watermarks) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 4}};
    auto client_options = options_for(peer(243));
-   client_options.limits.max_sessions = 1;
-   client_options.limits.max_outbound_sessions = 1;
+   set_resource_session_limits(client_options, 1, (std::numeric_limits<std::size_t>::max)(), 1,
+                               (std::numeric_limits<std::size_t>::max)(), session_admission_headroom::one_session);
    client_options.limits.session_low_watermark = 1;
    client_options.limits.session_grace_period = std::chrono::milliseconds{0};
    client_options.limits.session_prune_silence = std::chrono::milliseconds{1};
@@ -7507,6 +7846,7 @@ BOOST_AUTO_TEST_CASE(p2p_connection_manager_low_hard_session_limit_is_independen
    const auto reply = forge::asio::blocking::run(runtime, stream.async_read_frame());
    BOOST_TEST(reply == payload, boost::test_tools::per_element());
    BOOST_TEST(client.metrics().connection_rejections >= 1U);
+   BOOST_TEST(client.diagnostics().resources.system.outbound_connections == 1U);
 
    forge::asio::blocking::run(runtime, client.async_stop());
    forge::asio::blocking::run(runtime, second.async_stop());
@@ -7516,9 +7856,7 @@ BOOST_AUTO_TEST_CASE(p2p_connection_manager_low_hard_session_limit_is_independen
 BOOST_AUTO_TEST_CASE(p2p_connection_manager_allows_bounded_parallel_sessions_per_peer) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 4}};
    auto client_options = options_for(peer(250));
-   client_options.limits.max_sessions = 4;
-   client_options.limits.max_outbound_sessions = 4;
-   client_options.limits.max_sessions_per_peer = 2;
+   set_resource_session_limits(client_options, 4, (std::numeric_limits<std::size_t>::max)(), 4, 2);
    client_options.limits.session_low_watermark = 4;
    auto server = node{runtime, options_for(peer(251))};
    auto client = node{runtime, std::move(client_options)};
@@ -7546,9 +7884,7 @@ BOOST_AUTO_TEST_CASE(p2p_connection_manager_allows_bounded_parallel_sessions_per
 BOOST_AUTO_TEST_CASE(p2p_connection_manager_enforces_sessions_per_peer_limit) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 4}};
    auto client_options = options_for(peer(252));
-   client_options.limits.max_sessions = 4;
-   client_options.limits.max_outbound_sessions = 4;
-   client_options.limits.max_sessions_per_peer = 1;
+   set_resource_session_limits(client_options, 4, (std::numeric_limits<std::size_t>::max)(), 4, 1);
    client_options.limits.session_low_watermark = 4;
    auto server = node{runtime, options_for(peer(253))};
    auto client = node{runtime, std::move(client_options)};
@@ -7574,7 +7910,8 @@ BOOST_AUTO_TEST_CASE(p2p_connection_manager_enforces_sessions_per_peer_limit) {
 BOOST_AUTO_TEST_CASE(p2p_connection_manager_rejects_pending_outbound_limit_without_killing_first_attempt) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
    auto client_options = options_for(peer(246));
-   client_options.limits.max_pending_outbound_sessions = 1;
+   client_options.limits.resources.transient.max_outbound_connections = 1;
+   client_options.limits.resources.transient.max_connections = 1;
    auto client = node{runtime, std::move(client_options)};
    const auto stalled_endpoint = start_stalling_tcp_peer(runtime, std::chrono::milliseconds{500});
 
@@ -8374,6 +8711,67 @@ BOOST_AUTO_TEST_CASE(p2p_relay_stop_connect_passes_frames_after_target_reservati
    forge::asio::blocking::run(runtime, relay_node.async_stop());
 }
 
+BOOST_AUTO_TEST_CASE(p2p_relay_hop_and_stop_apply_connection_gater_without_inventing_direct_addresses) {
+   auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 4}};
+   const auto relay_identity = make_test_certificate_identity("relay-gater-relay");
+   const auto source_identity = make_test_certificate_identity("relay-gater-source");
+   const auto target_identity = make_test_certificate_identity("relay-gater-target");
+   auto relay_node = node{
+       runtime, options_for(relay_identity, capability_set{.bits = capabilities::direct_quic | capabilities::relay |
+                                                                   capabilities::relay_reservation})};
+   auto source_gater = std::make_shared<recording_connection_gater>();
+   auto target_gater = std::make_shared<recording_connection_gater>();
+   auto source_options = options_for(source_identity, capability_set{.bits = capabilities::direct_quic});
+   source_options.connection_gater = source_gater;
+   source_options.path_policy.allow_direct = false;
+   source_options.path_policy.allow_hole_punch = false;
+   auto target_options = options_for(
+       target_identity, capability_set{.bits = capabilities::direct_quic | capabilities::relay_reservation});
+   target_options.connection_gater = target_gater;
+   auto source = node{runtime, std::move(source_options)};
+   auto target = node{runtime, std::move(target_options)};
+   register_echo(target);
+
+   const auto relay_endpoint = listen(relay_node, runtime);
+   (void)listen(target, runtime);
+   source.peers().learn_endpoint(
+       relay_node.local_peer(), relay_endpoint,
+       capability_set{.bits = capabilities::direct_quic | capabilities::relay | capabilities::relay_reservation});
+   target.peers().learn_endpoint(
+       relay_node.local_peer(), relay_endpoint,
+       capability_set{.bits = capabilities::direct_quic | capabilities::relay | capabilities::relay_reservation});
+   (void)forge::asio::blocking::run(runtime, target.async_reserve_relay(relay_node.local_peer()));
+   target_gater->clear();
+
+   auto stream =
+       forge::asio::blocking::run(runtime, source.async_open_protocol_stream(target.local_peer(), builtins::echo,
+                                                                             node::open_options{
+                                                                                 .allow_relay = true,
+                                                                                 .relay_peer = relay_node.local_peer(),
+                                                                                 .allow_hole_punch = false,
+                                                                             }));
+   const auto payload = std::vector<std::uint8_t>{'g', 'a', 't', 'e'};
+   forge::asio::blocking::run(runtime, stream.async_write_frame(payload));
+   BOOST_TEST(forge::asio::blocking::run(runtime, stream.async_read_frame()) == payload,
+              boost::test_tools::per_element());
+
+   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+   while (target_gater->stages_for(source.local_peer()).size() != 2U && std::chrono::steady_clock::now() < deadline) {
+      wait_on_runtime(runtime, std::chrono::milliseconds{1}, "relayed STOP connection gater stages");
+   }
+   check_gater_stages(source_gater->stages_for(target.local_peer()),
+                      {recorded_gater_stage::peer_dial, recorded_gater_stage::secured, recorded_gater_stage::upgraded});
+   check_gater_stages(target_gater->stages_for(source.local_peer()),
+                      {recorded_gater_stage::secured, recorded_gater_stage::upgraded});
+   BOOST_TEST(std::ranges::count(target_gater->stages(), recorded_gater_stage::accept) == 1U);
+   BOOST_TEST(std::ranges::count(source_gater->stages_for(target.local_peer()), recorded_gater_stage::address_dial) ==
+              0U);
+
+   forge::asio::blocking::run(runtime, target.async_stop());
+   forge::asio::blocking::run(runtime, source.async_stop());
+   forge::asio::blocking::run(runtime, relay_node.async_stop());
+}
+
 BOOST_AUTO_TEST_CASE(p2p_relay_duration_closes_circuit_and_releases_resources) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 4}};
    const auto relay_identity = make_test_certificate_identity("relay-duration-relay");
@@ -8414,15 +8812,15 @@ BOOST_AUTO_TEST_CASE(p2p_relay_duration_closes_circuit_and_releases_resources) {
    }
    BOOST_REQUIRE(relay_node.metrics().active_relays == 1U);
    const auto admitted_resources = relay_node.diagnostics().resources;
-   BOOST_REQUIRE(admitted_resources.active_relay_streams > 0U);
+   BOOST_REQUIRE(active_stream_count(admitted_resources) > 0U);
 
    const auto closed_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
-   while ((relay_node.metrics().active_relays != 0 || relay_node.diagnostics().resources.active_relay_streams != 0) &&
+   while ((relay_node.metrics().active_relays != 0 || active_stream_count(relay_node.diagnostics().resources) != 0) &&
           std::chrono::steady_clock::now() < closed_deadline) {
       wait_on_runtime(runtime, std::chrono::milliseconds{5}, "relay duration cleanup");
    }
    BOOST_TEST(relay_node.metrics().active_relays == 0U);
-   BOOST_TEST(relay_node.diagnostics().resources.active_relay_streams == 0U);
+   BOOST_TEST(active_stream_count(relay_node.diagnostics().resources) == 0U);
 
    auto read = boost::asio::co_spawn(runtime.context(), stream.async_read_frame(), boost::asio::use_future);
    if (read.wait_for(std::chrono::seconds{1}) != std::future_status::ready) {
@@ -8660,21 +9058,20 @@ BOOST_AUTO_TEST_CASE(p2p_relay_transport_opens_arbitrary_registered_protocol) {
    auto observed_session = std::make_shared<std::optional<node::session_info>>();
    auto observed_authentication = std::make_shared<std::optional<peer_authentication>>();
    auto observed_session_mutex = std::make_shared<std::mutex>();
-   target.register_protocol_handler(
-       protocol, [observed_session, observed_authentication,
-                  observed_session_mutex](node::incoming_protocol_stream incoming)
-                     -> boost::asio::awaitable<void> {
-          {
-             auto lock = std::scoped_lock{*observed_session_mutex};
-             if (!observed_session->has_value()) {
-                observed_session->emplace(incoming.session);
-                observed_authentication->emplace(incoming.stream.authentication());
-             }
-          }
-          auto payload = co_await incoming.stream.async_read_frame();
-          co_await incoming.stream.async_write_frame(payload);
-          co_await incoming.stream.async_close();
-       });
+   target.register_protocol_handler(protocol,
+                                    [observed_session, observed_authentication, observed_session_mutex](
+                                        node::incoming_protocol_stream incoming) -> boost::asio::awaitable<void> {
+                                       {
+                                          auto lock = std::scoped_lock{*observed_session_mutex};
+                                          if (!observed_session->has_value()) {
+                                             observed_session->emplace(incoming.session);
+                                             observed_authentication->emplace(incoming.stream.authentication());
+                                          }
+                                       }
+                                       auto payload = co_await incoming.stream.async_read_frame();
+                                       co_await incoming.stream.async_write_frame(payload);
+                                       co_await incoming.stream.async_close();
+                                    });
 
    const auto relay_endpoint = listen(relay_node, runtime);
    (void)listen(target, runtime);
@@ -8824,9 +9221,9 @@ BOOST_AUTO_TEST_CASE(p2p_direct_nodes_negotiate_protocol_and_echo_frames) {
    BOOST_TEST(reply == payload, boost::test_tools::per_element());
    BOOST_TEST(client.metrics().protocol_streams_opened >= 1U);
    BOOST_TEST(server.metrics().protocol_streams_accepted >= 1U);
-   BOOST_TEST(client.diagnostics().resources.active_streams == 1U);
+   BOOST_TEST(active_stream_count(client.diagnostics().resources) == 1U);
    forge::asio::blocking::run(runtime, stream.async_close());
-   BOOST_TEST(client.diagnostics().resources.active_streams == 0U);
+   BOOST_TEST(active_stream_count(client.diagnostics().resources) == 0U);
 
    forge::asio::blocking::run(runtime, client.async_stop());
    forge::asio::blocking::run(runtime, server.async_stop());
@@ -8835,9 +9232,9 @@ BOOST_AUTO_TEST_CASE(p2p_direct_nodes_negotiate_protocol_and_echo_frames) {
 BOOST_AUTO_TEST_CASE(p2p_inbound_stream_saturation_does_not_stop_session_acceptance) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
    auto server_options = options_for(peer(249));
-   server_options.limits.resources.max_streams = 1;
-   server_options.limits.resources.max_streams_per_peer = 1;
-   server_options.limits.resources.max_streams_per_protocol = 1;
+   server_options.limits.resources.system.max_streams = 1;
+   server_options.limits.resources.peer.max_streams = 1;
+   server_options.limits.resources.protocol.max_streams = 1;
    server_options.transport_limits.max_streams_per_connection = 1;
    auto server = node{runtime, std::move(server_options)};
    auto client = node{runtime, options_for(peer(250))};
@@ -8848,8 +9245,8 @@ BOOST_AUTO_TEST_CASE(p2p_inbound_stream_saturation_does_not_stop_session_accepta
        runtime, client.async_connect(server_endpoint, node::connect_options{.expected_peer = server.local_peer()})));
    auto identify_streams_closed = false;
    for (auto attempt = 0U; attempt < 100U && !identify_streams_closed; ++attempt) {
-      identify_streams_closed =
-          server.diagnostics().resources.active_streams == 0U && client.diagnostics().resources.active_streams == 0U;
+      identify_streams_closed = active_stream_count(server.diagnostics().resources) == 0U &&
+                                active_stream_count(client.diagnostics().resources) == 0U;
       if (!identify_streams_closed) {
          wait_on_runtime(runtime, std::chrono::milliseconds{5}, "inbound stream Identify cleanup");
       }
@@ -8875,7 +9272,11 @@ BOOST_AUTO_TEST_CASE(p2p_node_queued_byte_budget_is_held_until_quic_ack) {
    auto client_runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
    auto server = node{server_runtime, options_for(peer(247))};
    auto client_options = options_for(peer(248));
-   client_options.limits.resources.max_queued_bytes = 32 * 1024;
+   constexpr auto payload_size = std::uint64_t{32 * 1024};
+   constexpr auto high_priority_denominator = std::uint64_t{204};
+   constexpr auto memory_priority_scale = std::uint64_t{256};
+   client_options.limits.resources.stream.max_memory =
+       (payload_size * memory_priority_scale + high_priority_denominator - 1) / high_priority_denominator;
    client_options.identify.max_total_message_size = client_options.identify.max_message_size;
    auto client = node{client_runtime, std::move(client_options)};
    register_echo(server);
@@ -8892,9 +9293,9 @@ BOOST_AUTO_TEST_CASE(p2p_node_queued_byte_budget_is_held_until_quic_ack) {
                                          node::open_options{.allow_relay = false, .allow_hole_punch = false}));
 
    auto release_server = block_runtime(server_runtime, "P2P queued-byte ACK barrier");
-   const auto first = std::vector<std::uint8_t>(32 * 1024, 0x31);
+   const auto first = std::vector<std::uint8_t>(payload_size, 0x31);
    forge::asio::blocking::run(client_runtime, stream.async_write(first));
-   BOOST_TEST(client.diagnostics().resources.queued_bytes == first.size());
+   BOOST_TEST(client.diagnostics().resources.streams.memory == first.size());
 
    try {
       const auto extra = std::vector<std::uint8_t>{0x32};
@@ -8905,11 +9306,11 @@ BOOST_AUTO_TEST_CASE(p2p_node_queued_byte_budget_is_held_until_quic_ack) {
       BOOST_TEST(static_cast<int>(*exceptions::code_of(error)) ==
                  static_cast<int>(exceptions::code::backpressure_rejected));
    }
-   BOOST_TEST(client.diagnostics().resources.queued_bytes == first.size());
+   BOOST_TEST(client.diagnostics().resources.streams.memory == first.size());
 
    release_server->set_value();
    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
-   while (client.diagnostics().resources.queued_bytes != 0) {
+   while (client.diagnostics().resources.streams.memory != 0) {
       BOOST_REQUIRE(std::chrono::steady_clock::now() < deadline);
       wait_on_runtime(client_runtime, std::chrono::milliseconds{5}, "P2P queued-byte ACK release");
    }
@@ -8923,7 +9324,7 @@ BOOST_AUTO_TEST_CASE(p2p_node_queued_byte_budget_is_held_until_quic_ack) {
       BOOST_TEST(static_cast<int>(*exceptions::code_of(error)) ==
                  static_cast<int>(exceptions::code::backpressure_rejected));
    }
-   BOOST_TEST(client.diagnostics().resources.queued_bytes == 0U);
+   BOOST_TEST(client.diagnostics().resources.streams.memory == 0U);
 
    stream.cancel();
    forge::asio::blocking::run(client_runtime, client.async_stop());
@@ -8951,9 +9352,9 @@ BOOST_AUTO_TEST_CASE(p2p_api_binding_rejects_unverified_quic_peer) {
    const auto server_endpoint = listen(server, runtime);
    const auto session = forge::asio::blocking::run(
        runtime, client.async_connect(server_endpoint, node::connect_options{
-                                                      .expected_peer = server.local_peer(),
-                                                      .allow_relay = false,
-                                                  }));
+                                                          .expected_peer = server.local_peer(),
+                                                          .allow_relay = false,
+                                                      }));
    auto stream =
        forge::asio::blocking::run(runtime, client.async_open_protocol_stream(server.local_peer(), binding.protocol(),
                                                                              node::open_options{.allow_relay = false}));
@@ -8971,10 +9372,10 @@ BOOST_AUTO_TEST_CASE(p2p_authenticated_peer_ignores_spoofed_legacy_metadata) {
    const auto authenticated = peer(243);
    const auto spoofed = peer(244);
    const auto legacy_metadata = forge::api::core::metadata{
-      forge::api::core::metadata_entry{
-         .key = "forge.p2p.remote_peer",
-         .value = spoofed.to_string(),
-      },
+       forge::api::core::metadata_entry{
+           .key = "forge.p2p.remote_peer",
+           .value = spoofed.to_string(),
+       },
    };
    const auto trusted = forge::api::core::trusted_invocation_builder{}
                             .set(forge::api::p2p::authenticated_peer{.id = authenticated})
@@ -11368,9 +11769,8 @@ BOOST_AUTO_TEST_CASE(p2p_gossipsub_non_owner_session_close_keeps_cached_stream_g
    const auto pressure_identity = make_test_certificate_identity("pubsub-generation-pressure");
    const auto pubsub_capabilities = capability_set{.bits = capabilities::direct_quic | capabilities::pubsub};
    auto publisher_options = options_for(publisher_identity, pubsub_capabilities);
-   publisher_options.limits.max_sessions = 2;
-   publisher_options.limits.max_outbound_sessions = 2;
-   publisher_options.limits.max_sessions_per_peer = 2;
+   set_resource_session_limits(publisher_options, 2, (std::numeric_limits<std::size_t>::max)(), 2, 2,
+                               session_admission_headroom::one_session);
    publisher_options.limits.session_low_watermark = 1;
    publisher_options.limits.session_grace_period = std::chrono::milliseconds{0};
    auto publisher = node{runtime, std::move(publisher_options)};
@@ -12407,7 +12807,7 @@ BOOST_AUTO_TEST_CASE(p2p_gossipsub_forwards_between_subscribed_peers) {
 BOOST_AUTO_TEST_CASE(p2p_gossipsub_subscription_is_idempotent_and_does_not_create_mesh_edge) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 4}};
    auto server_options = pubsub_options_for();
-   server_options.limits.resources.max_streams_per_protocol = 1;
+   server_options.limits.resources.protocol.max_streams = 1;
    server_options.limits.pubsub.limits.heartbeat_initial_delay = std::chrono::seconds{60};
    auto client_options = pubsub_options_for();
    client_options.explicit_peer_id = peer(219);
@@ -13176,8 +13576,8 @@ BOOST_AUTO_TEST_CASE(p2p_abusive_peer_crossing_malformed_threshold_closes_only_o
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 4}};
    auto server_options = pubsub_options_for();
    server_options.limits.resources.max_malformed_messages_per_peer = 1;
-   server_options.limits.max_sessions = 2;
-   server_options.limits.max_inbound_sessions = 2;
+   set_resource_session_limits(server_options, 2, 2, (std::numeric_limits<std::size_t>::max)(),
+                               (std::numeric_limits<std::size_t>::max)());
    server_options.limits.session_low_watermark = 2;
    server_options.limits.pubsub.limits.max_ihave_per_peer = 1;
    auto bad_options = pubsub_options_for();
@@ -13398,6 +13798,7 @@ BOOST_AUTO_TEST_CASE(p2p_gossipsub_rejected_outbound_reservations_do_not_retain_
 
 BOOST_AUTO_TEST_CASE(p2p_remote_peer_failure_attribution_excludes_local_runtime_failures) {
    BOOST_TEST(!detail::remote_peer_attributable_failure(exceptions::code::backpressure_rejected, false));
+   BOOST_TEST(!detail::remote_peer_attributable_failure(exceptions::code::connection_rejected, false));
    BOOST_TEST(!detail::remote_peer_attributable_failure(exceptions::code::canceled, false));
    BOOST_TEST(!detail::remote_peer_attributable_failure(exceptions::code::internal, false));
    BOOST_TEST(!detail::remote_peer_attributable_failure(exceptions::code::sequence_exhausted, false));
@@ -14124,7 +14525,7 @@ BOOST_AUTO_TEST_CASE(p2p_identify_push_read_timeout_releases_inbound_stream) {
 
    auto released = false;
    for (auto attempt = 0U; attempt < 100U && !released; ++attempt) {
-      released = server.diagnostics().resources.active_streams == 0U;
+      released = active_stream_count(server.diagnostics().resources) == 0U;
       if (!released) {
          wait_on_runtime(runtime, std::chrono::milliseconds{5}, "Identify Push read timeout");
       }
@@ -14157,8 +14558,8 @@ BOOST_AUTO_TEST_CASE(p2p_unsupported_protocol_rejection_keeps_session_usable) {
 
    auto negotiation_streams_closed = false;
    for (auto attempt = 0U; attempt < 100U && !negotiation_streams_closed; ++attempt) {
-      negotiation_streams_closed =
-          client.diagnostics().resources.active_streams == 0U && server.diagnostics().resources.active_streams == 0U;
+      negotiation_streams_closed = active_stream_count(client.diagnostics().resources) == 0U &&
+                                   active_stream_count(server.diagnostics().resources) == 0U;
       if (!negotiation_streams_closed) {
          wait_on_runtime(runtime, std::chrono::milliseconds{5}, "unsupported protocol stream reset");
       }
@@ -15791,11 +16192,11 @@ BOOST_AUTO_TEST_CASE(p2p_production_options_require_peer_state_persistence) {
    }
 }
 
-BOOST_AUTO_TEST_CASE(p2p_node_options_require_bounded_identify_decode_memory) {
+BOOST_AUTO_TEST_CASE(p2p_node_options_do_not_charge_unowned_identify_decode_memory) {
    auto options = options_for(peer(249));
-   options.limits.resources.max_queued_bytes = options.identify.max_message_size;
+   options.limits.resources.stream.max_memory = options.identify.max_message_size;
 
-   BOOST_CHECK_THROW(validate(options), exceptions::invalid_options);
+   BOOST_CHECK_NO_THROW(validate(options));
 }
 
 BOOST_AUTO_TEST_CASE(p2p_node_options_reject_zero_global_dial_limit) {

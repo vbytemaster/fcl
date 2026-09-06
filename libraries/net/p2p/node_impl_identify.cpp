@@ -98,23 +98,6 @@ constexpr auto identify_peer_record_payload_type = std::array<std::uint8_t, 2>{0
    FORGE_THROW_EXCEPTION(exceptions::codec_error, "Identify signed peer record has unsupported payload type");
 }
 
-[[nodiscard]] std::uint64_t identify_decode_budget(std::size_t max_total_message_size) {
-   constexpr auto copies = std::uint64_t{3};
-   if (max_total_message_size > (std::numeric_limits<std::uint64_t>::max)() / copies) {
-      FORGE_THROW_EXCEPTION(exceptions::invalid_options, "P2P Identify decode budget overflows");
-   }
-   return static_cast<std::uint64_t>(max_total_message_size) * copies;
-}
-
-[[nodiscard]] resource_manager::queued_bytes_reservation reserve_identify_decode(auto& self) {
-   auto reservation =
-       self.resources.reserve_queued_bytes(identify_decode_budget(self.options.identify.max_total_message_size));
-   if (!reservation) {
-      FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P Identify decode memory budget exhausted");
-   }
-   return std::move(*reservation);
-}
-
 boost::asio::awaitable<identify::document> read_identify_document(auto& self, forge::net::p2p::stream& stream) {
    auto buffer = std::vector<std::uint8_t>{};
    auto protobuf = std::vector<std::uint8_t>{};
@@ -157,7 +140,6 @@ boost::asio::awaitable<identify::document> read_identify_document(auto& self, fo
 }
 
 boost::asio::awaitable<identify::document> exchange_identify(auto self, auto session) {
-   auto decode_reservation = reserve_identify_decode(*self);
    auto strand = boost::asio::make_strand(self->runtime.context().get_executor());
    auto cancellation = std::make_shared<boost::asio::cancellation_signal>();
    auto timed_out = std::make_shared<std::atomic_bool>(false);
@@ -840,7 +822,6 @@ boost::asio::awaitable<void> node::impl::handle_identify_push(std::shared_ptr<se
    co_await run_identify_operation_with_timeout(
        self, "P2P Identify Push",
        [self, session = std::move(session), stream = std::move(stream)]() mutable -> boost::asio::awaitable<void> {
-          auto decode_reservation = reserve_identify_decode(*self);
           self->learn_from_identify(session, co_await read_identify_document(*self, stream), true);
           co_await stream.async_close();
        });

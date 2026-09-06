@@ -47,6 +47,8 @@ namespace {
       return exceptions::code::malformed_frame;
    case detail::engine_error_kind::backpressure_rejected:
       return exceptions::code::backpressure_rejected;
+   case detail::engine_error_kind::connection_rejected:
+      return exceptions::code::connection_rejected;
    case detail::engine_error_kind::connection_closed:
       return exceptions::code::connection_closed;
    case detail::engine_error_kind::stream_closed:
@@ -93,8 +95,17 @@ namespace {
    return mapped;
 }
 
+[[nodiscard]] endpoint map_endpoint(const detail::engine_endpoint& value) {
+   return endpoint{.host = value.host,
+                   .port = value.port,
+                   .family =
+                       value.family == detail::engine_endpoint::address_family::ipv4   ? endpoint::address_family::ipv4
+                       : value.family == detail::engine_endpoint::address_family::ipv6 ? endpoint::address_family::ipv6
+                                                                                       : endpoint::address_family::any};
+}
+
 [[nodiscard]] detail::engine_server_options map_options(const server_options& options) {
-   return detail::engine_server_options{
+   auto out = detail::engine_server_options{
        .alpn = options.alpn,
        .handshake_timeout = options.handshake_timeout,
        .idle_timeout = options.idle_timeout,
@@ -104,6 +115,13 @@ namespace {
        .private_key_pem = options.private_key_pem,
        .inbound_admission = options.inbound_admission,
    };
+   if (options.inbound_connection_filter) {
+      out.inbound_connection_filter = [filter = options.inbound_connection_filter](
+                                          const detail::engine_endpoint& local, const detail::engine_endpoint& remote) {
+         return filter(map_endpoint(local), map_endpoint(remote));
+      };
+   }
+   return out;
 }
 
 } // namespace

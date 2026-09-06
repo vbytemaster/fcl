@@ -19,7 +19,10 @@ export namespace forge::net::tcp {
 class connection {
  public:
    connection();
-   explicit connection(boost::asio::ip::tcp::socket socket, options tcp_options = {});
+   // Keeps an owner-supplied native resource alive until the socket stream is
+   // closed. TCP itself does not interpret this value.
+   explicit connection(boost::asio::ip::tcp::socket socket, options tcp_options = {},
+                       std::shared_ptr<void> lifetime = {});
    ~connection();
 
    connection(connection&&) noexcept;

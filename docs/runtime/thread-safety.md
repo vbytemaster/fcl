@@ -1,8 +1,8 @@
 # FORGE Thread-Safety Model
 
-This document records the runtime concurrency contract for FORGE components that
-are touched by PR #13. It is intentionally precise: FORGE does not claim that all
-objects are thread-safe by default. Each owner type must be either immutable,
+This document records the runtime concurrency contract for current FORGE runtime
+components. It is intentionally precise: FORGE does not claim that all objects
+are thread-safe by default. Each owner type must be either immutable,
 internally synchronized, strand-owned or owner-confined.
 
 ## Categories
@@ -26,8 +26,9 @@ internally synchronized, strand-owned or owner-confined.
 | `forge::api::transport::client` | Owner-confined | One client owns one API stream, pending calls and serialized writes. It is not a shared concurrent object. | `test_forge_api_transport` client concurrency tests through one coroutine owner |
 | `forge::api::transport::serve_session` | Strand-owned admission state | Accepted API stream slots and drain wakeups are serialized on one strand, so `max_concurrent_streams` is stable with multi-worker runtimes. | `test_forge_api_transport transport_api_serve_session_serializes_admission_on_multi_worker_runtime` |
 | `forge::net::p2p::node` | Internally synchronized host facade | Node state is protected by `node::impl` ownership and mutexes. Public async operations go through the node owner. | `test_forge_quic_p2p` multi-worker host tests |
-| `forge::net::p2p::resource_manager` | Owner-confined under `node::impl` | The manager is a counter/policy helper, not a standalone thread-safe object. It must be accessed through the owning node lock. | `test_forge_quic_p2p` resource-manager scope regressions |
+| `forge::net::p2p::resource_manager` | Internally synchronized scoped ledger | Manager copies and move-only reservations share one synchronized ledger for explicitly reserved scoped memory, descriptors, connections and streams. Reservations may be created, bound and released by concurrent transport operations; one reservation object must not be mutated concurrently except for the documented atomic dial binding. It is not a general allocator or process/native-heap synchronization boundary. | `test_forge_quic_p2p` resource-manager scope and concurrent dial-binding regressions |
 | `forge::net::p2p::connection_manager` | Owner-confined under `node::impl` | It records session metadata and pruning decisions while the node owns synchronization. | `test_forge_quic_p2p` connection policy regressions |
+| `forge::net::p2p::connection_gater` | Caller-supplied concurrent policy | Direct transport operations may invoke its synchronous, `noexcept` hooks concurrently. Implementations must be nonblocking and internally thread-safe. | `test_forge_quic_p2p` gater phase regressions |
 
 ## Rules
 
@@ -36,8 +37,13 @@ internally synchronized, strand-owned or owner-confined.
 - Do not use atomics as a substitute for ordered wakeup/drain protocols. If a
   state machine requires ordered reservation and release, use a strand or owner
   lock.
-- Do not call `forge::net::p2p::resource_manager` directly from multiple threads. Use
-  `forge::net::p2p::node` APIs, which own lifecycle and synchronization.
+- `forge::net::p2p::resource_manager` copies may be used concurrently. Individual
+  move-only reservation objects remain single-owner handles unless an operation
+  explicitly documents concurrent arbitration.
+- Resource-manager synchronization protects only explicitly acquired scope
+  reservations. A caller that needs a scoped memory bound must acquire the child
+  reservation before allocating or enqueueing the owned buffer; unreserved
+  process and native transport allocations are outside that contract.
 - `transport::stream::valid()` is a status check, not a promise that the next
   operation cannot fail. Operations must still handle typed exceptions.
 - Blocking waits, polling loops and detached raw threads are not part of this

@@ -5,6 +5,8 @@ add_library(
    details/identity_signature.hxx
    endpoint.cpp
    connection_gater.cpp
+   connection_gate.cpp
+   details/connection_gate.hxx
    envelope.cpp
    identify.cpp
    ipns.cpp
@@ -60,6 +62,8 @@ add_library(
    details/resource_manager_state.hxx
    resource_stream.cpp
    details/resource_stream.hxx
+   resource_service.cpp
+   details/resource_service.hxx
    stream.cpp
    negotiation.cpp
    peer_store.cpp

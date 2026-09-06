@@ -17,8 +17,8 @@ otherwise.
 This library contains substantial libp2p-compatible protocol substrate, but it
 is not yet a complete autonomous production host. Direct QUIC and TCP/Yamux,
 secure peer authentication, node-owned bootstrap, automatic Identify,
-session/stream/dial admission and transport-backed queued-byte accounting are
-on the normal node path. Managed topology now has one node-owned lifecycle for
+session/stream/dial admission and explicitly reserved outbound P2P write memory
+are on the normal node path. Managed topology now has one node-owned lifecycle for
 bounded DHT, configured Rendezvous and Forge Peer Exchange discovery, while
 `static_only` disables autonomous discovery and dialing. GossipSub has bounded
 connected-peer mechanics and live interop fixtures, but its overall support
@@ -46,8 +46,24 @@ The following surfaces are not production claims yet:
   profiles and UDP black-hole detection for the native profile are Stage 6 work;
 - AutoRelay and DCUtR mechanics lack the complete verified discovery and
   reachability feed;
-- the resource model lacks staged connection gating and donor-style memory,
-  file descriptor, transient and service scopes;
+- `node::options::connection_gater` is a synchronous, concurrent-callable
+  host policy hook. Its five donor-aligned stages run before logical peer
+  dial, each concrete address dial, inbound acceptance, authenticated security
+  and mux upgrade. A denial closes the native attempt without recording endpoint
+  backoff; implementations must be nonblocking and thread-safe;
+  relay HOP/STOP transport sessions use the same peer, accept, security and
+  upgrade boundaries, but do not invent a direct endpoint where the relay
+  control exchange carries none.
+- `forge.net.p2p.resource_manager` owns explicit system, transient, peer,
+  protocol, service, connection and stream reservations. Its scoped memory and
+  file-descriptor limits apply only to allocations and native lifetimes that
+  acquire a child reservation; they are not a process-RSS, kernel-buffer or
+  complete native-transport-heap limit. TCP listeners and connections reserve
+  native file descriptors; QUIC listeners reserve one shared UDP descriptor
+  while inbound QUIC connections do not double-charge it. Outbound P2P write
+  chunks retain their explicit child memory reservations until transport drain,
+  acknowledgement or reset. Full ingress, handshake, decoder and native queue
+  memory accounting remains future Stage 6 work;
 - GossipSub donor-consistent scoring, autonomous mesh selection, v1.2/v1.3 and
   opt-in Partial Messages implementation remain Stage 6 work;
   transport topology is owned by the managed topology service above.
@@ -136,7 +152,7 @@ Exchange facts do not call it and remain capability-free until Identify.
   `forge.net.p2p.provider_registration`, `forge.net.p2p.rendezvous`.
 - `forge.net.p2p.pubsub`.
 - `forge.net.p2p.relay`, `forge.net.p2p.scoring`,
-  `forge.net.p2p.resource_manager`.
+  `forge.net.p2p.resource_manager`, `forge.net.p2p.connection_gater`.
 - `forge.net.p2p.exceptions`.
 
 Target: `forge_net_p2p`.

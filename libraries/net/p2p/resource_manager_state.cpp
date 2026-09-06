@@ -466,18 +466,35 @@ resource_manager::state::reserve_stream(peer_id peer, session_direction directio
    }
 }
 
-bool resource_manager::state::reserve_dial() noexcept {
+std::shared_ptr<resource_manager::dial_ledger> resource_manager::state::reserve_dial() noexcept {
    auto lock = std::scoped_lock{mutex_};
    if (snapshot_.active_dials >= limits_.max_dial_attempts) {
-      return reject_limit_locked(snapshot_.denied_dials);
+      static_cast<void>(reject_limit_locked(snapshot_.denied_dials));
+      return nullptr;
    }
-   ++snapshot_.active_dials;
-   return true;
+   try {
+      auto result = std::make_shared<dial_ledger>();
+      ++snapshot_.active_dials;
+      return result;
+   } catch (...) {
+      record_runtime_failure_locked();
+      return nullptr;
+   }
 }
 
-bool resource_manager::state::bind_dial(const peer_id& peer) noexcept {
+bool resource_manager::state::dial_active(const std::shared_ptr<dial_ledger>& value) const noexcept {
    auto lock = std::scoped_lock{mutex_};
-   if (peer.value.empty()) {
+   return value && value->active;
+}
+
+bool resource_manager::state::dial_bound(const std::shared_ptr<dial_ledger>& value) const noexcept {
+   auto lock = std::scoped_lock{mutex_};
+   return value && value->active && value->peer.has_value();
+}
+
+bool resource_manager::state::bind_dial(const std::shared_ptr<dial_ledger>& value, peer_id peer) noexcept {
+   auto lock = std::scoped_lock{mutex_};
+   if (!value || !value->active || value->peer || peer.value.empty()) {
       return reject_invalid_transition_locked();
    }
    const auto found = dial_attempts_by_peer_.find(peer);
@@ -489,6 +506,7 @@ bool resource_manager::state::bind_dial(const peer_id& peer) noexcept {
       auto [entry, inserted] = dial_attempts_by_peer_.try_emplace(peer);
       static_cast<void>(inserted);
       ++entry->second;
+      value->peer.emplace(std::move(peer));
       return true;
    } catch (...) {
       record_runtime_failure_locked();
@@ -496,21 +514,26 @@ bool resource_manager::state::bind_dial(const peer_id& peer) noexcept {
    }
 }
 
-void resource_manager::state::release_dial(const std::optional<peer_id>& peer) noexcept {
+void resource_manager::state::release_dial(const std::shared_ptr<dial_ledger>& value) noexcept {
    auto lock = std::scoped_lock{mutex_};
+   if (!value || !value->active) {
+      return;
+   }
+   value->active = false;
    if (snapshot_.active_dials > 0) {
       --snapshot_.active_dials;
    }
-   if (!peer) {
+   if (!value->peer) {
       return;
    }
-   if (const auto found = dial_attempts_by_peer_.find(*peer); found != dial_attempts_by_peer_.end()) {
+   if (const auto found = dial_attempts_by_peer_.find(*value->peer); found != dial_attempts_by_peer_.end()) {
       if (found->second > 1) {
          --found->second;
       } else {
          dial_attempts_by_peer_.erase(found);
       }
    }
+   value->peer.reset();
 }
 
 bool resource_manager::state::reserve_relay(const peer_id& peer) noexcept {

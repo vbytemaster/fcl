@@ -140,6 +140,8 @@ namespace asio = boost::asio;
       return exceptions::code::codec_error;
    case quic_kind::backpressure_rejected:
       return exceptions::code::backpressure_rejected;
+   case quic_kind::connection_rejected:
+      return exceptions::code::connection_rejected;
    case quic_kind::connection_closed:
    case quic_kind::stream_closed:
    case quic_kind::stream_reset:
@@ -283,13 +285,7 @@ attempt_timeout(std::chrono::milliseconds remaining, std::chrono::milliseconds c
 }
 
 resource_manager::limits resource_limits_for(const node::limits& limits) {
-   auto value = limits.resources;
-   value.max_pending_inbound_sessions = limits.max_pending_inbound_sessions;
-   value.max_pending_outbound_sessions = limits.max_pending_outbound_sessions;
-   value.max_inbound_sessions = limits.max_inbound_sessions;
-   value.max_outbound_sessions = limits.max_outbound_sessions;
-   value.max_sessions_per_peer = limits.max_sessions_per_peer;
-   return value;
+   return limits.resources;
 }
 
 void normalize_legacy_discovery(node::options& options) {
@@ -393,10 +389,7 @@ void validate(const node::options& options) {
    if (!options.allow_insecure_test_mode && !options.peer_state.persistence) {
       FORGE_THROW_EXCEPTION(exceptions::invalid_options, "production P2P node requires peer persistence");
    }
-   if (options.limits.max_sessions == 0 || options.limits.max_pending_inbound_sessions == 0 ||
-       options.limits.max_pending_outbound_sessions == 0 || options.limits.max_inbound_sessions == 0 ||
-       options.limits.max_outbound_sessions == 0 || options.limits.max_sessions_per_peer == 0 ||
-       options.limits.session_low_watermark == 0 ||
+   if (options.limits.max_sessions == 0 || options.limits.session_low_watermark == 0 ||
        options.limits.session_low_watermark > options.limits.max_sessions ||
        options.limits.session_grace_period.count() < 0 || options.limits.session_prune_silence.count() <= 0 ||
        options.limits.dial_backoff_base.count() <= 0 || options.limits.dial_backoff_step.count() <= 0 ||
@@ -412,11 +405,8 @@ void validate(const node::options& options) {
        options.limits.relay.max_relay_bytes == 0 || options.limits.relay.max_queued_bytes == 0 ||
        relay_duration.count() <= 0 ||
        std::chrono::duration_cast<std::chrono::milliseconds>(relay_duration) != options.limits.relay.max_duration ||
-       options.limits.relay.reservation_ttl.count() <= 0 || options.limits.resources.max_streams == 0 ||
-       options.limits.resources.max_streams_per_peer == 0 || options.limits.resources.max_streams_per_protocol == 0 ||
-       options.limits.resources.max_relay_reservations == 0 || options.limits.resources.max_relay_streams == 0 ||
-       options.limits.resources.max_queued_bytes == 0 || options.limits.resources.max_dial_attempts == 0 ||
-       options.limits.resources.max_dial_attempts_per_peer == 0 ||
+       options.limits.relay.reservation_ttl.count() <= 0 || options.limits.resources.max_relay_reservations == 0 ||
+       options.limits.resources.max_dial_attempts == 0 || options.limits.resources.max_dial_attempts_per_peer == 0 ||
        options.limits.resources.max_malformed_messages_per_peer == 0 ||
        options.limits.rendezvous.default_ttl.count() <= 0 || options.limits.rendezvous.min_ttl.count() <= 0 ||
        options.limits.rendezvous.max_ttl.count() <= 0 ||
@@ -509,20 +499,15 @@ void validate(const node::options& options) {
        identify.max_push_operations == 0) {
       FORGE_THROW_EXCEPTION(exceptions::invalid_options, "invalid P2P Identify limits");
    }
-   constexpr auto identify_decode_copies = std::uint64_t{3};
-   if (identify.max_total_message_size > (std::numeric_limits<std::uint64_t>::max)() / identify_decode_copies ||
-       options.limits.resources.max_queued_bytes <
-           static_cast<std::uint64_t>(identify.max_total_message_size) * identify_decode_copies) {
-      FORGE_THROW_EXCEPTION(exceptions::invalid_options,
-                            "P2P queued-byte budget must cover one bounded Identify decode");
-   }
 }
 
 node::impl::impl(forge::asio::runtime& runtime_value, node::options options_value)
     : runtime(runtime_value), options(std::move(options_value)), identity(make_libp2p_identity_material(options)),
       local(options.explicit_peer_id ? *options.explicit_peer_id
                                      : make_peer_id(decode_public_key(identity.public_key))),
-      resources(resource_limits_for(options.limits)), direct_registry(runtime_value, options, identity, resources),
+      resources(resource_limits_for(options.limits)),
+      connection_gate(std::make_shared<detail::connection_gate>(options.connection_gater)),
+      direct_registry(runtime_value, options, identity, resources, connection_gate),
       teardown(runtime_value.context().get_executor()), lifecycle(runtime_value.context().get_executor()),
       lifecycle_wakeup(std::make_shared<detail::lifecycle_wakeup>()),
       identify_service(runtime_value.context().get_executor()), store(options.peer_state),

@@ -29,6 +29,7 @@ enum class engine_error_kind {
    frame_too_large,
    malformed_frame,
    backpressure_rejected,
+   connection_rejected,
    connection_closed,
    stream_closed,
    stream_reset,
