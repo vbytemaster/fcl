@@ -74,6 +74,7 @@ PRIVATE_NETWORK_PSK_DEPENDENCY = "security.private_network_psk"
 PRIVATE_EGRESS_POLICY_DEPENDENCY = "reachability.private_internet_policy"
 PRIVATE_EGRESS_POLICY_VALUE = "allow-internet"
 PRIVATE_PNET_RESULT_FIELDS = ("pnet_enabled", "negotiated_pnet", "pnet_fingerprint")
+PNET_FINGERPRINT_DOMAIN = b"forge-p2p-stage6-pnet-fingerprint-v1\x00"
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -91,6 +92,11 @@ def load_json(path: Path) -> object:
 
 def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def pnet_fingerprint(pnet_key_file: Path) -> str:
+    """Return the public fingerprint of the exact private-network PSK bytes."""
+    return hashlib.sha256(PNET_FINGERPRINT_DOMAIN + pnet_key_file.read_bytes()).hexdigest()
 
 
 def required_scenarios(
@@ -625,6 +631,7 @@ def validate_private_network_proofs(capability_id: str, expected_requires: tuple
             errors.append("private-network key material must stay outside the artifact evidence directory")
         if dial_key in indexed_evidence:
             errors.append("private-network key material must not be serialized or hashed as artifact evidence")
+    expected_fingerprint = pnet_fingerprint(dial_key) if dial_key is not None and dial_key.is_file() else None
     for label, payload in (("dialer", dial_payload), ("listener", listener_payload)):
         if not isinstance(payload, dict):
             errors.append(f"private network {label} lacks a parsed result payload")
@@ -634,6 +641,8 @@ def validate_private_network_proofs(capability_id: str, expected_requires: tuple
         fingerprint = payload.get("pnet_fingerprint")
         if not isinstance(fingerprint, str) or SHA256.fullmatch(fingerprint) is None:
             errors.append(f"private network {label} result lacks a stable non-secret PNET fingerprint")
+        elif fingerprint != expected_fingerprint:
+            errors.append(f"private network {label} fingerprint does not match the configured PSK bytes")
     if isinstance(listener_payload, dict) and dial_payload.get("pnet_fingerprint") != listener_payload.get("pnet_fingerprint"):
         errors.append("private network endpoints do not report the same PNET fingerprint")
 
@@ -840,7 +849,7 @@ def validate_successful_raw_record(
 def validate_execution_receipt(receipt: object, artifact_path: Path, artifact: dict) -> list[str]:
     if not isinstance(receipt, dict) or set(receipt) != {
         "schema_version", "runner_argv", "started_at_unix", "finished_at_unix", "returncode",
-        "artifact_path", "artifact_sha256",
+        "invocation_directory", "artifact_path", "artifact_sha256",
     }:
         return ["promotion execution receipt has invalid schema"]
     started = receipt.get("started_at_unix")
@@ -848,9 +857,10 @@ def validate_execution_receipt(receipt: object, artifact_path: Path, artifact: d
     artifact_started = artifact.get("started_at_unix")
     artifact_finished = artifact.get("finished_at_unix")
     if (
-        receipt.get("schema_version") != 1
+        receipt.get("schema_version") != 2
         or receipt.get("runner_argv") != artifact.get("runner_argv")
         or receipt.get("returncode") != 0
+        or absolute_path(receipt.get("invocation_directory")) != artifact_path.parent.resolve()
         or absolute_path(receipt.get("artifact_path")) != artifact_path.resolve()
         or receipt.get("artifact_sha256") != sha256_file(artifact_path)
         or not is_timestamp(started)
@@ -1094,6 +1104,7 @@ def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: s
         pnet_key_file.parent.mkdir(exist_ok=True)
         # The fixture key is intentionally not recorded, logged or indexed as evidence.
         pnet_key_file.write_bytes(b"fixture-private-network-key")
+    private_pnet_fingerprint = pnet_fingerprint(pnet_key_file) if profile == "private_network" else None
     private_egress = (
         PRIVATE_EGRESS_POLICY_VALUE if PRIVATE_EGRESS_POLICY_DEPENDENCY in requires else None
     )
@@ -1116,12 +1127,12 @@ def write_artifact(root: Path, manifest_path: Path, artifact_path: Path, head: s
             result_payload.update({
                 "pnet_enabled": True,
                 "negotiated_pnet": True,
-                "pnet_fingerprint": "a" * 64,
+                "pnet_fingerprint": private_pnet_fingerprint,
             })
             listener_payload.update({
                 "pnet_enabled": True,
                 "negotiated_pnet": True,
-                "pnet_fingerprint": "a" * 64,
+                "pnet_fingerprint": private_pnet_fingerprint,
             })
         if private_egress is not None:
             result_payload.update({
@@ -1322,11 +1333,12 @@ def self_test() -> int:
         artifact = load_json(artifact_path)
         assert isinstance(artifact, dict)
         receipt = {
-            "schema_version": 1,
+            "schema_version": 2,
             "runner_argv": artifact["runner_argv"],
             "started_at_unix": artifact["started_at_unix"] - 1,
             "finished_at_unix": artifact["finished_at_unix"] + 1,
             "returncode": 0,
+            "invocation_directory": str(artifact_path.parent.resolve()),
             "artifact_path": str(artifact_path.resolve()),
             "artifact_sha256": sha256_file(artifact_path),
         }
@@ -1338,6 +1350,12 @@ def self_test() -> int:
         errors, _ = validate(root, manifest_path, artifact_path, head, receipt)
         if not errors:
             print("self-test failed: forged promotion receipt argv was accepted", file=sys.stderr)
+            return 1
+        receipt["runner_argv"] = artifact["runner_argv"]
+        receipt["invocation_directory"] = str(root.resolve())
+        errors, _ = validate(root, manifest_path, artifact_path, head, receipt)
+        if not errors:
+            print("self-test failed: forged promotion receipt directory was accepted", file=sys.stderr)
             return 1
 
         write_artifact(root, manifest_path, artifact_path, head)
@@ -1450,6 +1468,36 @@ def self_test() -> int:
             print("self-test failed: private-network launcher/result artifact was not accepted", file=sys.stderr)
             return 1
 
+        artifact = load_json(private_artifact_path)
+        assert isinstance(artifact, dict)
+        mismatch_record = artifact["artifacts"][0]
+        assert isinstance(mismatch_record, dict)
+        mismatch_record["result"]["pnet_fingerprint"] = "b" * 64
+        mismatch_record["effective_configuration"]["dialer"]["pnet_fingerprint"] = "b" * 64
+        rewrite_result_evidence(mismatch_record)
+        artifact["evidence_index"] = build_evidence_index(
+            Path(artifact["artifact_root"]).resolve(), artifact["artifacts"]
+        )
+        private_artifact_path.write_text(json.dumps(artifact))
+        if not expect_rejected(
+            root,
+            private_manifest_path,
+            private_artifact_path,
+            head,
+            "PNET fingerprint that does not match the PSK bytes",
+            "private network dialer fingerprint does not match the configured PSK bytes",
+        ):
+            return 1
+
+        write_artifact(
+            root,
+            private_manifest_path,
+            private_artifact_path,
+            head,
+            capability_id="test.private_protocol",
+            profile="private_network",
+            requires=private_requires,
+        )
         artifact = load_json(private_artifact_path)
         assert isinstance(artifact, dict)
         for record in artifact["artifacts"]:
@@ -1640,7 +1688,7 @@ def self_test() -> int:
             return 1
     print(
         "stage6 acceptance checker self-test ok: canonical argv, forged executables, missing, stale, "
-        "nonzero, failures, result parsing, evidence hashes/reuse, private PNET/egress proofs, dirty tree, "
+        "nonzero, failures, result parsing, evidence hashes/reuse, private PNET fingerprint/egress proofs, dirty tree, "
         "empty scenarios and limitations covered"
     )
     return 0

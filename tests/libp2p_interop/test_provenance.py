@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import hashlib
 import stat
 import subprocess
 import sys
@@ -14,7 +15,17 @@ from runner import (
     forge_fixture_requirements,
     require_dht_provider_evidence,
     require_local_topology_evidence,
+    require_pnet_fingerprint,
     require_supported_forge_build_profile,
+    pnet_fingerprint as runner_pnet_fingerprint,
+    run_dial,
+)
+from check_stage6_acceptance import pnet_fingerprint as checker_pnet_fingerprint
+from promote_stage6_acceptance import (
+    PROMOTION_DIRECTORY_PREFIX,
+    create_invocation_directory,
+    forced_live_environment,
+    promotion_status,
 )
 
 
@@ -180,6 +191,65 @@ class InteropCMakeConfigurationTest(unittest.TestCase):
         )
         self.assertIn("add_dependencies(forge_interop_fixture forge_interop_fixture_build_info)", source)
         self.assertNotIn("OBJECT_DEPENDS", source)
+
+
+class InteropRunnerResultTest(unittest.TestCase):
+    def test_pnet_fingerprint_is_domain_separated_and_checked_by_runner_and_checker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pnet_key_file = Path(directory) / "pnet.key"
+            pnet_key_file.write_bytes(b"private-network-test-key")
+            expected = hashlib.sha256(
+                b"forge-p2p-stage6-pnet-fingerprint-v1\x00" + pnet_key_file.read_bytes()
+            ).hexdigest()
+            self.assertEqual(runner_pnet_fingerprint(pnet_key_file), expected)
+            self.assertEqual(checker_pnet_fingerprint(pnet_key_file), expected)
+            require_pnet_fingerprint({"pnet_fingerprint": expected}, pnet_key_file, "fixture")
+            with self.assertRaisesRegex(RuntimeError, "did not emit the required PNET fingerprint"):
+                require_pnet_fingerprint({"pnet_fingerprint": "0" * 64}, pnet_key_file, "fixture")
+
+    def test_run_dial_rejects_non_ok_fixture_result(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = root / "non_ok_fixture.py"
+            fixture.write_text(
+                f"#!{sys.executable}\n"
+                "import json\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "result_file = Path(sys.argv[sys.argv.index('--result-file') + 1])\n"
+                "result_file.write_text(json.dumps({'status': 'failed'}) + '\\n')\n"
+            )
+            fixture.chmod(fixture.stat().st_mode | stat.S_IXUSR)
+            with self.assertRaisesRegex(RuntimeError, "did not report status=ok"):
+                run_dial(
+                    fixture,
+                    "fixture",
+                    "ping",
+                    "peer",
+                    "/ip4/127.0.0.1/tcp/1",
+                    root,
+                )
+
+
+class Stage6PromotionHelperTest(unittest.TestCase):
+    def test_invocation_directories_are_unique_children_of_the_configured_base(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "promotion-base"
+            first = create_invocation_directory(base)
+            second = create_invocation_directory(base)
+            self.assertEqual(first.parent, base)
+            self.assertEqual(second.parent, base)
+            self.assertNotEqual(first, second)
+            self.assertTrue(first.name.startswith(PROMOTION_DIRECTORY_PREFIX))
+            self.assertTrue(second.name.startswith(PROMOTION_DIRECTORY_PREFIX))
+
+    def test_promotion_forces_live_environment_and_checker_errors_fail(self) -> None:
+        inherited = {"FORGE_ENABLE_LIBP2P_INTEROP": "0", "OTHER": "value"}
+        environment = forced_live_environment(inherited)
+        self.assertEqual(environment["FORGE_ENABLE_LIBP2P_INTEROP"], "1")
+        self.assertEqual(environment["OTHER"], "value")
+        self.assertEqual(promotion_status(0, ["artifact is missing"]), "FAILED")
+        self.assertEqual(promotion_status(1, []), "FAILED")
 
 
 class InteropFixtureContractTest(unittest.TestCase):

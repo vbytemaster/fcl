@@ -5,15 +5,36 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
+from typing import Optional
 
 from check_stage6_acceptance import sha256_file, validate
+
+
+PROMOTION_DIRECTORY_PREFIX = "stage6-promotion-"
 
 
 def write_receipt(path: Path, receipt: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+
+
+def create_invocation_directory(base_directory: Path) -> Path:
+    """Allocate an isolated artifact root so concurrent promotions cannot collide."""
+    base_directory.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=PROMOTION_DIRECTORY_PREFIX, dir=base_directory))
+
+
+def forced_live_environment(inherited: Optional[dict[str, str]] = None) -> dict[str, str]:
+    environment = dict(os.environ if inherited is None else inherited)
+    environment["FORGE_ENABLE_LIBP2P_INTEROP"] = "1"
+    return environment
+
+
+def promotion_status(returncode: int, errors: list[str]) -> str:
+    return "FAILED" if returncode != 0 or errors else "PASS"
 
 
 def main() -> int:
@@ -29,33 +50,31 @@ def main() -> int:
     args = parser.parse_args()
 
     root = Path(args.forge_root).resolve()
-    build_dir = Path(args.build_dir).resolve()
-    artifact_path = build_dir / "interop-artifacts.json"
-    receipt_path = build_dir / "stage6-promotion-receipt.json"
+    build_base = Path(args.build_dir).resolve()
+    invocation_directory = create_invocation_directory(build_base)
+    artifact_path = invocation_directory / "interop-artifacts.json"
+    receipt_path = invocation_directory / "stage6-promotion-receipt.json"
     runner_argv = [
         str(Path(sys.executable).resolve()),
         str(Path(args.runner).resolve()),
         "--enabled", "1",
         "--forge-fixture", str(Path(args.forge_fixture).resolve()),
         "--source-dir", str(Path(args.source_dir).resolve()),
-        "--build-dir", str(build_dir),
+        "--build-dir", str(invocation_directory),
         "--forge-root", str(root),
         "--donors-root", str(Path(args.donors_root).resolve()),
         "--acceptance-manifest", str(Path(args.acceptance_manifest).resolve()),
     ]
-    artifact_path.unlink(missing_ok=True)
-    receipt_path.unlink(missing_ok=True)
-    environment = os.environ.copy()
-    environment["FORGE_ENABLE_LIBP2P_INTEROP"] = "1"
     started = time.time()
-    result = subprocess.run(runner_argv, cwd=root, env=environment, check=False)
+    result = subprocess.run(runner_argv, cwd=root, env=forced_live_environment(), check=False)
     finished = time.time()
     receipt = {
-        "schema_version": 1,
+        "schema_version": 2,
         "runner_argv": runner_argv,
         "started_at_unix": started,
         "finished_at_unix": finished,
         "returncode": result.returncode,
+        "invocation_directory": str(invocation_directory),
         "artifact_path": str(artifact_path),
         "artifact_sha256": sha256_file(artifact_path) if artifact_path.is_file() else None,
     }
@@ -64,16 +83,13 @@ def main() -> int:
     errors, has_limitations = validate(
         root, Path(args.acceptance_manifest).resolve(), artifact_path, args.expected_head, receipt
     )
-    if result.returncode != 0:
-        print(f"FAILED: canonical runner exited with {result.returncode}; receipt={receipt_path}", file=sys.stderr)
+    print(f"stage6 promotion evidence: {invocation_directory}", file=sys.stderr)
+    if promotion_status(result.returncode, errors) == "FAILED":
+        if result.returncode != 0:
+            print(f"FAILED: canonical runner exited with {result.returncode}; receipt={receipt_path}", file=sys.stderr)
         for error in errors:
             print(f"FAILED: {error}", file=sys.stderr)
-        return result.returncode
-    if errors:
-        status = "FAILED" if "canonical runner failures must be exactly empty" in errors else "NOT_RUN"
-        for error in errors:
-            print(f"{status}: {error}", file=sys.stderr)
-        return 1
+        return result.returncode or 1
     if has_limitations:
         print("PASS_WITH_DOCUMENTED_LIMITATIONS: canonical runner executed and was validated in this promotion")
     else:

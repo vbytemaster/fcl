@@ -448,7 +448,11 @@ A future private TCP/Yamux+pnet fixture must pass the same existing absolute
 listener and use `--transport tcp-pnet`. The key bytes are neither serialized,
 logged nor added to the evidence index.
 Both endpoint result files must report `pnet_enabled=true`,
-`negotiated_pnet=true`, and one shared non-secret SHA-256 `pnet_fingerprint`.
+`negotiated_pnet=true`, and one shared non-secret `pnet_fingerprint`. Its exact
+value is `SHA-256("forge-p2p-stage6-pnet-fingerprint-v1" || 0x00 || PSK-file-bytes)`;
+the runner requires future fixtures to emit it and the checker independently
+recomputes it from the configured file without serializing, logging or indexing
+the PSK bytes.
 If a private AutoNAT scenario requires
 `reachability.private_internet_policy`, both commands must additionally pass
 `--private-egress-policy allow-internet`; both results must report that policy
@@ -469,6 +473,7 @@ passing result. The inventory checker remains the paired source-manifest gate.
 `test_forge_p2p_inventory` runs only source validation and the checker self-test;
 PR0 does not require a live artifact. Promotion is explicit: it runs the runner
 with live execution enabled and preserves a nonzero runner exit as `FAILED`.
+Every checker error after that invocation is also `FAILED`, never `NOT_RUN`.
 There is no cache variable for replaying an externally supplied artifact:
 
 ```bash
@@ -478,6 +483,9 @@ cmake --build build/forge-p2p-stage6 --target test_forge_p2p_stage6_acceptance
 
 For a multi-config generator, CMake scopes the promotion directory by
 `$<CONFIG>` so independently built fixture/provenance outputs cannot collide.
+Within that configured base, the wrapper creates one fresh random invocation
+directory for every promotion, binds its receipt to that directory and prints the
+preserved evidence path; it never reuses a stale shared artifact path.
 
 ### Stage 7: Official plugin and operational surface
 

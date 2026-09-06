@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import io
 import json
 import os
@@ -74,6 +75,7 @@ PRIVATE_NETWORK_TRANSPORT = "tcp-pnet"
 PRIVATE_EGRESS_POLICY_DEPENDENCY = "reachability.private_internet_policy"
 PRIVATE_EGRESS_POLICY_VALUE = "allow-internet"
 PRIVATE_PNET_RESULT_FIELDS = ("pnet_enabled", "negotiated_pnet", "pnet_fingerprint")
+PNET_FINGERPRINT_DOMAIN = b"forge-p2p-stage6-pnet-fingerprint-v1\x00"
 
 
 def load_acceptance_configurations(path: Optional[str]) -> dict[str, dict]:
@@ -114,6 +116,17 @@ def command_option_values(command: object) -> dict[str, str]:
         for index in range(2, len(command), 2)
         if isinstance(command[index], str) and isinstance(command[index + 1], str)
     }
+
+
+def pnet_fingerprint(pnet_key_file: Path) -> str:
+    """Return the public, domain-separated fingerprint of the exact PSK file bytes."""
+    return hashlib.sha256(PNET_FINGERPRINT_DOMAIN + pnet_key_file.read_bytes()).hexdigest()
+
+
+def require_pnet_fingerprint(result: dict, pnet_key_file: Path, endpoint: str) -> None:
+    expected = pnet_fingerprint(pnet_key_file)
+    if result.get("pnet_fingerprint") != expected:
+        raise RuntimeError(f"{endpoint} did not emit the required PNET fingerprint")
 
 
 def launcher_execution_description(command: object, result: object) -> dict[str, object]:
@@ -575,6 +588,8 @@ def run_dial(binary: Path, implementation: str, scenario: str, peer_id: str, add
             detail += f"; result={result_file.read_text(errors='replace')}"
         raise RuntimeError(detail)
     result = json.loads(result_file.read_text())
+    if result.get("status") != "ok":
+        raise RuntimeError(f"{implementation} dial result did not report status=ok: {result}")
     result["result_file"] = str(result_file)
     return attach_attempts(result, attempts)
 
@@ -1100,6 +1115,12 @@ def run_pair_with_transport(dialer_binary: Path, dialer: str, listener_binary: P
         delivered = wait_json(listener_result, 20) if listener_result is not None else None
         if delivered is not None and delivered.get("status") != "ok":
             raise RuntimeError(f"{listener} listener reported {delivered}")
+        if acceptance_profile == "private_network":
+            assert pnet_key_file is not None
+            require_pnet_fingerprint(result, pnet_key_file, f"{dialer} dialer")
+            if not isinstance(delivered, dict):
+                raise RuntimeError(f"{listener} listener did not emit a PNET result")
+            require_pnet_fingerprint(delivered, pnet_key_file, f"{listener} listener")
         out = {
             "dialer": dialer,
             "listener": listener,
