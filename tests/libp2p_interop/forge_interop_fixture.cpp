@@ -1358,14 +1358,18 @@ int dial_mode(const std::map<std::string, std::string>& args) {
             throw std::runtime_error{"FORGE Identify connection did not retain the authenticated direct peer"};
          }
          const auto snapshot = value.diagnostics();
-         const auto observed =
-             std::ranges::find(snapshot.sessions, session.remote_peer, &forge::net::p2p::diagnostics::session::remote_peer);
+         const auto observed = std::ranges::find(snapshot.sessions, session.remote_peer,
+                                                 &forge::net::p2p::diagnostics::session::remote_peer);
          if (observed == snapshot.sessions.end() || !observed->remote_endpoint ||
-             observed->remote_endpoint->transport.protocol != forge::net::p2p::endpoint::protocol_kind::quic_v1) {
-            throw std::runtime_error{"FORGE Identify connection did not expose an observed QUIC v1 endpoint"};
+             observed->remote_endpoint->transport.protocol != remote.transport.protocol) {
+            throw std::runtime_error{"FORGE Identify connection did not expose the dialed transport"};
          }
-         connection_evidence = "\"negotiated_transport\":\"/quic-v1\",\"authenticated_remote_peer_id\":\"" +
-                               json_escape(session.remote_peer.to_string()) + "\"";
+         const auto transport = remote.transport.protocol == forge::net::p2p::endpoint::protocol_kind::quic_v1
+                                    ? std::string_view{"/quic-v1"}
+                                    : std::string_view{"tcp"};
+         connection_evidence = "\"negotiated_transport\":\"" + std::string{transport} +
+                               "\",\"authenticated_remote_peer_id\":\"" + json_escape(session.remote_peer.to_string()) +
+                               "\"";
       }
    }
 
@@ -1374,7 +1378,8 @@ int dial_mode(const std::map<std::string, std::string>& args) {
    forge::asio::blocking::run(runtime, value.async_stop());
    write_file(required(args, "result-file"), "{\"implementation\":\"forge\",\"role\":\"dialer\",\"scenario\":\"" +
                                                  json_escape(scenario) + "\",\"status\":\"ok\"," + details +
-                                                 (connection_evidence.empty() ? "" : "," + connection_evidence) + "}\n");
+                                                 (connection_evidence.empty() ? "" : "," + connection_evidence) +
+                                                 "}\n");
    return 0;
 }
 

@@ -37,7 +37,7 @@
   "runtime_artifact_sources": {
     "../CMakeLists.txt": "9cb1bcba204b00072522f20f732e7fd36521c10e2b127b4e516317bc7de2a110",
     "check_fixture_lock.py": "581a4216a24b96b89e4fefe26ece4cf5b587542495b9095ac4a6e5627561afc2",
-    "forge_interop_fixture.cpp": "8e9acb4133c098309a9a3703c78516aea868b2b89e75470dcd8d33f800fd9d8c",
+    "forge_interop_fixture.cpp": "3c089e65fd54305afd899bbb6f9818c3e4663fba3769fbc3d5123c3cfcdcfd7b",
     "provenance.py": "9ae5c8ffa3d9dcd646c2a5c7148e79cd5086d60ecb156d81374fda2ca00609ec",
     "runner.py": "3032c837bf74e0cc7513aa8384ee5a72066e239baf5069e66cb10141d899269c"
   },
