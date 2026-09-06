@@ -79,8 +79,12 @@ PRIVATE_NETWORK_TRANSPORT = "tcp-pnet"
 PRIVATE_NETWORK_PSK_DEPENDENCY = "security.private_network_psk"
 RELAY_NATIVE_PEER_ID_IDENTITY_CODE = 0
 RELAY_NATIVE_PEER_ID_SHA256_CODE = 0x12
-RELAY_NATIVE_PEER_ID_MAX_MULTIHASH_BYTES = 64
+RELAY_NATIVE_PEER_ID_MAX_DIGEST_BYTES = 64
 RELAY_NATIVE_PEER_ID_MAX_IDENTITY_DIGEST_BYTES = 42
+# Pinned rust-libp2p accepts only one-byte identity/SHA2-256 codes and their
+# one-byte lengths here, so a valid serialized PeerId is at most 66 bytes.
+# 58**90 < 256**66 <= 58**91, making 91 the exact canonical base58btc bound.
+RELAY_NATIVE_PEER_ID_MAX_BASE58BTC_LENGTH = 91
 RELAY_NATIVE_BASE58BTC_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 RELAY_NATIVE_BASE58BTC_VALUES = {
     character: index for index, character in enumerate(RELAY_NATIVE_BASE58BTC_ALPHABET)
@@ -633,9 +637,20 @@ def nonempty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value)
 
 
+def relay_native_base58btc_encode(value: bytes) -> str:
+    """Encode bounded relay-native PeerId bytes in canonical base58btc form."""
+    leading_zeroes = len(value) - len(value.lstrip(b"\0"))
+    number = int.from_bytes(value, "big")
+    digits: list[str] = []
+    while number:
+        number, remainder = divmod(number, 58)
+        digits.append(RELAY_NATIVE_BASE58BTC_ALPHABET[remainder])
+    return "1" * leading_zeroes + "".join(reversed(digits))
+
+
 def relay_native_base58btc_decode(value: object) -> Optional[bytes]:
     """Decode the base58btc form accepted by the pinned Rust relay fixture."""
-    if not nonempty_string(value):
+    if not nonempty_string(value) or len(value) > RELAY_NATIVE_PEER_ID_MAX_BASE58BTC_LENGTH:
         return None
     number = 0
     for character in value:
@@ -645,7 +660,8 @@ def relay_native_base58btc_decode(value: object) -> Optional[bytes]:
         number = number * 58 + digit
     encoded = number.to_bytes((number.bit_length() + 7) // 8, "big") if number else b""
     leading_zeroes = len(value) - len(value.lstrip("1"))
-    return b"\0" * leading_zeroes + encoded
+    decoded = b"\0" * leading_zeroes + encoded
+    return decoded if relay_native_base58btc_encode(decoded) == value else None
 
 
 def relay_native_canonical_varint(data: bytes, offset: int) -> Optional[tuple[int, int]]:
@@ -677,7 +693,7 @@ def relay_native_canonical_varint(data: bytes, offset: int) -> Optional[tuple[in
 def relay_native_peer_id(value: object) -> bool:
     """Match pinned rust-libp2p PeerId parsing without claiming general multihash support."""
     multihash = relay_native_base58btc_decode(value)
-    if multihash is None or len(multihash) > RELAY_NATIVE_PEER_ID_MAX_MULTIHASH_BYTES:
+    if multihash is None:
         return False
     code = relay_native_canonical_varint(multihash, 0)
     if code is None:
@@ -686,7 +702,7 @@ def relay_native_peer_id(value: object) -> bool:
     if length is None:
         return False
     digest = multihash[length[1]:]
-    if length[0] != len(digest):
+    if length[0] != len(digest) or len(digest) > RELAY_NATIVE_PEER_ID_MAX_DIGEST_BYTES:
         return False
     if code[0] == RELAY_NATIVE_PEER_ID_SHA256_CODE:
         return True
@@ -1759,6 +1775,34 @@ def self_test() -> int:
     )
     if endpoint_errors or transport_endpoint != peerless_endpoint:
         print("self-test failed: peer-less native QUIC relay endpoint was rejected", file=sys.stderr)
+        return 1
+    for digest_size in (63, 64):
+        multihash = bytes((RELAY_NATIVE_PEER_ID_SHA256_CODE, digest_size)) + bytes(range(digest_size))
+        peer_id = relay_native_base58btc_encode(multihash)
+        if (
+            relay_native_base58btc_decode(peer_id) != multihash
+            or relay_native_base58btc_encode(multihash) != peer_id
+            or not relay_native_peer_id(peer_id)
+        ):
+            print(
+                f"self-test failed: SHA2-256 PeerId with {digest_size}-byte digest was rejected",
+                file=sys.stderr,
+            )
+            return 1
+    oversized_multihash = (
+        bytes((RELAY_NATIVE_PEER_ID_SHA256_CODE, RELAY_NATIVE_PEER_ID_MAX_DIGEST_BYTES + 1))
+        + bytes(range(RELAY_NATIVE_PEER_ID_MAX_DIGEST_BYTES + 1))
+    )
+    oversized_peer_id = relay_native_base58btc_encode(oversized_multihash)
+    if (
+        len(oversized_peer_id) != RELAY_NATIVE_PEER_ID_MAX_BASE58BTC_LENGTH
+        or relay_native_base58btc_decode(oversized_peer_id) != oversized_multihash
+        or relay_native_peer_id(oversized_peer_id)
+    ):
+        print("self-test failed: SHA2-256 PeerId with 65-byte digest was accepted", file=sys.stderr)
+        return 1
+    if relay_native_base58btc_decode("2" * (RELAY_NATIVE_PEER_ID_MAX_BASE58BTC_LENGTH + 1)) is not None:
+        print("self-test failed: oversized base58btc PeerId text was decoded", file=sys.stderr)
         return 1
     invalid_relay_endpoints = {
         "invalid IPv4": (
