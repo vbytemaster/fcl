@@ -1,5 +1,6 @@
 module;
 
+#include <cstdint>
 #include <limits>
 #include <optional>
 
