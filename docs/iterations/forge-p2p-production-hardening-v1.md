@@ -825,7 +825,14 @@ optional run is not a default-activation claim. An absent or stale provenance is
 `PASS_WITH_DOCUMENTED_LIMITATIONS`. SHA-256 evidence is tamper-evident local
 consistency evidence, not signed remote attestation or malicious-artifact
 unforgeability. The inventory checker remains the paired source-manifest gate;
-PR0 itself remains source-only.
+PR0 itself remains source-only. Every donor acceptance scenario names one
+closed `forge.p2p.evidence.<scenario-id>.v1` contract in the manifest registry.
+The inventory checker requires exact, unique coverage, and the acceptance
+checker has a semantic validator for every registered contract: a status,
+activation or capability label alone cannot establish PASS. Private consumers
+must name the PSK capability except the root PNET scenario; private AutoNAT
+also requires allow-dialback evidence plus an independently hashed deny-egress
+control proving rejection without an external dial.
 
 The manifest's inline-muxer evidence names Go TLS and Noise support plus the
 pinned Rust TLS fixed-ALPN and Noise extension/fallback paths. Its GossipSub

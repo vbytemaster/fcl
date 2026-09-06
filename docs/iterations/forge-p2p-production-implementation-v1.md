@@ -456,16 +456,31 @@ the PSK bytes.
 If a private AutoNAT scenario requires
 `reachability.private_internet_policy`, both commands must additionally pass
 `--private-egress-policy allow-internet`; both results must report that policy
-and `egress_policy_enforced=true`. The checker maps manifest dependencies to
-these concrete command/result proofs rather than trusting enabled-capability
-labels. Native QUIC, native TCP/Yamux and private TCP/Yamux+pnet remain separate
-proofs. An optional capability is tested only through an enabled run and is never
-thereby claimed as default.
+and `egress_policy_enforced=true`, while the dialer reports a successful actual
+dialback and the listener reports its receipt. A separate successful
+`--private-egress-policy deny-external` control must emit a hashed result with
+`status=rejected`, `external_dial_attempted=false` and
+`rejection_reason=private_egress_policy`; it never serializes PSK bytes. The
+checker maps manifest dependencies to these concrete command/result proofs
+rather than trusting enabled-capability labels. Native QUIC, native TCP/Yamux
+and private TCP/Yamux+pnet remain separate proofs. An optional capability is
+tested only through an enabled run and is never thereby claimed as default.
 
 The SHA-256 index is tamper-evident, self-consistent local evidence only. It is
 not a signed remote attestation and does not claim malicious-artifact
 unforgeability; the promotion authority is the CMake-owned execution and its
 immediate validation, not external artifact replay.
+Every donor acceptance scenario has one closed, exact contract name:
+`forge.p2p.evidence.<scenario-id>.v1`. The manifest's `evidence_contracts`
+registry must cover those values exactly, and the paired inventory and
+acceptance checkers reject missing, unknown or reused names. Each registered
+contract maps to a semantic validator; `status=ok`, enabled-capability labels
+or a scenario label alone cannot promote a result. Current runner-backed cases
+validate emitted Ping, Identify, echo, DHT, Rendezvous and
+implementation-specific Relay reservation/open fields. Merely enabling a
+listener feature is not execution evidence. Future Stage 6 cases declare the
+result/control fields their implementation must emit before the scenario can
+become registered.
 `limited` is valid only for a registry-classified limitation and
 emits `PASS_WITH_DOCUMENTED_LIMITATIONS`; all other directions use the schema's
 `passing_status`. Missing, stale or incomplete artifacts are `NOT_RUN`, never a

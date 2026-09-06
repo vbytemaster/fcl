@@ -7,6 +7,8 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+from check_stage6_acceptance import EVIDENCE_CONTRACT_VALIDATORS
+
 
 REQUIRED_FIELDS = {
     "id",
@@ -33,6 +35,13 @@ EVIDENCE_LAYERS = {
     "adversarial",
     "donor_interop",
 }
+
+EVIDENCE_CONTRACT_PREFIX = "forge.p2p.evidence."
+EVIDENCE_CONTRACT_SUFFIX = ".v1"
+
+
+def evidence_contract_for(scenario_id: str) -> str:
+    return f"{EVIDENCE_CONTRACT_PREFIX}{scenario_id}{EVIDENCE_CONTRACT_SUFFIX}"
 
 REQUIRED_OWNERS = {
     "net.p2p.node": {
@@ -936,6 +945,7 @@ def main() -> int:
     interop_registry = capability_inventory.get("interop_acceptance_registry")
     if not isinstance(interop_registry, dict) or set(interop_registry) != {
         "artifact_schema",
+        "evidence_contracts",
         "capabilities",
     }:
         errors.append("donor capabilities: interop_acceptance_registry has invalid shape")
@@ -976,6 +986,21 @@ def main() -> int:
     if artifact_schema != expected_artifact_schema:
         errors.append("donor capabilities: interop acceptance artifact schema must be exact")
 
+    declared_contracts = interop_registry.get("evidence_contracts")
+    if not isinstance(declared_contracts, list) or not declared_contracts or any(
+        not isinstance(contract, str)
+        or not contract
+        or not contract.startswith(EVIDENCE_CONTRACT_PREFIX)
+        or not contract.endswith(EVIDENCE_CONTRACT_SUFFIX)
+        for contract in declared_contracts
+    ) or len(set(declared_contracts)) != len(declared_contracts):
+        errors.append("donor capabilities: evidence contracts must be a unique closed contract registry")
+        declared_contract_set: set[str] = set()
+    else:
+        declared_contract_set = set(declared_contracts)
+    if declared_contract_set != set(EVIDENCE_CONTRACT_VALIDATORS):
+        errors.append("donor capabilities: evidence contracts must match the acceptance checker's closed registry")
+
     try:
         runner_scenario_ids = registered_runner_scenario_ids(
             root / "tests/libp2p_interop/runner.py"
@@ -1009,6 +1034,7 @@ def main() -> int:
         "private_network": {("tcp", "yamux", "pnet")},
     }
     seen_scenario_ids: set[str] = set()
+    seen_evidence_contracts: set[str] = set()
     for capability_id, acceptance in acceptance_capabilities.items():
         capability = capabilities_by_id.get(capability_id, {})
         applicability = capability.get("interop_applicability")
@@ -1050,6 +1076,7 @@ def main() -> int:
                 "transport_stack",
                 "activation",
                 "registration",
+                "evidence_contract",
                 "required_directions",
                 "expected_status",
             }
@@ -1067,10 +1094,24 @@ def main() -> int:
             directions = scenario.get("required_directions")
             expected_status = scenario.get("expected_status")
             required_capabilities = scenario.get("requires_capabilities", [])
+            evidence_contract = scenario.get("evidence_contract")
             if not isinstance(scenario_id, str) or not scenario_id or scenario_id in seen_scenario_ids:
                 errors.append(f"donor capability {capability_id}: acceptance scenario id must be globally unique")
             elif scenario_id:
                 seen_scenario_ids.add(scenario_id)
+            if (
+                not isinstance(scenario_id, str)
+                or not scenario_id
+                or evidence_contract != evidence_contract_for(scenario_id)
+                or evidence_contract not in declared_contract_set
+                or evidence_contract not in EVIDENCE_CONTRACT_VALIDATORS
+                or evidence_contract in seen_evidence_contracts
+            ):
+                errors.append(
+                    f"donor capability {capability_id}: acceptance evidence contract must be exact, registered and unique"
+                )
+            elif isinstance(evidence_contract, str):
+                seen_evidence_contracts.add(evidence_contract)
             stack = tuple(transport_stack) if isinstance(transport_stack, list) else ()
             if (
                 not isinstance(profile, str)
@@ -1150,6 +1191,14 @@ def main() -> int:
                 )
             if (
                 profile == "private_network"
+                and capability_id != "security.private_network_psk"
+                and required_capabilities[:1] != ["security.private_network_psk"]
+            ):
+                errors.append(
+                    f"donor capability {capability_id}: private acceptance must require security.private_network_psk"
+                )
+            if (
+                profile == "private_network"
                 and isinstance(scenario_id, str)
                 and scenario_id.startswith("autonat_")
                 and required_capabilities != [
@@ -1186,6 +1235,9 @@ def main() -> int:
                 or not any(term in limitation_text for term in ("limitation", "fallback", "no official"))
             ):
                 errors.append(f"donor capability {capability_id}: explicit {expected_implementation} limitation is invalid")
+
+    if declared_contract_set != seen_evidence_contracts:
+        errors.append("donor capabilities: evidence contract registry must cover acceptance scenarios exactly")
 
     required_stage_6_scenarios = {
         "protocol.autonat_v1_client": {
