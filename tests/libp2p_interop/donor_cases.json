@@ -77,10 +77,10 @@
       "id": "autonatv2.dial_request_response_nonce",
       "protocol": "AutoNAT v2",
       "source": "donors/libp2p-specs/autonat/autonat-v2.md",
-      "donor": "go-libp2p/p2p/protocol/autonatv2/autonat_test.go TestClientRequest/TestClientDataRequest",
+      "donor": "Go AutoNAT v2 client tests and Rust AutoNAT v2 client behavior",
       "donor_file":
-          [ "donors/libp2p-specs/autonat/autonat-v2.md", "donors/go-libp2p/p2p/protocol/autonatv2/autonat_test.go" ],
-      "donor_case": [ "TestClientRequest", "TestClientDataRequest", "nonce validation" ],
+          [ "donors/libp2p-specs/autonat/autonat-v2.md", "donors/go-libp2p/p2p/protocol/autonatv2/autonat_test.go", "donors/rust-libp2p/protocols/autonat/src/v2/client.rs" ],
+      "donor_case": [ "TestClientRequest", "TestClientDataRequest", "Rust v2 client behavior", "nonce validation" ],
       "mapping_state": "mapped",
       "forge_tests": [
         "test_forge_quic_p2p p2p_libp2p_autonat_v2_codec_covers_nonce_data_and_statuses",
@@ -92,7 +92,8 @@
           "profile": "quic_base",
           "scenario": "autonatv2"
         }
-      ]
+      ],
+      "known_gap": "The registered Forge scenario is a declared interop target, not a current passing Go/Rust result; execute it on the reviewed head before promotion."
     },
     {
       "id": "autonatv2.malformed_and_oversized",
@@ -301,7 +302,9 @@
       "donor": "live fixtures launched by tests/libp2p_interop/runner.py",
       "donor_file": [
         "donors/go-libp2p/p2p/protocol/ping/ping_test.go", "donors/go-libp2p/p2p/protocol/identify/id_test.go",
-        "donors/rust-libp2p/protocols/ping/tests/ping.rs", "donors/rust-libp2p/protocols/identify/tests/smoke.rs"
+        "donors/go-libp2p/p2p/protocol/autonatv2/client.go",
+        "donors/rust-libp2p/protocols/ping/tests/ping.rs", "donors/rust-libp2p/protocols/identify/tests/smoke.rs",
+        "donors/rust-libp2p/protocols/autonat/src/v2/client.rs"
       ],
       "donor_case": [ "Ping", "Identify", "AutoNAT v2", "Relay reserve" ],
       "mapping_state": "mapped",
@@ -326,7 +329,8 @@
           "profile": "quic_base",
           "scenario": "relay_reserve"
         }
-      ]
+      ],
+      "known_gap": "Listed live scenarios are registered optional evidence only, not PASS results. Their exact runner executions remain required for the corresponding support claim."
     },
     {
       "id": "transport.tcp_noise_yamux_direct",

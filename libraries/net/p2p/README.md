@@ -33,16 +33,18 @@ The following surfaces are not production claims yet:
 - Rendezvous and the Forge-specific Peer Exchange feed the same bounded
   topology manager. Donor/live evidence remains classified separately in the
   inventory and must not be inferred from lifecycle activation alone;
-- Ping sampling and AutoNAT are not yet inputs to the managed topology score;
-- observed-address confidence/expiry, mDNS, DNSAddr, private-network `/pnet`,
-  optional UPnP mapping, adaptive Happy Eyeballs and UDP/IPv6 black-hole
-  detection are Stage 6 work;
+- Ping sampling, AutoNAT v1 node-level reachability and AutoNAT v2 address-level
+  evidence are not yet inputs to the managed topology score;
+- observed-address confidence/expiry, public mDNS, private fingerprinted mDNS,
+  DNSAddr, the private TCP/Yamux transport PSK layer, optional native UPnP
+  mapping, adaptive Happy Eyeballs and UDP/IPv6 black-hole detection are Stage 6
+  work;
 - AutoRelay and DCUtR mechanics lack the complete verified discovery and
   reachability feed;
 - the resource model lacks staged connection gating and donor-style memory,
   file descriptor, transient and service scopes;
-- GossipSub donor-consistent scoring, autonomous mesh selection and explicit
-  v1.2/v1.3/Partial Messages negotiation remain incomplete;
+- GossipSub donor-consistent scoring, autonomous mesh selection, v1.2/v1.3 and
+  opt-in Partial Messages implementation remain Stage 6 work;
   transport topology is owned by the managed topology service above.
 
 P2P WebSocket `/ws` and `/wss` multiaddrs remain parseable but unsupported for
@@ -51,9 +53,9 @@ browser-profile capabilities; native TCP/QUIC readiness does not imply them.
 
 The donor-first scope manifest is
 [`p2p_donor_capabilities.json`](../../../tests/libp2p_interop/p2p_donor_capabilities.json).
-It records what the pinned specs, Go and Rust donors provide and whether each
-capability is required, optional, deferred or deliberately excluded for each
-Forge production profile. The machine-readable implementation inventory is
+It records what the pinned specs, Go and Rust donors provide through four
+independent fields: `support_requirement`, `default_activation`,
+`interop_applicability` and `decision`. The machine-readable implementation inventory is
 [`p2p_feature_inventory.json`](../../../tests/libp2p_interop/p2p_feature_inventory.json).
 It contains only current Forge surfaces and evidence. Neither manifest is a
 record of currently executed optional interop tests or a release-readiness
@@ -133,7 +135,11 @@ Current direction: P2P sits above first-class multiaddr, reusable
 `forge_net_transport`, and reusable TCP/STCP/Yamux/QUIC layers. QUIC and
 TCP+TLS/Noise+Yamux direct paths are wired through private direct profiles.
 Future transports must plug into the same multiaddr and transport session
-boundary, not fork P2P core.
+boundary, not fork P2P core. The private profile is TCP/Yamux plus a transport
+PSK layer before the normal secure channel, not a negotiated `/pnet` protocol
+ID. It excludes QUIC, Relay and DCUtR; AutoNAT and UPnP require explicit
+private-profile Internet egress. Public mDNS has Go/Rust interop; fingerprinted
+private mDNS is Go-compatible with a documented Rust limitation.
 
 The direct QUIC profile keeps a bounded, peer-scoped cache of opaque QUIC
 `NEW_TOKEN` values only for authenticated expected peers. Its key includes the
@@ -155,6 +161,12 @@ Network-level behaviors that must not be pushed into plugins:
 - peer discovery and relay discovery;
 - protocol capability negotiation;
 - network limits, backpressure, metrics and shutdown behavior.
+
+Stage 6 must add typed host events and periodic Ping liveness within
+`forge_net_p2p`. `plugins.p2p.node` may map the validated configuration and
+consume narrow local events, but it must not own Ping, observed-address,
+AutoNAT, mDNS, UPnP or topology maintenance loops. Coordinated direct dial and
+port reuse replace the deprecated `/libp2p/simultaneous-connect` negotiation.
 
 Circuit Relay v2 reservations belong to authenticated peer sessions. Renewal
 keeps the same reservation generation and active-circuit accounting; the final

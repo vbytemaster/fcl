@@ -21,8 +21,9 @@ diagnostics and deterministic shutdown. Scope and implementation evidence have
 different machine-readable owners:
 
 - `tests/libp2p_interop/p2p_donor_capabilities.json` is the donor-first scope
-  manifest. It classifies capabilities from the pinned specs, Go and Rust
-  donors as required, optional, deferred or deliberately excluded;
+  manifest. It separately records support requirement, default activation,
+  Go/Rust interop applicability and the explicit roadmap decision for every
+  pinned-donor capability;
 - `tests/libp2p_interop/p2p_feature_inventory.json` records only Forge surfaces
   that exist in the current tree and their actual evidence state.
 
@@ -74,10 +75,13 @@ required manifest entries pass. Browser transports do not silently gate or
 inherit that claim: WebSocket is Stage 9, while WebTransport and WebRTC remain
 explicit future-profile decisions.
 
-`required` and `optional` describe runtime profile policy: optional mechanisms
-such as mDNS and UPnP are implemented but need not be enabled by every
-deployment. `delivery` is independent: every `stage_6` entry, including an
-optional runtime mechanism, must leave that state before Stage 6 closes.
+`support_requirement` says whether a selected profile must support a
+capability. `default_activation` independently says whether a deployment gets
+it by default, requires an explicit opt-in, or cannot activate it. `interop_applicability`
+states whether a Go/Rust run is required, Go-only, intentionally Rust-limited,
+or not applicable. `decision` is the roadmap disposition. Thus an extension
+such as Partial Messages can be required Stage 6 support while still being
+opt-in at runtime; no field is inferred from another.
 
 ## 4. Stage 1: Support Claims And Inventory
 
@@ -108,7 +112,8 @@ optional runtime mechanism, must leave that state before Stage 6 closes.
 
 - source-only inventory check passes;
 - every donor capability belongs to a named profile, references pinned donor
-  sources and has an explicit requirement and delivery disposition;
+  sources and has explicit support requirement, activation, interop and
+  roadmap-decision semantics;
 - every profile scope lock exactly matches its classified capabilities, so
   removing or adding an entry requires an explicit baseline update;
 - the donor capability manifest, donor fixture matrix and implementation
@@ -349,37 +354,59 @@ Stage 6 closes every required native/private-host gap discovered by the
 donor-first manifest except WebSocket. It is delivered as focused PRs rather
 than one transport monolith:
 
-1. `forge-p2p-reachability-v1`: observed-address confidence and expiry,
-   separate AutoNAT v1/v2 client gates, opt-in bounded service roles, effective
-   reachability, periodic Ping liveness and typed host-state events;
-2. `forge-p2p-private-network-v1`: standard `/pnet` PSK protection and the
-   private-network profile;
-3. `forge-p2p-mdns-v1`: optional zero-configuration LAN discovery, including
-   the fingerprinted private-network service namespace;
-4. `forge-p2p-address-resolution-v1`: `/dnsaddr`, bounded recursive resolution,
-   Happy Eyeballs and adaptive UDP/IPv6 black-hole suppression;
-5. `forge-p2p-nat-mapping-v1`: optional UPnP mapping ownership, renewal, loss
-   and confirmed external-address publication;
-6. `forge-p2p-autorelay-v1`: verified relay candidates, bounded reservations,
-   renewal/replacement and Identify Push of circuit addresses; the public relay
-   service remains a separately configured, bounded role;
-7. `forge-p2p-path-management-v1`: one per-peer DCUtR/simultaneous-open state,
-   direct upgrade, backoff, cancellation and relay fallback;
-8. `forge-p2p-host-protection-v1`: staged connection gater plus memory, file
+1. `forge-p2p-stage6-roadmap-v1`: freeze the four-field manifest, donor evidence,
+   profile locks, exact PR ownership and acceptance matrix; no runtime code;
+2. `forge-chrono-algorithms-v1`: add only reusable `forge_chrono` algorithms for
+   deadlines, expiry, backoff and jitter. It owns no clock, scheduler, thread or
+   P2P lifecycle;
+3. `forge-p2p-host-protection-v1`: staged connection gater plus memory, file
    descriptor, transient and service resource scopes;
-9. `forge-p2p-gossipsub-production-v1`: donor-consistent scoring, mesh repair,
-   v1.0 fallback proof, v1.2 `IDONTWANT`, v1.3 extension negotiation and an
-   explicit negotiated decision for Partial Messages.
+4. `forge-crypto-xsalsa20-v1`: add the crypto boundary required by private
+   transport protection, with pinned `libsodium` discovery and tests;
+5. `forge-p2p-private-network-v1`: TCP/Yamux plus a transport PSK layer before
+   the normal secure channel, with no `/pnet` protocol ID, QUIC, Relay or DCUtR;
+   AutoNAT and UPnP require one explicit Internet-egress policy;
+6. `forge-p2p-address-resolution-net-dns-v1`: `/dnsaddr`, bounded recursive
+   resolution, Happy Eyeballs and adaptive UDP/IPv6 black-hole suppression over
+   the `net_dns` boundary; this PR requires pinned `c-ares` discovery and tests;
+7. `forge-p2p-reachability-events-v1`: observed-address confidence and expiry,
+   a node-level AutoNAT v1 lifecycle, address-level AutoNAT v2 evidence,
+   opt-in bounded service roles, effective reachability, periodic Ping liveness
+   and typed host-state events;
+8. `forge-p2p-mdns-v1`: optional public mDNS with Go/Rust interop, plus the
+   fingerprinted private-network service namespace with its documented Rust
+   limitation;
+9. `forge-p2p-upnp-v1`: optional native UPnP mapping ownership, renewal, loss
+   and confirmed external-address publication; private profiles use it only
+   through the explicit Internet-egress policy;
+10. `forge-p2p-autorelay-v1`: verified relay candidates, bounded reservations,
+    renewal/replacement and Identify Push of circuit addresses; the public relay
+    service remains a separately configured, bounded role;
+11. `forge-p2p-path-inlined-muxer-v1`: one per-peer DCUtR/coordinated-dial state,
+    modern port reuse, direct upgrade, backoff, cancellation, relay fallback and
+    inlined muxer negotiation; `/libp2p/simultaneous-connect` stays excluded;
+12. `forge-p2p-gossipsub-scoring-v1`: donor-consistent scoring, mesh repair and
+    v1.0 fallback proof;
+13. `forge-p2p-gossipsub-extensions-v1`: v1.2 `IDONTWANT`, v1.3 extension
+    negotiation and opt-in Partial Messages with Go/Rust interop evidence.
 
 The existing DHT, topology and transport services are reused. mDNS, DNSAddr,
 AutoNAT, AutoRelay and path upgrades feed the same topology manager; they do
 not create parallel discovery or dialing loops. Typed events report state
 changes without turning diagnostics into a control API.
 
+The runtime PRs use `create-library` ownership. They may establish raw-node
+typed options, but `plugins.p2p.node` schema and configuration mapping wait for
+Stage 7, after those contracts are stable. `c-ares` and `libsodium` are explicit
+build/test prerequisites of their named PRs, not incidental transitive
+dependencies.
+
 Stage 6 is complete only when the manifest has no `stage_6` entry,
 each delivered capability has an implementation feature/evidence mapping, and
 live Go/Rust tests cover every standard protocol or negotiation behavior that
-the profile advertises.
+the profile advertises. Registered donor fixtures are test declarations, not
+passing evidence, until their exact runner invocation has completed on the
+reviewed head.
 
 ### Stage 7: Official plugin and operational surface
 

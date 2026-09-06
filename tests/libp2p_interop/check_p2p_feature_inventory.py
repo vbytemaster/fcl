@@ -313,19 +313,48 @@ def main() -> int:
     if capability_inventory.get("donor_matrix") != donor_path.name:
         errors.append("donor capabilities: donor_matrix must reference the donor case matrix")
 
-    expected_requirements = {"required", "optional", "deferred", "excluded"}
-    requirement_values = capability_inventory.get("allowed_requirements", [])
-    if not isinstance(requirement_values, list) or any(
-        not isinstance(value, str) for value in requirement_values
+    expected_support_requirements = {"required", "optional", "deferred", "excluded"}
+    support_requirement_values = capability_inventory.get("allowed_support_requirements", [])
+    if not isinstance(support_requirement_values, list) or any(
+        not isinstance(value, str) for value in support_requirement_values
     ):
-        errors.append("donor capabilities: allowed_requirements must be an array of strings")
-        allowed_requirements: set[str] = set()
+        errors.append("donor capabilities: allowed_support_requirements must be an array of strings")
+        allowed_support_requirements: set[str] = set()
     else:
-        allowed_requirements = set(requirement_values)
-    if allowed_requirements != expected_requirements:
-        errors.append("donor capabilities: allowed_requirements must match the accepted vocabulary")
+        allowed_support_requirements = set(support_requirement_values)
+    if allowed_support_requirements != expected_support_requirements:
+        errors.append("donor capabilities: allowed_support_requirements must match the accepted vocabulary")
 
-    expected_deliveries = {
+    expected_default_activations = {"enabled", "opt_in", "not_applicable"}
+    default_activation_values = capability_inventory.get("allowed_default_activations", [])
+    if not isinstance(default_activation_values, list) or any(
+        not isinstance(value, str) for value in default_activation_values
+    ):
+        errors.append("donor capabilities: allowed_default_activations must be an array of strings")
+        allowed_default_activations: set[str] = set()
+    else:
+        allowed_default_activations = set(default_activation_values)
+    if allowed_default_activations != expected_default_activations:
+        errors.append("donor capabilities: allowed_default_activations must match the accepted vocabulary")
+
+    expected_interop_applicability = {
+        "go_and_rust",
+        "go_only",
+        "go_only_rust_limited",
+        "not_applicable",
+    }
+    interop_applicability_values = capability_inventory.get("allowed_interop_applicability", [])
+    if not isinstance(interop_applicability_values, list) or any(
+        not isinstance(value, str) for value in interop_applicability_values
+    ):
+        errors.append("donor capabilities: allowed_interop_applicability must be an array of strings")
+        allowed_interop_applicability: set[str] = set()
+    else:
+        allowed_interop_applicability = set(interop_applicability_values)
+    if allowed_interop_applicability != expected_interop_applicability:
+        errors.append("donor capabilities: allowed_interop_applicability must match the accepted vocabulary")
+
+    expected_decisions = {
         "current",
         "stage_6",
         "stage_7",
@@ -336,16 +365,16 @@ def main() -> int:
         "application_owned",
         "external_component",
     }
-    delivery_values = capability_inventory.get("allowed_deliveries", [])
-    if not isinstance(delivery_values, list) or any(
-        not isinstance(value, str) for value in delivery_values
+    decision_values = capability_inventory.get("allowed_decisions", [])
+    if not isinstance(decision_values, list) or any(
+        not isinstance(value, str) for value in decision_values
     ):
-        errors.append("donor capabilities: allowed_deliveries must be an array of strings")
-        allowed_deliveries: set[str] = set()
+        errors.append("donor capabilities: allowed_decisions must be an array of strings")
+        allowed_decisions: set[str] = set()
     else:
-        allowed_deliveries = set(delivery_values)
-    if allowed_deliveries != expected_deliveries:
-        errors.append("donor capabilities: allowed_deliveries must match the accepted roadmap vocabulary")
+        allowed_decisions = set(decision_values)
+    if allowed_decisions != expected_decisions:
+        errors.append("donor capabilities: allowed_decisions must match the accepted roadmap vocabulary")
 
     profiles = capability_inventory.get("profiles", {})
     if not isinstance(profiles, dict) or not profiles:
@@ -393,8 +422,10 @@ def main() -> int:
         "id",
         "category",
         "profiles",
-        "requirement",
-        "delivery",
+        "support_requirement",
+        "default_activation",
+        "interop_applicability",
+        "decision",
         "forge_feature_ids",
         "donor_sources",
         "rationale",
@@ -428,8 +459,10 @@ def main() -> int:
         category = capability.get("category")
         rationale = capability.get("rationale")
         origin = capability.get("origin", "libp2p")
-        requirement = capability.get("requirement")
-        delivery = capability.get("delivery")
+        support_requirement = capability.get("support_requirement")
+        default_activation = capability.get("default_activation")
+        interop_applicability = capability.get("interop_applicability")
+        decision = capability.get("decision")
         capability_profiles = capability.get("profiles", [])
         feature_mappings = capability.get("forge_feature_ids", [])
         donor_sources = capability.get("donor_sources", [])
@@ -439,10 +472,17 @@ def main() -> int:
             errors.append(f"donor capability {capability_id}: rationale must be a non-empty string")
         if origin not in {"libp2p", "forge_extension"}:
             errors.append(f"donor capability {capability_id}: unknown origin {origin!r}")
-        if requirement not in allowed_requirements:
-            errors.append(f"donor capability {capability_id}: unknown requirement {requirement!r}")
-        if delivery not in allowed_deliveries:
-            errors.append(f"donor capability {capability_id}: unknown delivery {delivery!r}")
+        if support_requirement not in allowed_support_requirements:
+            errors.append(f"donor capability {capability_id}: unknown support_requirement {support_requirement!r}")
+        if default_activation not in allowed_default_activations:
+            errors.append(f"donor capability {capability_id}: unknown default_activation {default_activation!r}")
+        if interop_applicability not in allowed_interop_applicability:
+            errors.append(
+                f"donor capability {capability_id}: unknown interop_applicability "
+                f"{interop_applicability!r}"
+            )
+        if decision not in allowed_decisions:
+            errors.append(f"donor capability {capability_id}: unknown decision {decision!r}")
         if not isinstance(capability_profiles, list) or not capability_profiles or any(
             not isinstance(profile, str) or profile not in profiles for profile in capability_profiles
         ):
@@ -504,28 +544,200 @@ def main() -> int:
                     f"donor capability {capability_id}: Forge source does not exist: {source}"
                 )
 
-        if delivery == "current" and not feature_mappings:
-            errors.append(f"donor capability {capability_id}: current delivery needs a Forge feature mapping")
-        if delivery in {"stage_6", "stage_7", "stage_9"}:
+        if decision == "current" and not feature_mappings:
+            errors.append(f"donor capability {capability_id}: current decision needs a Forge feature mapping")
+        if decision in {"stage_6", "stage_7", "stage_9"}:
             branch = capability.get("planned_branch")
             if not isinstance(branch, str) or not branch.startswith("forge-p2p-"):
-                errors.append(f"donor capability {capability_id}: planned delivery needs a P2P branch")
+                errors.append(f"donor capability {capability_id}: planned decision needs a P2P branch")
         elif "planned_branch" in capability:
-            errors.append(f"donor capability {capability_id}: planned_branch is only valid for a staged delivery")
-        if requirement == "deferred" and delivery not in {"stage_9", "future_profile"}:
-            errors.append(f"donor capability {capability_id}: deferred requirement needs deferred delivery")
-        if requirement == "excluded" and delivery not in {
+            errors.append(f"donor capability {capability_id}: planned_branch is only valid for a staged decision")
+        if support_requirement == "deferred" and decision not in {"stage_9", "future_profile"}:
+            errors.append(f"donor capability {capability_id}: deferred support_requirement needs deferred decision")
+        if support_requirement == "excluded" and decision not in {
             "legacy_rejected",
             "test_only",
             "application_owned",
         }:
-            errors.append(f"donor capability {capability_id}: excluded requirement has active delivery")
-        if requirement in {"required", "optional"} and delivery in {
+            errors.append(f"donor capability {capability_id}: excluded support_requirement has active decision")
+        if support_requirement in {"required", "optional"} and decision in {
             "legacy_rejected",
             "test_only",
             "application_owned",
         }:
-            errors.append(f"donor capability {capability_id}: active requirement has excluded delivery")
+            errors.append(f"donor capability {capability_id}: active support_requirement has excluded decision")
+        if support_requirement in {"deferred", "excluded"} and default_activation != "not_applicable":
+            errors.append(
+                f"donor capability {capability_id}: inactive support_requirement cannot have a default activation"
+            )
+        if default_activation == "not_applicable" and support_requirement in {"required", "optional"}:
+            errors.append(
+                f"donor capability {capability_id}: active support_requirement needs enabled or opt_in activation"
+            )
+        if interop_applicability != "not_applicable" and support_requirement == "excluded":
+            errors.append(
+                f"donor capability {capability_id}: excluded support cannot claim donor interop applicability"
+            )
+        if interop_applicability == "go_only_rust_limited" and "Rust" not in rationale:
+            errors.append(
+                f"donor capability {capability_id}: Rust limitation must be explicit in rationale"
+            )
+
+    private_capabilities = classified_profile_capabilities.get("private_network", set())
+    forbidden_private_capabilities = {
+        "transport.quic_v1",
+        "relay.circuit_v2_client_transport",
+        "relay.autorelay_lifecycle",
+        "relay.circuit_v2_service",
+        "relay.dcutr",
+    }
+    if forbidden_private_capabilities & private_capabilities:
+        errors.append(
+            "donor capabilities: private_network must exclude QUIC, Relay and DCUtR "
+            f"{sorted(forbidden_private_capabilities & private_capabilities)}"
+        )
+    if "security.private_network_psk" not in private_capabilities:
+        errors.append("donor capabilities: private_network must include the transport PSK layer")
+    if "reachability.private_internet_policy" not in private_capabilities:
+        errors.append("donor capabilities: private_network must gate AutoNAT and UPnP behind Internet policy")
+    if "connections.coordinated_dial_port_reuse" not in private_capabilities:
+        errors.append("donor capabilities: private_network must retain modern coordinated dialing")
+    if "connections.simultaneous_connect_legacy" in private_capabilities:
+        errors.append("donor capabilities: private_network must not negotiate legacy simultaneous-connect")
+
+    required_stage_6_opt_ins = {
+        "connections.inlined_muxer_negotiation",
+        "pubsub.partial_messages",
+    }
+    for capability in capabilities:
+        if not isinstance(capability, dict) or capability.get("id") not in required_stage_6_opt_ins:
+            continue
+        if (
+            capability.get("support_requirement") != "required"
+            or capability.get("default_activation") != "opt_in"
+            or capability.get("decision") != "stage_6"
+        ):
+            errors.append(
+                f"donor capability {capability.get('id')}: Stage 6 support must be required and opt_in"
+            )
+
+    required_semantics = {
+        "reachability.autonat_v1_node_lifecycle": (
+            {"native", "private_network"}, "required", "opt_in", "go_and_rust", "stage_6"
+        ),
+        "reachability.autonat_v2_address_lifecycle": (
+            {"native", "private_network"}, "required", "opt_in", "go_and_rust", "stage_6"
+        ),
+        "reachability.private_internet_policy": (
+            {"private_network"}, "required", "opt_in", "not_applicable", "stage_6"
+        ),
+        "discovery.mdns_public": (
+            {"native"}, "optional", "opt_in", "go_and_rust", "stage_6"
+        ),
+        "discovery.mdns_private_fingerprinted": (
+            {"private_network"}, "optional", "opt_in", "go_only_rust_limited", "stage_6"
+        ),
+        "security.private_network_psk": (
+            {"private_network"}, "required", "enabled", "go_and_rust", "stage_6"
+        ),
+        "connections.coordinated_dial_port_reuse": (
+            {"native", "private_network"}, "required", "enabled", "go_and_rust", "stage_6"
+        ),
+        "connections.simultaneous_connect_legacy": (
+            {"legacy"}, "excluded", "not_applicable", "not_applicable", "legacy_rejected"
+        ),
+        "protocol.autonat_v1_client": (
+            {"native", "private_network"}, "required", "opt_in", "go_and_rust", "stage_6"
+        ),
+        "protocol.autonat_v1_service": (
+            {"native", "private_network"}, "optional", "opt_in", "go_and_rust", "stage_6"
+        ),
+    }
+    capabilities_by_id = {
+        capability.get("id"): capability
+        for capability in capabilities
+        if isinstance(capability, dict) and isinstance(capability.get("id"), str)
+    }
+    for capability_id, expected in required_semantics.items():
+        capability = capabilities_by_id.get(capability_id)
+        if capability is None:
+            errors.append(f"donor capabilities: required Stage 6 classification is missing {capability_id}")
+            continue
+        expected_profiles, expected_support, expected_activation, expected_interop, expected_decision = expected
+        actual = (
+            set(capability.get("profiles", [])),
+            capability.get("support_requirement"),
+            capability.get("default_activation"),
+            capability.get("interop_applicability"),
+            capability.get("decision"),
+        )
+        if actual != expected:
+            errors.append(
+                f"donor capability {capability_id}: semantic classification differs from the Stage 6 baseline"
+            )
+
+    symmetric_interop_ids = {
+        "protocol.ping",
+        "reachability.autonat_v1_node_lifecycle",
+        "protocol.autonat_v1_client",
+        "protocol.autonat_v1_service",
+        "reachability.autonat_v2_address_lifecycle",
+        "protocol.autonat_v2_client",
+        "protocol.autonat_v2_service",
+        "discovery.mdns_public",
+        "connections.coordinated_dial_port_reuse",
+        "connections.inlined_muxer_negotiation",
+        "pubsub.partial_messages",
+        "security.private_network_psk",
+    }
+    for capability_id in symmetric_interop_ids:
+        capability = capabilities_by_id.get(capability_id)
+        if capability is None:
+            errors.append(f"donor capabilities: symmetric interop classification is missing {capability_id}")
+            continue
+        sources = capability.get("donor_sources", [])
+        if not isinstance(sources, list) or not any(
+            isinstance(source, str) and source.startswith("donors/go-") for source in sources
+        ) or not any(
+            isinstance(source, str) and source.startswith("donors/rust-") for source in sources
+        ):
+            errors.append(
+                f"donor capability {capability_id}: Go and Rust donor evidence must both be pinned"
+            )
+
+    host_local_policy_ids = {
+        "reachability.private_internet_policy",
+        "security.connection_gater",
+        "resource.memory_fd_transient_service_scopes",
+        "dialing.happy_eyeballs",
+        "dialing.udp_ipv6_black_hole_detection",
+        "events.host_state",
+        "nat.upnp_mapping",
+        "reachability.observed_address_manager",
+    }
+    for capability_id in host_local_policy_ids:
+        capability = capabilities_by_id.get(capability_id)
+        if capability is None:
+            errors.append(f"donor capabilities: host-local policy classification is missing {capability_id}")
+        elif capability.get("interop_applicability") != "not_applicable":
+            errors.append(
+                f"donor capability {capability_id}: host-local orchestration cannot claim bilateral interop"
+            )
+
+    gossipsub_branch_owners = {
+        "pubsub.gossipsub_v1_0_v1_1": "forge-p2p-gossipsub-scoring-v1",
+        "pubsub.gossipsub_v1_2": "forge-p2p-gossipsub-extensions-v1",
+        "pubsub.gossipsub_v1_3": "forge-p2p-gossipsub-extensions-v1",
+        "pubsub.partial_messages": "forge-p2p-gossipsub-extensions-v1",
+    }
+    for capability_id, expected_branch in gossipsub_branch_owners.items():
+        capability = capabilities_by_id.get(capability_id)
+        if capability is None:
+            errors.append(f"donor capabilities: GossipSub branch owner is missing {capability_id}")
+        elif capability.get("planned_branch") != expected_branch:
+            errors.append(
+                f"donor capability {capability_id}: expected GossipSub owner {expected_branch}"
+            )
 
     missing_profiles = set(profiles) - set(profile_coverage)
     if missing_profiles:
