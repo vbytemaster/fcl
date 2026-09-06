@@ -266,7 +266,7 @@
         "test_forge_quic_p2p p2p_node_peer_protection_api_is_tagged_and_additive",
         "test_forge_quic_p2p p2p_connection_manager_prunes_unprotected_sessions_and_keeps_protected_peer",
         "test_forge_quic_p2p p2p_connection_manager_rejects_when_all_sessions_are_protected",
-        "test_forge_quic_p2p p2p_connection_manager_low_hard_session_limit_is_independent_of_topology_watermarks",
+        "test_forge_quic_p2p p2p_connection_manager_low_active_limit_is_independent_of_topology_watermarks",
         "test_forge_quic_p2p p2p_connection_manager_allows_bounded_parallel_sessions_per_peer",
         "test_forge_quic_p2p p2p_connection_manager_enforces_sessions_per_peer_limit",
         "test_forge_quic_p2p p2p_connection_manager_rejects_pending_outbound_limit_without_killing_first_attempt",
