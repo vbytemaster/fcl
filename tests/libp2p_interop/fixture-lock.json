@@ -39,13 +39,13 @@
     "check_fixture_lock.py": "1e9f0229bc3fc13e99724cb7e6c8cafae5b257e14a86128dcee670c7fd8dd0c7",
     "forge_interop_fixture.cpp": "d94e7b5a32db8e88856b759160aca8a563b220aa1a5490719e4e6b9cada568f5",
     "provenance.py": "c80cef5a71c407754598dd9fff77af1762d8174582df3484ed2726273f82d354",
-    "runner.py": "9a234dd04b7cf0b194a2462b5949ea387d46590eac45f636be5023837aee0dbb"
+    "runner.py": "543d897a87d6a45024d4ca63d947036fa175ff2d0a30f6282568a13b4483200a"
   },
   "evidence_sources": {
     "donor_cases.json": "ade911de5c4b04ac15da3d122e2b46a05f7e4630a56026ffaf360c1f708750ec"
   },
   "regression_sources": {
-    "test_provenance.py": "e88a0495a7f6c02e523b637877105db68bdc046a910cec15c052295b37ce7ed7"
+    "test_provenance.py": "1c71bfb0d492f091d0a276ed15a22af3fb2ff5ec8abe48297b513bd91c026ff7"
   },
   "dependency_graphs": {
     "go": {

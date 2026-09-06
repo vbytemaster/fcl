@@ -9,6 +9,10 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 
 from provenance import worktree_identity
+from check_p2p_feature_inventory import (
+    registered_runner_acceptance_pairs,
+    registered_runner_pair_errors,
+)
 from runner import (
     SUPPORTED_FORGE_BUILD_PROFILES,
     forge_fixture_requirements,
@@ -192,6 +196,21 @@ class InteropCMakeConfigurationTest(unittest.TestCase):
 
 
 class InteropRunnerResultTest(unittest.TestCase):
+    def test_registered_acceptance_pairs_require_tcp_identify(self) -> None:
+        runner_pairs = registered_runner_acceptance_pairs(Path(__file__).with_name("runner.py"))
+        identify_pair = ("tcp_noise/identify", "identify_native_tcp_yamux")
+        self.assertIn(identify_pair, runner_pairs)
+
+        omitted_pair_errors = registered_runner_pair_errors(runner_pairs - {identify_pair}, runner_pairs)
+
+        self.assertTrue(
+            any(
+                "missing" in error
+                and "tcp_noise/identify -> identify_native_tcp_yamux" in error
+                for error in omitted_pair_errors
+            )
+        )
+
     def test_run_dial_rejects_non_ok_fixture_result(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

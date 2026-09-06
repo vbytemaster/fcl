@@ -150,28 +150,76 @@ def donor_case_text(case: object) -> str:
     return " ".join(values).lower()
 
 
-def registered_runner_scenario_ids(runner_path: Path) -> set[str]:
+def registered_runner_acceptance_pairs(runner_path: Path) -> set[tuple[str, str]]:
     tree = ast.parse(runner_path.read_text(), filename=str(runner_path))
+    literal_maps: dict[str, object] = {}
     for statement in tree.body:
         if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
             continue
         target = statement.targets[0]
-        if not isinstance(target, ast.Name) or target.id != "LIVE_SCENARIO_PROFILES":
+        if not isinstance(target, ast.Name) or target.id not in {
+            "LIVE_SCENARIO_PROFILES",
+            "CURRENT_ACCEPTANCE_SCENARIOS",
+        }:
             continue
-        value = ast.literal_eval(statement.value)
-        if not isinstance(value, dict) or any(
-            not isinstance(profile, str)
-            or not isinstance(scenarios, tuple)
-            or any(not isinstance(scenario, str) or not scenario for scenario in scenarios)
-            for profile, scenarios in value.items()
-        ):
-            raise ValueError("LIVE_SCENARIO_PROFILES must be a literal profile-to-scenarios map")
-        return {
-            f"{profile}/{scenario}"
-            for profile, scenarios in value.items()
-            for scenario in scenarios
-        }
-    raise ValueError("runner does not declare LIVE_SCENARIO_PROFILES")
+        if target.id in literal_maps:
+            raise ValueError(f"runner declares {target.id} more than once")
+        literal_maps[target.id] = ast.literal_eval(statement.value)
+
+    profiles = literal_maps.get("LIVE_SCENARIO_PROFILES")
+    if not isinstance(profiles, dict) or any(
+        not isinstance(profile, str)
+        or not isinstance(scenarios, tuple)
+        or any(not isinstance(scenario, str) or not scenario for scenario in scenarios)
+        for profile, scenarios in profiles.items()
+    ):
+        raise ValueError("LIVE_SCENARIO_PROFILES must be a literal profile-to-scenarios map")
+    runner_scenario_ids = {
+        f"{profile}/{scenario}"
+        for profile, scenarios in profiles.items()
+        for scenario in scenarios
+    }
+
+    acceptance_scenarios = literal_maps.get("CURRENT_ACCEPTANCE_SCENARIOS")
+    if not isinstance(acceptance_scenarios, dict) or any(
+        not isinstance(runner_scenario_id, str)
+        or runner_scenario_id not in runner_scenario_ids
+        or not isinstance(scenario_ids, tuple)
+        or not scenario_ids
+        or any(not isinstance(scenario_id, str) or not scenario_id for scenario_id in scenario_ids)
+        or len(set(scenario_ids)) != len(scenario_ids)
+        for runner_scenario_id, scenario_ids in acceptance_scenarios.items()
+    ):
+        raise ValueError(
+            "CURRENT_ACCEPTANCE_SCENARIOS must be a literal, nonempty runner-scenario-to-acceptance-scenarios map"
+        )
+    return {
+        (runner_scenario_id, scenario_id)
+        for runner_scenario_id, scenario_ids in acceptance_scenarios.items()
+        for scenario_id in scenario_ids
+    }
+
+
+def registered_runner_pair_errors(
+    manifest_pairs: set[tuple[str, str]], runner_pairs: set[tuple[str, str]]
+) -> list[str]:
+    errors: list[str] = []
+    missing = sorted(runner_pairs - manifest_pairs)
+    unexpected = sorted(manifest_pairs - runner_pairs)
+    if missing:
+        errors.append(
+            "donor capabilities: registered manifest pairs are missing from the acceptance registry: "
+            + ", ".join(f"{runner_scenario_id} -> {scenario_id}" for runner_scenario_id, scenario_id in missing)
+        )
+    if unexpected:
+        errors.append(
+            "donor capabilities: registered manifest pairs are not emitted by runner.py CURRENT_ACCEPTANCE_SCENARIOS: "
+            + ", ".join(
+                f"{runner_scenario_id} -> {scenario_id}"
+                for runner_scenario_id, scenario_id in unexpected
+            )
+        )
+    return errors
 
 
 def public_surface_snapshot(
@@ -1000,12 +1048,12 @@ def main() -> int:
         declared_contract_set = set(declared_contracts)
 
     try:
-        runner_scenario_ids = registered_runner_scenario_ids(
+        runner_emitted_acceptance_pairs = registered_runner_acceptance_pairs(
             root / "tests/libp2p_interop/runner.py"
         )
     except (OSError, SyntaxError, ValueError) as error:
-        errors.append(f"donor capabilities: cannot read registered runner scenarios: {error}")
-        runner_scenario_ids = set()
+        errors.append(f"donor capabilities: cannot read registered runner acceptance scenarios: {error}")
+        runner_emitted_acceptance_pairs = set()
 
     interop_capabilities = {
         capability_id
@@ -1023,6 +1071,7 @@ def main() -> int:
         "go_only_rust_limited": {"forge_to_go", "go_to_forge"},
         "rust_only_go_limited": {"forge_to_rust", "rust_to_forge"},
     }
+    manifest_registered_pairs: set[tuple[str, str]] = set()
     limitation_implementation = {
         "go_only_rust_limited": "rust",
         "rust_only_go_limited": "go",
@@ -1148,13 +1197,19 @@ def main() -> int:
                 has_primary_scenario = True
             if registration == "registered":
                 has_registered_scenario = True
+                if isinstance(runner_scenario_id, str) and isinstance(scenario_id, str):
+                    manifest_registered_pairs.add((runner_scenario_id, scenario_id))
                 if capability.get("decision") != "current":
                     errors.append(
                         f"donor capability {capability_id}: staged scenario cannot claim current runner registration"
                     )
                 source_case_id = scenario.get("source_case_id")
                 source_case = donor_by_id.get(source_case_id)
-                if not isinstance(runner_scenario_id, str) or runner_scenario_id not in runner_scenario_ids:
+                if (
+                    not isinstance(runner_scenario_id, str)
+                    or not isinstance(scenario_id, str)
+                    or (runner_scenario_id, scenario_id) not in runner_emitted_acceptance_pairs
+                ):
                     errors.append(f"donor capability {capability_id}: current scenario is not registered by runner.py")
                 if not isinstance(source_case_id, str) or not has_registered_live_interop(source_case):
                     errors.append(f"donor capability {capability_id}: current scenario lacks a registered donor case")
@@ -1240,6 +1295,10 @@ def main() -> int:
                 or not any(term in limitation_text for term in ("limitation", "fallback", "no official"))
             ):
                 errors.append(f"donor capability {capability_id}: explicit {expected_implementation} limitation is invalid")
+
+    errors.extend(
+        registered_runner_pair_errors(manifest_registered_pairs, runner_emitted_acceptance_pairs)
+    )
 
     if declared_contract_set != seen_evidence_contracts:
         errors.append("donor capabilities: evidence contract registry must cover acceptance scenarios exactly")

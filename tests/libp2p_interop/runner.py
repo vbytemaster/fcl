@@ -47,7 +47,7 @@ CURRENT_ACCEPTANCE_SCENARIOS = {
     "quic_base/identify": ("quic_v1_transport", "identify"),
     "quic_base/relay_reserve": ("relay_v2_client_transport",),
     "tcp_noise/ping": ("ping_native_tcp_yamux",),
-    "tcp_noise/identify": ("multistream_select", "noise_identity"),
+    "tcp_noise/identify": ("multistream_select", "noise_identity", "identify_native_tcp_yamux"),
     "tcp_noise/echo": ("tcp_yamux",),
     "tcp_tls/identify": ("tls_identity",),
     "quic_dht/dht_provide_find_provider": ("kademlia_amino",),
