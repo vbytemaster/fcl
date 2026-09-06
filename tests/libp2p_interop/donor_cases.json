@@ -96,6 +96,20 @@
       "known_gap": "The registered Forge scenario is a declared interop target, not a current passing Go/Rust result; execute it on the reviewed head before promotion."
     },
     {
+      "id": "mdns.private_fingerprinted_rust_limitation",
+      "protocol": "Private mDNS",
+      "source": "donors/go-libp2p/p2p/discovery/mdns/mdns.go and donors/rust-libp2p/protocols/mdns/src/lib.rs",
+      "donor": "Go private fingerprinted mDNS service naming and Rust standard mDNS behavior",
+      "donor_file": [
+        "donors/go-libp2p/p2p/discovery/mdns/mdns.go",
+        "donors/rust-libp2p/protocols/mdns/src/lib.rs"
+      ],
+      "donor_case": [ "Go fingerprinted service name", "Rust standard mDNS service limitation" ],
+      "mapping_state": "unsupported",
+      "forge_tests": [],
+      "known_gap": "The pinned Rust donor has no equivalent private fingerprinted service configuration. This is a limitation case, not a registered bilateral live result."
+    },
+    {
       "id": "autonatv2.malformed_and_oversized",
       "protocol": "AutoNAT v2",
       "source": "donors/libp2p-specs/autonat/autonat-v2.md",
@@ -388,7 +402,8 @@
       "donor_case": [
         "TLS security negotiation", "libp2p certificate extension verification",
         "missing certificate identity extension rejection", "Peer ID verification", "ALPN Yamux negotiation",
-        "fallback post-TLS mux negotiation", "Ping over TCP TLS", "Identify over TCP TLS"
+        "Forge-Go TLS/Noise inlined muxer target", "Forge-Rust fallback post-TLS mux negotiation",
+        "Ping over TCP TLS", "Identify over TCP TLS"
       ],
       "mapping_state": "mapped",
       "forge_tests": [
@@ -416,7 +431,7 @@
           "scenario": "echo"
         }
       ],
-      "known_gap": "`/ws` and `/wss` have parse/store coverage only; no dial/listen live scenario is claimed."
+      "known_gap": "Forge-Go inline muxer is a registered target; the pinned Rust donor and Forge-Rust path use fallback post-TLS mux negotiation. No registration is a PASS without the exact-head artifact. `/ws` and `/wss` have parse/store coverage only."
     },
     {
       "id": "p2p.host_multi_transport_orchestration",

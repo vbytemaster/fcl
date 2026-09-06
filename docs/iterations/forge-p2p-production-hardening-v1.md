@@ -216,14 +216,14 @@ The first donor-first audit found these missing or incomplete host mechanisms:
 | Capability | Why it matters | Delivery |
 |---|---|---|
 | mDNS | Public mDNS has Go/Rust interop; private fingerprinted mDNS is Go-compatible and carries an explicit Rust limitation. | Stage 6, `forge-p2p-mdns-v1` |
-| DNSAddr | Resolves TXT records containing complete peer multiaddrs; ordinary DNS host lookup is not equivalent. | Stage 6, `forge-p2p-address-resolution-net-dns-v1` |
-| Observed-address manager | Requires independent observations, confidence and expiry before publishing an external address. | Stage 6, `forge-p2p-reachability-events-v1` |
-| UPnP | Optionally owns native NAT mappings and their renewal/loss lifecycle; private use requires explicit Internet egress. | Stage 6, `forge-p2p-upnp-v1` |
+| DNSAddr | Resolves TXT records containing complete peer multiaddrs; ordinary DNS host lookup is not equivalent. | Stage 6, `forge-p2p-address-resolution-v1` |
+| Observed-address manager | Requires independent observations, confidence and expiry before publishing an external address. | Stage 6, `forge-p2p-reachability-v1` |
+| UPnP | Optionally owns native NAT mappings and their renewal/loss lifecycle; private use requires explicit Internet egress. | Stage 6, `forge-p2p-nat-mapping-v1` |
 | Private network PSK | Isolates a deployment through a transport PSK layer before the normal secure-channel handshake; it is not a negotiated protocol ID. | Stage 6, `forge-p2p-private-network-v1` |
 | Connection gater | Rejects at peer dial, address dial, accept, secured identity and upgraded-connection stages. | Stage 6, `forge-p2p-host-protection-v1` |
 | Full resource scopes | Bounds memory, file descriptors, transient work and services in addition to sessions/streams/bytes. | Stage 6, `forge-p2p-host-protection-v1` |
-| Adaptive dialing | Happy Eyeballs and UDP/IPv6 black-hole state avoid serial latency and repeated known-bad paths. | Stage 6, `forge-p2p-address-resolution-net-dns-v1` |
-| Typed host events | Exposes address, connection, reachability and path changes without polling diagnostics as control state. | Stage 6, `forge-p2p-reachability-events-v1` |
+| Adaptive dialing | Happy Eyeballs and UDP/IPv6 black-hole state avoid serial latency and repeated known-bad paths. | Stage 6, `forge-p2p-address-resolution-v1` |
+| Typed host events | Exposes address, connection, reachability and path changes without polling diagnostics as control state. | Stage 6, `forge-p2p-reachability-v1` |
 | Modern GossipSub | Scoring/mesh repair and v1.0 fallback are separate from v1.2/v1.3/Partial Messages extensions. | Stage 6, `forge-p2p-gossipsub-scoring-v1` then `forge-p2p-gossipsub-extensions-v1` |
 | P2P WebSocket | Enables proxy/browser-compatible `/ws` and `/wss` transport. Parsing a multiaddr is not transport support. | Stage 9, `forge-p2p-websocket-v1` |
 
@@ -787,24 +787,44 @@ corresponding Forge facility exists.
 - add the PSK transport layer as an explicit TCP/Yamux private profile, with no
   negotiated `/pnet` ID, QUIC, Relay or DCUtR; AutoNAT and UPnP need explicit
   private-profile Internet egress;
-- add Happy Eyeballs, UDP/IPv6 black-hole state and typed host-state events;
-- preserve Circuit Relay v2 client/transport semantics, feed verified candidates
-  into AutoRelay, keep the public relay service opt-in and bounded, and unify
+- add Happy Eyeballs, IPv6 black-hole state for native/private profiles, UDP
+  black-hole state for the native profile and typed host-state events;
+- preserve Circuit Relay v2 client/transport semantics, keep AutoRelay candidate
+  and reservation orchestration host-local, prove the opt-in public Relay v2
+  service as a Go/Rust service-client role, and unify
   DCUtR/coordinated-dial-and-port-reuse ownership while preserving relay
   fallback; reject deprecated `/libp2p/simultaneous-connect` negotiation;
 - add staged connection gating and memory, file descriptor, transient and
   service resource scopes;
 - complete GossipSub scoring, thresholds, decay, mesh diversity, v1.0 fallback,
-  v1.2/v1.3 negotiation and opt-in Partial Messages implementation;
+  v1.2 and v1.3 first-RPC extension advertisement, unknown-extension ignore and
+  capability matching, plus opt-in Partial Messages implementation;
 - deliver only these 13 focused implementation PRs, with no new plugin-owned
-  network loops:
-  `forge-p2p-stage6-roadmap-v1`, `forge-chrono-algorithms-v1`,
+  network loops, ordered as PR0 through PR12:
+  `forge-p2p-stage6-roadmap-v1`, `forge-chrono-v1`,
   `forge-p2p-host-protection-v1`, `forge-crypto-xsalsa20-v1`,
-  `forge-p2p-private-network-v1`, `forge-p2p-address-resolution-net-dns-v1`,
-  `forge-p2p-reachability-events-v1`, `forge-p2p-mdns-v1`,
-  `forge-p2p-upnp-v1`, `forge-p2p-autorelay-v1`,
-  `forge-p2p-path-inlined-muxer-v1`, `forge-p2p-gossipsub-scoring-v1` and
+  `forge-p2p-private-network-v1`, `forge-p2p-address-resolution-v1`,
+  `forge-p2p-reachability-v1`, `forge-p2p-mdns-v1`,
+  `forge-p2p-nat-mapping-v1`, `forge-p2p-autorelay-v1`,
+  `forge-p2p-path-management-v1`, `forge-p2p-gossipsub-scoring-v1` and
   `forge-p2p-gossipsub-extensions-v1`.
+
+The exact order, dependency DAG and permitted capability owners are locked by
+`stage_6_pr_registry` in `p2p_donor_capabilities.json`; the roadmap, chrono and
+crypto prerequisite PRs deliberately own no capability entries. The
+`interop_acceptance_registry` is source-only registration. It cannot produce an execution
+PASS: release acceptance requires an external exact-`HEAD` artifact with the
+declared runner command, timing, capability-specific scenarios, their declared
+directions/status and existing artifact paths. An absent, stale or incomplete
+artifact is `NOT_RUN`.
+
+Private-network and address-resolution depend on host protection; path
+management also depends on address resolution. Reachability has no direct
+address-resolution dependency because AutoNAT, Ping and observed-address policy
+operate on configured or Identify-observed endpoints and do not resolve
+`/dnsaddr`. Rendezvous is Rust-supported with an explicit Go limitation: no
+official Go rendezvous behaviour donor is pinned, so it cannot be presented as
+Go-compatible.
 
 `forge_chrono` remains algorithms-only: it supplies deadline, expiry, backoff
 and jitter calculations but owns no clock, scheduler or P2P lifecycle.
@@ -874,8 +894,9 @@ complete only after its exact-head review and evidence gates pass.
   independently observed or owned NAT-mapping evidence reaches its policy.
 - Private-network nodes reject a mismatched or absent transport PSK before
   normal secure-channel negotiation and never negotiate a `/pnet` protocol ID.
-- Happy Eyeballs and UDP/IPv6 black-hole state improve path selection without
-  permanently suppressing recovered transports.
+- Happy Eyeballs, native/private IPv6 black-hole state and native UDP
+  black-hole state improve path selection without permanently suppressing
+  recovered transports.
 - A restarted node restores valid peer/discovery state and safely expires stale
   records.
 - Peer persistence passes the same reopen and transaction fixtures over MDBX and
@@ -915,7 +936,10 @@ complete only after its exact-head review and evidence gates pass.
 - Bootstrap and discovery maintenance do not construct full diagnostics
   snapshots or perform unbounded work per tick.
 - Diagnostics identify disabled, idle, degraded and healthy discovery states.
-- Live Go/Rust libp2p interoperability remains green for every enabled protocol.
+- Live libp2p interoperability remains green for every enabled and applicable
+  direction, proven by the external exact-`HEAD` artifact rather than case
+  registration or a source-inventory result; documented Go/Rust limitations do
+  not become bilateral claims.
 - The implementation inventory contains no `stub`, `orphan`, unintended
   `manual-only`, `partial` or `unverified` production surface.
 

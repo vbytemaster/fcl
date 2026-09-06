@@ -1084,6 +1084,9 @@ add_test(
 )
 
 set(FORGE_P2P_INVENTORY_CHECK ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/check_p2p_feature_inventory.py)
+set(FORGE_P2P_STAGE6_ACCEPTANCE_CHECK
+   ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/check_stage6_acceptance.py
+)
 add_custom_target(
    test_forge_p2p_inventory
    COMMAND ${Python3_EXECUTABLE}
@@ -1093,6 +1096,7 @@ add_custom_target(
       ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/p2p_donor_capabilities.json
       ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/donor_cases.json
       ${FORGE_LIBP2P_DONORS_ROOT}
+   COMMAND ${Python3_EXECUTABLE} ${FORGE_P2P_STAGE6_ACCEPTANCE_CHECK} --self-test
    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
    VERBATIM
 )
@@ -1105,6 +1109,11 @@ add_test(
       ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/p2p_donor_capabilities.json
       ${CMAKE_CURRENT_SOURCE_DIR}/libp2p_interop/donor_cases.json
       ${FORGE_LIBP2P_DONORS_ROOT}
+   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+add_test(
+   NAME test_forge_p2p_stage6_acceptance_checker
+   COMMAND ${Python3_EXECUTABLE} ${FORGE_P2P_STAGE6_ACCEPTANCE_CHECK} --self-test
    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 

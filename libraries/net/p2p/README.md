@@ -33,12 +33,15 @@ The following surfaces are not production claims yet:
 - Rendezvous and the Forge-specific Peer Exchange feed the same bounded
   topology manager. Donor/live evidence remains classified separately in the
   inventory and must not be inferred from lifecycle activation alone;
+- Rendezvous currently has registered Forge/Rust directions only. Go is an
+  explicit limitation because no official Go rendezvous behaviour donor is
+  pinned; this is not a claim of Go compatibility;
 - Ping sampling, AutoNAT v1 node-level reachability and AutoNAT v2 address-level
   evidence are not yet inputs to the managed topology score;
 - observed-address confidence/expiry, public mDNS, private fingerprinted mDNS,
   DNSAddr, the private TCP/Yamux transport PSK layer, optional native UPnP
-  mapping, adaptive Happy Eyeballs and UDP/IPv6 black-hole detection are Stage 6
-  work;
+  mapping, adaptive Happy Eyeballs, IPv6 black-hole detection for native/private
+  profiles and UDP black-hole detection for the native profile are Stage 6 work;
 - AutoRelay and DCUtR mechanics lack the complete verified discovery and
   reachability feed;
 - the resource model lacks staged connection gating and donor-style memory,
@@ -61,7 +64,25 @@ It contains only current Forge surfaces and evidence. Neither manifest is a
 record of currently executed optional interop tests or a release-readiness
 verdict. A `mapped` donor case names a compatibility fixture with declared
 Forge coverage; it does not prove normal lifecycle activation or a passing
-current donor run.
+current donor run. The canonical Stage 6 registry is the exact ordered
+`stage_6_pr_registry` in that manifest:
+`forge-p2p-stage6-roadmap-v1`, `forge-chrono-v1`,
+`forge-p2p-host-protection-v1`, `forge-crypto-xsalsa20-v1`,
+`forge-p2p-private-network-v1`, `forge-p2p-address-resolution-v1`,
+`forge-p2p-reachability-v1`, `forge-p2p-mdns-v1`,
+`forge-p2p-nat-mapping-v1`, `forge-p2p-autorelay-v1`,
+`forge-p2p-path-management-v1`, `forge-p2p-gossipsub-scoring-v1` and
+`forge-p2p-gossipsub-extensions-v1`. These are PR0 through PR12 respectively.
+The registry also fixes dependencies and allowed capability owners; the roadmap,
+chrono and crypto prerequisite PRs own none.
+
+The source inventory checker validates this registration only and never emits a
+live interop PASS. Such a PASS requires a separate external artifact matching
+`interop_acceptance_registry.artifact_schema` at the exact reviewed `HEAD`, with
+the runner command, times, each capability-specific scenario, its required
+directions/status and existing artifact paths. Current capability scenarios must
+also be registered in the live runner; future Stage 6 scenario IDs cannot count
+as evidence. Missing, stale or incomplete artifacts are `NOT_RUN`.
 
 `discovery::policy` and `node::limits::discovery` remain Stable source
 compatibility surfaces. Node construction normalizes non-default legacy values

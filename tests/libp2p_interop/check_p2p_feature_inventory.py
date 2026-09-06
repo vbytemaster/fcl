@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import ast
 import hashlib
 import json
 import re
@@ -118,6 +119,52 @@ def has_registered_live_interop(case: object) -> bool:
         for reference in tests
         if reference.strip()
     )
+
+
+def donor_case_has_source(case: object, donor_prefix: str) -> bool:
+    if not isinstance(case, dict):
+        return False
+    donor_files = case.get("donor_file", [])
+    return isinstance(donor_files, list) and any(
+        isinstance(source, str) and source.startswith(donor_prefix)
+        for source in donor_files
+    )
+
+
+def donor_case_text(case: object) -> str:
+    if not isinstance(case, dict):
+        return ""
+    values: list[str] = []
+    for value in (case.get("donor_case", ""), case.get("known_gap", "")):
+        if isinstance(value, str):
+            values.append(value)
+        elif isinstance(value, list):
+            values.extend(item for item in value if isinstance(item, str))
+    return " ".join(values).lower()
+
+
+def registered_runner_scenario_ids(runner_path: Path) -> set[str]:
+    tree = ast.parse(runner_path.read_text(), filename=str(runner_path))
+    for statement in tree.body:
+        if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+            continue
+        target = statement.targets[0]
+        if not isinstance(target, ast.Name) or target.id != "LIVE_SCENARIO_PROFILES":
+            continue
+        value = ast.literal_eval(statement.value)
+        if not isinstance(value, dict) or any(
+            not isinstance(profile, str)
+            or not isinstance(scenarios, tuple)
+            or any(not isinstance(scenario, str) or not scenario for scenario in scenarios)
+            for profile, scenarios in value.items()
+        ):
+            raise ValueError("LIVE_SCENARIO_PROFILES must be a literal profile-to-scenarios map")
+        return {
+            f"{profile}/{scenario}"
+            for profile, scenarios in value.items()
+            for scenario in scenarios
+        }
+    raise ValueError("runner does not declare LIVE_SCENARIO_PROFILES")
 
 
 def public_surface_snapshot(
@@ -341,6 +388,7 @@ def main() -> int:
         "go_and_rust",
         "go_only",
         "go_only_rust_limited",
+        "rust_only_go_limited",
         "not_applicable",
     }
     interop_applicability_values = capability_inventory.get("allowed_interop_applicability", [])
@@ -582,6 +630,10 @@ def main() -> int:
             errors.append(
                 f"donor capability {capability_id}: Rust limitation must be explicit in rationale"
             )
+        if interop_applicability == "rust_only_go_limited" and "Go" not in rationale:
+            errors.append(
+                f"donor capability {capability_id}: Go limitation must be explicit in rationale"
+            )
 
     private_capabilities = classified_profile_capabilities.get("private_network", set())
     forbidden_private_capabilities = {
@@ -643,6 +695,21 @@ def main() -> int:
         "connections.coordinated_dial_port_reuse": (
             {"native", "private_network"}, "required", "enabled", "go_and_rust", "stage_6"
         ),
+        "connections.inlined_muxer_negotiation": (
+            {"native", "private_network"}, "required", "opt_in", "go_only_rust_limited", "stage_6"
+        ),
+        "nat.upnp_mapping": (
+            {"native", "private_network"}, "optional", "opt_in", "not_applicable", "stage_6"
+        ),
+        "relay.circuit_v2_service": (
+            {"native"}, "optional", "opt_in", "go_and_rust", "stage_6"
+        ),
+        "dialing.ipv6_black_hole_detection": (
+            {"native", "private_network"}, "required", "enabled", "not_applicable", "stage_6"
+        ),
+        "dialing.udp_black_hole_detection": (
+            {"native"}, "required", "enabled", "not_applicable", "stage_6"
+        ),
         "connections.simultaneous_connect_legacy": (
             {"legacy"}, "excluded", "not_applicable", "not_applicable", "legacy_rejected"
         ),
@@ -676,44 +743,395 @@ def main() -> int:
                 f"donor capability {capability_id}: semantic classification differs from the Stage 6 baseline"
             )
 
-    symmetric_interop_ids = {
-        "protocol.ping",
-        "reachability.autonat_v1_node_lifecycle",
-        "protocol.autonat_v1_client",
-        "protocol.autonat_v1_service",
-        "reachability.autonat_v2_address_lifecycle",
-        "protocol.autonat_v2_client",
-        "protocol.autonat_v2_service",
-        "discovery.mdns_public",
-        "connections.coordinated_dial_port_reuse",
-        "connections.inlined_muxer_negotiation",
-        "pubsub.partial_messages",
-        "security.private_network_psk",
+    stage_6_branches = (
+        "forge-p2p-stage6-roadmap-v1",
+        "forge-chrono-v1",
+        "forge-p2p-host-protection-v1",
+        "forge-crypto-xsalsa20-v1",
+        "forge-p2p-private-network-v1",
+        "forge-p2p-address-resolution-v1",
+        "forge-p2p-reachability-v1",
+        "forge-p2p-mdns-v1",
+        "forge-p2p-nat-mapping-v1",
+        "forge-p2p-autorelay-v1",
+        "forge-p2p-path-management-v1",
+        "forge-p2p-gossipsub-scoring-v1",
+        "forge-p2p-gossipsub-extensions-v1",
+    )
+    stage_6_registry = capability_inventory.get("stage_6_pr_registry")
+    if not isinstance(stage_6_registry, list):
+        errors.append("donor capabilities: stage_6_pr_registry must be an array")
+        stage_6_registry = []
+    registry_by_branch: dict[str, dict[str, object]] = {}
+    registry_owners: list[str] = []
+    for index, entry in enumerate(stage_6_registry):
+        if not isinstance(entry, dict) or set(entry) != {
+            "ordinal",
+            "branch",
+            "dependencies",
+            "allowed_capability_owners",
+        }:
+            errors.append(f"donor capabilities: Stage 6 registry entry {index} has invalid shape")
+            continue
+        ordinal = entry.get("ordinal")
+        branch = entry.get("branch")
+        dependencies = entry.get("dependencies")
+        owners = entry.get("allowed_capability_owners")
+        if ordinal != index or not isinstance(branch, str) or not branch:
+            errors.append(f"donor capabilities: Stage 6 registry entry {index} has invalid ordinal or branch")
+            continue
+        if branch in registry_by_branch:
+            errors.append(f"donor capabilities: duplicate Stage 6 branch {branch}")
+        registry_by_branch[branch] = entry
+        if not isinstance(dependencies, list) or any(
+            not isinstance(dependency, str) or not dependency for dependency in dependencies
+        ) or len(set(dependencies)) != len(dependencies):
+            errors.append(f"donor capabilities: Stage 6 branch {branch} has invalid dependencies")
+        if not isinstance(owners, list) or any(
+            not isinstance(owner, str) or not owner for owner in owners
+        ) or len(set(owners)) != len(owners):
+            errors.append(f"donor capabilities: Stage 6 branch {branch} has invalid capability owners")
+        elif owners:
+            registry_owners.extend(owners)
+    actual_branches = tuple(entry.get("branch") for entry in stage_6_registry if isinstance(entry, dict))
+    if actual_branches != stage_6_branches:
+        errors.append("donor capabilities: Stage 6 registry must have the exact approved branch set and order")
+    required_stage_6_dependencies = {
+        "forge-p2p-stage6-roadmap-v1": [],
+        "forge-chrono-v1": ["forge-p2p-stage6-roadmap-v1"],
+        "forge-p2p-host-protection-v1": ["forge-p2p-stage6-roadmap-v1"],
+        "forge-crypto-xsalsa20-v1": ["forge-p2p-stage6-roadmap-v1"],
+        "forge-p2p-private-network-v1": [
+            "forge-chrono-v1",
+            "forge-p2p-host-protection-v1",
+            "forge-crypto-xsalsa20-v1",
+        ],
+        "forge-p2p-address-resolution-v1": [
+            "forge-chrono-v1",
+            "forge-p2p-host-protection-v1",
+        ],
+        "forge-p2p-reachability-v1": [
+            "forge-chrono-v1",
+            "forge-p2p-host-protection-v1",
+            "forge-p2p-private-network-v1",
+        ],
+        "forge-p2p-mdns-v1": ["forge-chrono-v1", "forge-p2p-private-network-v1"],
+        "forge-p2p-nat-mapping-v1": [
+            "forge-chrono-v1",
+            "forge-p2p-host-protection-v1",
+            "forge-p2p-reachability-v1",
+        ],
+        "forge-p2p-autorelay-v1": [
+            "forge-chrono-v1",
+            "forge-p2p-host-protection-v1",
+            "forge-p2p-reachability-v1",
+        ],
+        "forge-p2p-path-management-v1": [
+            "forge-chrono-v1",
+            "forge-p2p-host-protection-v1",
+            "forge-p2p-address-resolution-v1",
+            "forge-p2p-reachability-v1",
+            "forge-p2p-autorelay-v1",
+        ],
+        "forge-p2p-gossipsub-scoring-v1": [
+            "forge-chrono-v1",
+            "forge-p2p-host-protection-v1",
+        ],
+        "forge-p2p-gossipsub-extensions-v1": [
+            "forge-chrono-v1",
+            "forge-p2p-gossipsub-scoring-v1",
+        ],
     }
-    for capability_id in symmetric_interop_ids:
-        capability = capabilities_by_id.get(capability_id)
-        if capability is None:
-            errors.append(f"donor capabilities: symmetric interop classification is missing {capability_id}")
+    for branch, expected_dependencies in required_stage_6_dependencies.items():
+        if registry_by_branch.get(branch, {}).get("dependencies") != expected_dependencies:
+            errors.append(f"donor capabilities: Stage 6 branch {branch} dependencies differ from baseline")
+    for branch, entry in registry_by_branch.items():
+        dependencies = entry.get("dependencies", [])
+        for dependency in dependencies if isinstance(dependencies, list) else []:
+            dependency_entry = registry_by_branch.get(dependency)
+            if dependency_entry is None:
+                errors.append(f"donor capabilities: Stage 6 branch {branch} depends on an unknown branch")
+            elif dependency_entry.get("ordinal", 0) >= entry.get("ordinal", 0):
+                errors.append(f"donor capabilities: Stage 6 branch {branch} dependency order is not a DAG")
+    prerequisite_branches = {
+        "forge-p2p-stage6-roadmap-v1",
+        "forge-chrono-v1",
+        "forge-crypto-xsalsa20-v1",
+    }
+    for branch in prerequisite_branches:
+        if registry_by_branch.get(branch, {}).get("allowed_capability_owners") != []:
+            errors.append(f"donor capabilities: prerequisite Stage 6 branch {branch} cannot own a capability")
+    stage_6_capabilities = {
+        capability_id
+        for capability_id, capability in capabilities_by_id.items()
+        if capability.get("decision") == "stage_6"
+    }
+    if len(registry_owners) != len(set(registry_owners)):
+        errors.append("donor capabilities: Stage 6 capability owner has multiple PRs")
+    if set(registry_owners) != stage_6_capabilities:
+        errors.append(
+            "donor capabilities: Stage 6 registry owners must exactly cover Stage 6 capabilities"
+        )
+    for capability_id in stage_6_capabilities:
+        capability = capabilities_by_id[capability_id]
+        branch = capability.get("planned_branch")
+        if branch not in registry_by_branch:
+            errors.append(f"donor capability {capability_id}: Stage 6 branch is not registered")
+        elif capability_id not in registry_by_branch[branch].get("allowed_capability_owners", []):
+            errors.append(f"donor capability {capability_id}: Stage 6 registry owner differs from planned_branch")
+
+    for capability_id, capability in capabilities_by_id.items():
+        dependencies = capability.get("capability_dependencies", [])
+        if not isinstance(dependencies, list) or any(
+            not isinstance(dependency, str) or dependency not in capabilities_by_id
+            for dependency in dependencies
+        ) or len(set(dependencies)) != len(dependencies):
+            errors.append(f"donor capability {capability_id}: capability_dependencies must name unique capabilities")
+    nat_mapping = capabilities_by_id.get("nat.upnp_mapping")
+    if nat_mapping is None or nat_mapping.get("capability_dependencies") != [
+        "reachability.private_internet_policy"
+    ]:
+        errors.append(
+            "donor capability nat.upnp_mapping: must depend explicitly on reachability.private_internet_policy"
+        )
+
+    interop_registry = capability_inventory.get("interop_acceptance_registry")
+    if not isinstance(interop_registry, dict) or set(interop_registry) != {
+        "artifact_schema",
+        "capabilities",
+    }:
+        errors.append("donor capabilities: interop_acceptance_registry has invalid shape")
+        interop_registry = {}
+    artifact_schema = interop_registry.get("artifact_schema", {})
+    expected_artifact_schema = {
+        "schema_version": 1,
+        "claim_scope": "external_exact_head_artifact_only",
+        "required_fields": [
+            "schema_version",
+            "head",
+            "runner_command",
+            "started_at_unix",
+            "finished_at_unix",
+            "capability_results",
+            "artifact_paths",
+        ],
+        "result_required_fields": [
+            "capability_id",
+            "scenario_id",
+            "directions",
+            "status",
+        ],
+        "allowed_result_statuses": ["passed", "limited"],
+        "passing_status": "passed",
+        "registration_is_not_verdict": True,
+    }
+    if artifact_schema != expected_artifact_schema:
+        errors.append("donor capabilities: interop acceptance artifact schema must be exact")
+
+    try:
+        runner_scenario_ids = registered_runner_scenario_ids(
+            root / "tests/libp2p_interop/runner.py"
+        )
+    except (OSError, SyntaxError, ValueError) as error:
+        errors.append(f"donor capabilities: cannot read registered runner scenarios: {error}")
+        runner_scenario_ids = set()
+
+    interop_capabilities = {
+        capability_id
+        for capability_id, capability in capabilities_by_id.items()
+        if capability.get("interop_applicability") != "not_applicable"
+    }
+    acceptance_capabilities = interop_registry.get("capabilities", {})
+    if not isinstance(acceptance_capabilities, dict) or set(acceptance_capabilities) != interop_capabilities:
+        errors.append("donor capabilities: acceptance registry must cover interoperable capabilities exactly")
+        acceptance_capabilities = {}
+
+    expected_directions = {
+        "go_and_rust": {"forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge"},
+        "go_only": {"forge_to_go", "go_to_forge"},
+        "go_only_rust_limited": {"forge_to_go", "go_to_forge"},
+        "rust_only_go_limited": {"forge_to_rust", "rust_to_forge"},
+    }
+    limitation_implementation = {
+        "go_only_rust_limited": "rust",
+        "rust_only_go_limited": "go",
+    }
+    seen_scenario_ids: set[str] = set()
+    for capability_id, acceptance in acceptance_capabilities.items():
+        capability = capabilities_by_id.get(capability_id, {})
+        applicability = capability.get("interop_applicability")
+        allowed_fields = {"scenarios"}
+        if applicability in limitation_implementation:
+            allowed_fields.add("limitation")
+        if not isinstance(acceptance, dict) or set(acceptance) != allowed_fields:
+            errors.append(f"donor capability {capability_id}: acceptance registry has invalid shape")
             continue
         sources = capability.get("donor_sources", [])
-        if not isinstance(sources, list) or not any(
-            isinstance(source, str) and source.startswith("donors/go-") for source in sources
-        ) or not any(
-            isinstance(source, str) and source.startswith("donors/rust-") for source in sources
+        required_prefixes = {
+            "go_and_rust": ("donors/go-", "donors/rust-"),
+            "go_only": ("donors/go-",),
+            "go_only_rust_limited": ("donors/go-",),
+            "rust_only_go_limited": ("donors/rust-",),
+        }.get(applicability, ())
+        if not isinstance(sources, list) or any(
+            not any(isinstance(source, str) and source.startswith(prefix) for source in sources)
+            for prefix in required_prefixes
         ):
-            errors.append(
-                f"donor capability {capability_id}: Go and Rust donor evidence must both be pinned"
-            )
+            errors.append(f"donor capability {capability_id}: pinned donor sources do not match interop applicability")
+
+        scenarios = acceptance.get("scenarios")
+        if not isinstance(scenarios, list) or not scenarios:
+            errors.append(f"donor capability {capability_id}: acceptance scenarios must be a non-empty array")
+            continue
+        expected_primary_directions = expected_directions.get(applicability, set())
+        has_primary_scenario = False
+        for scenario in scenarios:
+            if not isinstance(scenario, dict):
+                errors.append(f"donor capability {capability_id}: acceptance scenario must be an object")
+                continue
+            allowed_scenario_fields = {"id", "required_directions", "expected_status"}
+            if capability.get("decision") == "current":
+                allowed_scenario_fields |= {"runner_scenario_id", "source_case_id"}
+            if set(scenario) != allowed_scenario_fields:
+                errors.append(f"donor capability {capability_id}: acceptance scenario has invalid shape")
+                continue
+            scenario_id = scenario.get("id")
+            directions = scenario.get("required_directions")
+            expected_status = scenario.get("expected_status")
+            if not isinstance(scenario_id, str) or not scenario_id or scenario_id in seen_scenario_ids:
+                errors.append(f"donor capability {capability_id}: acceptance scenario id must be globally unique")
+            elif scenario_id:
+                seen_scenario_ids.add(scenario_id)
+            if not isinstance(directions, list) or any(
+                not isinstance(direction, str) or direction not in {
+                    "forge_to_go", "go_to_forge", "forge_to_rust", "rust_to_forge"
+                }
+                for direction in directions
+            ) or len(set(directions)) != len(directions):
+                errors.append(f"donor capability {capability_id}: acceptance directions are invalid")
+                directions = []
+            if expected_status not in {"passed", "limited"}:
+                errors.append(f"donor capability {capability_id}: acceptance status is invalid")
+            if expected_status == "passed" and set(directions) == expected_primary_directions:
+                has_primary_scenario = True
+            if capability.get("decision") == "current":
+                runner_scenario_id = scenario.get("runner_scenario_id")
+                source_case_id = scenario.get("source_case_id")
+                source_case = donor_by_id.get(source_case_id)
+                if not isinstance(runner_scenario_id, str) or runner_scenario_id not in runner_scenario_ids:
+                    errors.append(f"donor capability {capability_id}: current scenario is not registered by runner.py")
+                if not isinstance(source_case_id, str) or not has_registered_live_interop(source_case):
+                    errors.append(f"donor capability {capability_id}: current scenario lacks a registered donor case")
+                else:
+                    selector_ids = {
+                        f"{selector.get('profile')}/{selector.get('scenario')}"
+                        for selector in source_case.get("forge_live_scenario", [])
+                        if isinstance(selector, dict)
+                    }
+                    if runner_scenario_id not in selector_ids:
+                        errors.append(
+                            f"donor capability {capability_id}: donor case does not register its runner scenario"
+                        )
+                    if any(
+                        not donor_case_has_source(source_case, prefix) for prefix in required_prefixes
+                    ):
+                        errors.append(
+                            f"donor capability {capability_id}: donor case does not match required donor implementations"
+                        )
+            elif "runner_scenario_id" in scenario or "source_case_id" in scenario:
+                errors.append(f"donor capability {capability_id}: staged scenario cannot claim current runner registration")
+        if not has_primary_scenario:
+            errors.append(f"donor capability {capability_id}: acceptance lacks its primary directions")
+
+        if applicability in limitation_implementation:
+            limitation = acceptance.get("limitation")
+            expected_implementation = limitation_implementation[applicability]
+            if not isinstance(limitation, dict) or set(limitation) != {
+                "implementation", "source_case_id", "description"
+            }:
+                errors.append(f"donor capability {capability_id}: explicit implementation limitation is required")
+                continue
+            limitation_case = donor_by_id.get(limitation.get("source_case_id"))
+            limitation_text = donor_case_text(limitation_case)
+            description = limitation.get("description")
+            # Rust is either the documented fallback or the only supported donor.
+            limitation_evidence_prefix = "donors/rust-"
+            if (
+                limitation.get("implementation") != expected_implementation
+                or not isinstance(description, str)
+                or expected_implementation not in description.lower()
+                or not donor_case_has_source(limitation_case, limitation_evidence_prefix)
+                or expected_implementation not in limitation_text
+                or not any(term in limitation_text for term in ("limitation", "fallback", "no official"))
+            ):
+                errors.append(f"donor capability {capability_id}: explicit {expected_implementation} limitation is invalid")
+
+    required_stage_6_scenarios = {
+        "reachability.autonat_v1_node_lifecycle": {"autonat_v1"},
+        "reachability.autonat_v2_address_lifecycle": {"autonat_v2"},
+        "relay.circuit_v2_service": {"relay_v2_service"},
+        "relay.dcutr": {"dcutr"},
+        "pubsub.gossipsub_v1_0_v1_1": {"gossipsub_v1_0_v1_1"},
+        "discovery.mdns_public": {"mdns_public"},
+        "addressing.dnsaddr": {"dnsaddr"},
+        "security.private_network_psk": {"pnet"},
+        "pubsub.gossipsub_v1_2": {"gossipsub_v1_2"},
+        "pubsub.gossipsub_v1_3": {"gossipsub_v1_3"},
+        "pubsub.partial_messages": {"partial_messages"},
+        "connections.inlined_muxer_negotiation": {
+            "inline_muxer_go", "inline_muxer_rust_fallback"
+        },
+    }
+    for capability_id, expected_ids in required_stage_6_scenarios.items():
+        scenarios = acceptance_capabilities.get(capability_id, {}).get("scenarios", [])
+        actual_ids = {
+            scenario.get("id") for scenario in scenarios if isinstance(scenario, dict)
+        }
+        if actual_ids != expected_ids:
+            errors.append(f"donor capability {capability_id}: acceptance scenario ids differ from Stage 6 baseline")
+
+    inlined_muxer = acceptance_capabilities.get("connections.inlined_muxer_negotiation", {})
+    inlined_scenarios = inlined_muxer.get("scenarios", []) if isinstance(inlined_muxer, dict) else []
+    inlined_shape = {
+        (scenario.get("id"), tuple(scenario.get("required_directions", [])), scenario.get("expected_status"))
+        for scenario in inlined_scenarios
+        if isinstance(scenario, dict)
+    }
+    if inlined_shape != {
+        ("inline_muxer_go", ("forge_to_go", "go_to_forge"), "passed"),
+        ("inline_muxer_rust_fallback", ("forge_to_rust", "rust_to_forge"), "limited"),
+    }:
+        errors.append("donor capability connections.inlined_muxer_negotiation: Go inline and Rust fallback scenarios are required")
+
+    noise_tls_sources = capabilities_by_id.get("security.noise_tls_identity", {}).get("donor_sources", [])
+    required_noise_tls_sources = {
+        "donors/go-libp2p/p2p/security/noise/handshake.go",
+        "donors/go-libp2p/p2p/security/tls/crypto.go",
+        "donors/rust-libp2p/transports/noise/src/lib.rs",
+        "donors/rust-libp2p/transports/tls/src/upgrade.rs",
+    }
+    if not isinstance(noise_tls_sources, list) or not required_noise_tls_sources <= set(noise_tls_sources):
+        errors.append("donor capability security.noise_tls_identity: exact Noise and TLS donor paths are required")
+
+    gossipsub_v13 = capabilities_by_id.get("pubsub.gossipsub_v1_3", {})
+    v13_rationale = gossipsub_v13.get("rationale", "")
+    if not isinstance(v13_rationale, str) or not all(
+        phrase in v13_rationale.lower()
+        for phrase in ("first-rpc", "unknown", "capability matching")
+    ):
+        errors.append("donor capability pubsub.gossipsub_v1_3: v1.3 first-RPC advertisement semantics are required")
 
     host_local_policy_ids = {
         "reachability.private_internet_policy",
         "security.connection_gater",
         "resource.memory_fd_transient_service_scopes",
         "dialing.happy_eyeballs",
-        "dialing.udp_ipv6_black_hole_detection",
+        "dialing.ipv6_black_hole_detection",
+        "dialing.udp_black_hole_detection",
         "events.host_state",
         "nat.upnp_mapping",
         "reachability.observed_address_manager",
+        "relay.autorelay_lifecycle",
     }
     for capability_id in host_local_policy_ids:
         capability = capabilities_by_id.get(capability_id)
@@ -1058,7 +1476,7 @@ def main() -> int:
         return 1
 
     print(
-        "P2P source inventory valid: "
+        "P2P source inventory valid (source-only; no live interop execution verdict): "
         f"{len(capability_ids)} classified capabilities, "
         f"{len(feature_ids)} implementation features, "
         f"{len(declared_builtins)} built-in protocols, "
