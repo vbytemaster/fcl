@@ -4,6 +4,7 @@ add_library(
    identity_signature.cpp
    details/identity_signature.hxx
    endpoint.cpp
+   connection_gater.cpp
    envelope.cpp
    identify.cpp
    ipns.cpp
