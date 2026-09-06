@@ -1451,6 +1451,33 @@ def main() -> int:
             "donor capability connections.inlined_muxer_negotiation: Go TLS/Noise and Rust ALPN/extensions donors are required"
         )
 
+    coordinated_dial_id = "connections.coordinated_dial_port_reuse"
+    required_coordinated_dial_sources = {
+        "donors/libp2p-specs/connections/simopen.md",
+        "donors/go-libp2p/p2p/net/swarm/swarm_dial.go",
+        "donors/go-libp2p/p2p/net/swarm/dial_worker.go",
+        "donors/go-libp2p/p2p/transport/tcp/tcp.go",
+        "donors/rust-libp2p/swarm/src/connection/pool.rs",
+        "donors/rust-libp2p/swarm/src/dial_opts.rs",
+        "donors/rust-libp2p/transports/tcp/src/lib.rs",
+    }
+    coordinated_dial_sources = capabilities_by_id.get(coordinated_dial_id, {}).get(
+        "donor_sources", []
+    )
+    coordinated_dial_case_sources = donor_by_id.get(coordinated_dial_id, {}).get(
+        "donor_file", []
+    )
+    if any(
+        not isinstance(sources, list)
+        or any(not isinstance(source, str) for source in sources)
+        or len(sources) != len(set(sources))
+        or set(sources) != required_coordinated_dial_sources
+        for sources in (coordinated_dial_sources, coordinated_dial_case_sources)
+    ):
+        errors.append(
+            "coordinated dial donor trace must exactly match the required spec, Go swarm/TCP and Rust pool/DialOpts/TCP sources in both capability and donor case"
+        )
+
     gossipsub_v13 = capabilities_by_id.get("pubsub.gossipsub_v1_3", {})
     v13_rationale = gossipsub_v13.get("rationale", "")
     if not isinstance(v13_rationale, str) or not all(
