@@ -469,8 +469,11 @@ BOOST_AUTO_TEST_CASE(p2p_noexcept_cancel_request_preserves_session_until_gracefu
    BOOST_TEST(!candidate.valid());
    ticket.release();
 
-   BOOST_CHECK(stopped.wait_for(std::chrono::seconds{2}) == std::future_status::ready);
-   stopped.get();
+   const auto stopped_ready = stopped.wait_for(std::chrono::seconds{2}) == std::future_status::ready;
+   BOOST_CHECK(stopped_ready);
+   if (stopped_ready) {
+      stopped.get();
+   }
 }
 
 BOOST_AUTO_TEST_CASE(p2p_session_teardown_handles_concurrent_track_release_and_start) {
