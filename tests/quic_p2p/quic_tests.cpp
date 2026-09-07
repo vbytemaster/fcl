@@ -2218,6 +2218,107 @@ BOOST_AUTO_TEST_CASE(quic_connection_drop_releases_native_lifetime_without_expli
    server.stop();
 }
 
+BOOST_AUTO_TEST_CASE(quic_live_stream_survives_connection_facade_drop) {
+   auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
+   auto server = listener{runtime, endpoint{.host = "127.0.0.1", .port = 0}, loopback_server_options()};
+   auto client = connector{runtime};
+   auto lifetime = std::make_shared<int>(1);
+   auto released = std::weak_ptr<void>{lifetime};
+   auto options = loopback_client_options();
+   options.connection_lifetime = std::move(lifetime);
+   auto accepted = boost::asio::co_spawn(runtime.context(), server.async_accept(), boost::asio::use_future);
+   auto client_stream = stream{};
+
+   {
+      auto connection = run_with_deadline(runtime, client.async_connect(server.local_endpoint(), std::move(options)),
+                                          std::chrono::milliseconds{5'000}, "connect stream-owned QUIC session");
+      client_stream = run_with_deadline(runtime, connection.async_open_stream(), std::chrono::milliseconds{5'000},
+                                        "open stream-owned QUIC stream");
+   }
+
+   auto server_connection =
+       get_with_deadline(accepted, std::chrono::milliseconds{5'000}, "accept stream-owned QUIC session");
+   BOOST_TEST(!released.expired());
+
+   const auto request = std::vector<std::uint8_t>{'s', 't', 'r', 'e', 'a', 'm'};
+   const auto response = std::vector<std::uint8_t>{'a', 'l', 'i', 'v', 'e'};
+   run_with_deadline(runtime, client_stream.async_write(request), std::chrono::milliseconds{5'000},
+                     "write after QUIC connection facade drop");
+   auto server_stream = run_with_deadline(runtime, server_connection.async_accept_stream(),
+                                          std::chrono::milliseconds{5'000}, "accept stream-owned QUIC stream");
+   const auto received = run_with_deadline(runtime, server_stream.async_read(), std::chrono::milliseconds{5'000},
+                                           "read after QUIC connection facade drop");
+   BOOST_TEST(received == request, boost::test_tools::per_element());
+   run_with_deadline(runtime, server_stream.async_write(response), std::chrono::milliseconds{5'000},
+                     "reply after QUIC connection facade drop");
+   const auto replied = run_with_deadline(runtime, client_stream.async_read(), std::chrono::milliseconds{5'000},
+                                          "receive after QUIC connection facade drop");
+   BOOST_TEST(replied == response, boost::test_tools::per_element());
+   BOOST_TEST(!released.expired());
+
+   client_stream = {};
+   run_with_deadline(
+       runtime,
+       [released]() -> boost::asio::awaitable<void> {
+          auto timer = boost::asio::steady_timer{co_await boost::asio::this_coro::executor};
+          while (!released.expired()) {
+             timer.expires_after(std::chrono::milliseconds{1});
+             co_await timer.async_wait(boost::asio::use_awaitable);
+          }
+       }(),
+       std::chrono::milliseconds{5'000}, "release stream-owned QUIC native lifetime");
+   BOOST_TEST(released.expired());
+   server.stop();
+}
+
+BOOST_AUTO_TEST_CASE(quic_accepted_write_retains_connection_until_delayed_ack_after_facade_drop) {
+   auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
+   auto server = listener{runtime, endpoint{.host = "127.0.0.1", .port = 0}, loopback_server_options()};
+   auto proxy = std::make_shared<udp_fault_proxy>(
+       runtime.context(), server.local_endpoint(),
+       fault_proxy_rules{.server_to_client = fault_rule{.delay = std::chrono::milliseconds{250}}});
+   proxy->start();
+   auto client = connector{runtime};
+   auto lifetime = std::make_shared<int>(1);
+   auto released = std::weak_ptr<void>{lifetime};
+   auto options = loopback_client_options();
+   options.connection_lifetime = std::move(lifetime);
+   auto accepted = boost::asio::co_spawn(runtime.context(), server.async_accept(), boost::asio::use_future);
+
+   {
+      auto connection = run_with_deadline(runtime, client.async_connect(proxy->local_endpoint(), std::move(options)),
+                                          std::chrono::milliseconds{10'000}, "connect delayed-ACK QUIC session");
+      auto client_stream = run_with_deadline(runtime, connection.async_open_stream(), std::chrono::milliseconds{5'000},
+                                             "open delayed-ACK QUIC stream");
+      run_with_deadline(runtime, client_stream.async_write(std::vector<std::uint8_t>{'a', 'c', 'k'}),
+                        std::chrono::milliseconds{5'000}, "accept delayed-ACK QUIC write");
+   }
+
+   auto server_connection =
+       get_with_deadline(accepted, std::chrono::milliseconds{10'000}, "accept delayed-ACK QUIC session");
+   auto server_stream = run_with_deadline(runtime, server_connection.async_accept_stream(),
+                                          std::chrono::milliseconds{5'000}, "accept delayed-ACK QUIC stream");
+   const auto received = run_with_deadline(runtime, server_stream.async_read(), std::chrono::milliseconds{5'000},
+                                           "deliver delayed-ACK QUIC write");
+   const auto expected = std::vector<std::uint8_t>{'a', 'c', 'k'};
+   BOOST_TEST(received == expected, boost::test_tools::per_element());
+   BOOST_TEST(!released.expired());
+
+   run_with_deadline(
+       runtime,
+       [released]() -> boost::asio::awaitable<void> {
+          auto timer = boost::asio::steady_timer{co_await boost::asio::this_coro::executor};
+          while (!released.expired()) {
+             timer.expires_after(std::chrono::milliseconds{1});
+             co_await timer.async_wait(boost::asio::use_awaitable);
+          }
+       }(),
+       std::chrono::milliseconds{5'000}, "release delayed-ACK QUIC native lifetime");
+   BOOST_TEST(released.expired());
+   proxy->stop();
+   server.stop();
+}
+
 BOOST_AUTO_TEST_CASE(quic_loopback_verifies_pinned_peer_fingerprint) {
    const auto expected = sha256_fingerprint(test_certificate_der());
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
