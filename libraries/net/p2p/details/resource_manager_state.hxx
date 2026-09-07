@@ -32,19 +32,19 @@ struct resource_manager::state {
    [[nodiscard]] std::shared_ptr<dial_ledger> reserve_dial() noexcept;
    [[nodiscard]] bool dial_active(const std::shared_ptr<dial_ledger>& value) const noexcept;
    [[nodiscard]] bool dial_bound(const std::shared_ptr<dial_ledger>& value) const noexcept;
-   [[nodiscard]] bool bind_dial(const std::shared_ptr<dial_ledger>& value, peer_id peer) noexcept;
+   [[nodiscard]] transition_result bind_dial(const std::shared_ptr<dial_ledger>& value, peer_id peer) noexcept;
    void release_dial(const std::shared_ptr<dial_ledger>& value) noexcept;
    [[nodiscard]] bool reserve_relay(const peer_id& peer) noexcept;
    void release_relay(const peer_id& peer) noexcept;
-   [[nodiscard]] bool record_malformed(const peer_id& peer) noexcept;
+   [[nodiscard]] transition_result record_malformed(const peer_id& peer) noexcept;
    [[nodiscard]] bool session_established(const std::shared_ptr<ledger>& value) const noexcept;
    [[nodiscard]] bool stream_bound(const std::shared_ptr<ledger>& value) const noexcept;
    [[nodiscard]] bool stream_service_bound(const std::shared_ptr<ledger>& value) const noexcept;
-   [[nodiscard]] bool establish_session(const std::shared_ptr<ledger>& value, session_scope scope) noexcept;
-   [[nodiscard]] stream_reservation::bind_result bind_protocol(const std::shared_ptr<ledger>& value,
-                                                               const protocol_id& protocol) noexcept;
-   [[nodiscard]] stream_reservation::bind_result bind_service(const std::shared_ptr<ledger>& value,
-                                                              std::string_view service) noexcept;
+   [[nodiscard]] transition_result establish_session(const std::shared_ptr<ledger>& value, session_scope scope) noexcept;
+   [[nodiscard]] transition_result bind_protocol(const std::shared_ptr<ledger>& value,
+                                                  const protocol_id& protocol) noexcept;
+   [[nodiscard]] transition_result bind_service(const std::shared_ptr<ledger>& value,
+                                                 std::string_view service) noexcept;
    [[nodiscard]] bool reserve_memory(const std::shared_ptr<ledger>& value, std::uint64_t bytes,
                                      memory_priority priority) noexcept;
    [[nodiscard]] bool reserve_file_descriptors(const std::shared_ptr<ledger>& value, std::size_t count) noexcept;
@@ -68,8 +68,8 @@ struct resource_manager::state {
                                                        memory_priority priority) const noexcept;
    [[nodiscard]] bool can_remove_from_current_scopes_locked(const ledger& value,
                                                             const scope_totals& delta) const noexcept;
-   [[nodiscard]] stream_reservation::bind_result bind_service_locked(const std::shared_ptr<ledger>& value,
-                                                                     std::string_view service) noexcept;
+   [[nodiscard]] transition_result bind_service_locked(const std::shared_ptr<ledger>& value,
+                                                        std::string_view service) noexcept;
    void add_locked(scope_account& account, const scope_totals& delta) noexcept;
    void remove_locked(scope_account& account, const scope_totals& delta) noexcept;
    void add_to_current_scopes_locked(const ledger& value, const scope_totals& delta) noexcept;
@@ -99,5 +99,8 @@ struct resource_manager::state {
 namespace forge::net::p2p::detail {
 
 void fail_next_service_bind_prepare_for_test() noexcept;
+void fail_next_session_establish_prepare_for_test() noexcept;
+void fail_next_dial_bind_prepare_for_test() noexcept;
+void fail_next_malformed_record_prepare_for_test() noexcept;
 
 } // namespace forge::net::p2p::detail

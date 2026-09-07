@@ -189,6 +189,12 @@ void connection::cancel() {
    }
 }
 
+void connection::request_cancel() noexcept {
+   if (impl_ && impl_->engine) {
+      impl_->engine->request_cancel();
+   }
+}
+
 connection detail::connection_access::make(detail::connection_handle handle) {
    return connection{std::move(handle)};
 }

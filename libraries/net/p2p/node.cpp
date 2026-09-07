@@ -85,6 +85,7 @@ import forge.net.yamux.session;
 
 #include "details/peer_failure.hxx"
 #include "details/protocol_capabilities.hxx"
+#include "details/session_lifecycle.hxx"
 
 namespace forge::net::p2p {
 
@@ -327,10 +328,7 @@ void stop_owned(auto self) {
                 session->native_lifetime.reset();
              },
              .cancel =
-                 [session] {
-                    session->connection.cancel();
-                    session->native_lifetime.reset();
-                 },
+                 [session] { session->connection.request_cancel(); },
          });
       }
       self->stop_requested_at = std::chrono::steady_clock::now();

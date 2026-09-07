@@ -91,6 +91,7 @@ import forge.net.yamux.session;
 #include "details/owner_cancellation.hxx"
 #include "details/peer_exchange_learning.hxx"
 #include "details/protocol_capabilities.hxx"
+#include "details/session_lifecycle.hxx"
 #include "details/topology_peer_exchange_claims.hxx"
 #include "details/worker_stop_bridge.hxx"
 
@@ -1105,7 +1106,7 @@ boost::asio::awaitable<void> node::impl::handle_autonat_v1(forge::net::p2p::stre
             try {
                co_await session->connection.async_close();
             } catch (...) {
-               session->connection.cancel();
+               detail::request_session_cancel(session->connection);
             }
             response.status = reachability::dial_status::ok;
             response.status_text.clear();

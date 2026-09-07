@@ -11,6 +11,7 @@ class session_model final : public transport::detail::session_concept {
    boost::asio::awaitable<transport::stream> async_accept_stream() override;
    boost::asio::awaitable<void> async_close() override;
    void cancel() override;
+   void request_cancel() noexcept override;
 
  private:
    session value_;

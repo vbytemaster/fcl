@@ -51,6 +51,7 @@ import forge.net.transport.limits;
 import forge.net.transport.session;
 
 #include "details/direct_transport.hxx"
+#include "details/direct_transport_quic.hxx"
 #include "details/cancellation_latch.hxx"
 #include "details/connection_gate.hxx"
 #include "details/owner_cancellation.hxx"
@@ -58,6 +59,34 @@ import forge.net.transport.session;
 #include "details/quic_client_options.hxx"
 
 namespace forge::net::p2p::direct {
+
+void detail::pending_quic_connection::install(forge::net::quic::connection value) noexcept {
+   const auto lock = std::scoped_lock{mutex_};
+   value_.emplace(std::move(value));
+}
+
+forge::net::quic::connection* detail::pending_quic_connection::get() noexcept {
+   const auto lock = std::scoped_lock{mutex_};
+   return value_ ? &*value_ : nullptr;
+}
+
+forge::net::quic::connection detail::pending_quic_connection::take() noexcept {
+   const auto lock = std::scoped_lock{mutex_};
+   if (!value_) {
+      return {};
+   }
+   auto result = std::move(*value_);
+   value_.reset();
+   return result;
+}
+
+void detail::pending_quic_connection::request_cancel() noexcept {
+   const auto lock = std::scoped_lock{mutex_};
+   if (value_) {
+      value_->request_cancel();
+   }
+}
+
 namespace {
 
 [[nodiscard]] forge::net::quic::transport_limits quic_limits(const forge::net::transport::limits& value) noexcept {
@@ -328,18 +357,18 @@ class quic_profile final {
       auto connector = std::make_shared<forge::net::quic::connector>(runtime_);
       auto operation_stop = std::make_shared<forge::net::p2p::detail::worker_stop_bridge>();
       auto stop_requested = std::make_shared<std::atomic_bool>(false);
-      cancel_current->arm([operation_stop, stop_requested] noexcept {
+      auto pending = std::make_shared<detail::pending_quic_connection>();
+      cancel_current->arm([operation_stop, stop_requested, pending] noexcept {
          stop_requested->store(true, std::memory_order_release);
          operation_stop->request_stop();
+         pending->request_cancel();
       });
-      auto connected = std::optional<forge::net::quic::connection>{};
-      auto quic = std::optional<forge::net::quic::connection>{};
       try {
          const auto expected_peer = expected_peer_for(endpoint, options);
          co_await forge::net::p2p::detail::async_run_with_owner_cancellation(
              operation_stop,
              [this, connector, endpoint, options, expected_peer, stop_requested, native_lifetime,
-              &connected](boost::asio::cancellation_slot) mutable -> boost::asio::awaitable<void> {
+              pending](boost::asio::cancellation_slot) mutable -> boost::asio::awaitable<void> {
                 if (stop_requested->load(std::memory_order_acquire)) {
                    FORGE_THROW_EXCEPTION(exceptions::canceled, "P2P QUIC direct connect canceled before start");
                 }
@@ -348,13 +377,13 @@ class quic_profile final {
                     options_.certificate_pem, options_.private_key_pem, options_.allow_insecure_test_mode,
                     client_tokens_);
                 client_options.connection_lifetime = std::move(native_lifetime);
-                connected.emplace(
+                pending->install(
                     co_await connector->async_connect(quic_endpoint_for(endpoint), std::move(client_options)));
              });
-         if (!connected || stop_requested->load(std::memory_order_acquire)) {
+         auto quic = pending->get();
+         if (!quic || stop_requested->load(std::memory_order_acquire)) {
             FORGE_THROW_EXCEPTION(exceptions::canceled, "P2P QUIC direct connect canceled");
          }
-         quic.emplace(std::move(*connected));
          const auto remote = verified_peer_id_for(*quic, expected_peer, options_.allow_insecure_test_mode);
          auto local_endpoint = p2p_endpoint_for(quic->local_endpoint());
          auto remote_endpoint = p2p_endpoint_for(quic->remote_endpoint());
@@ -364,33 +393,24 @@ class quic_profile final {
          }
          gate_->upgraded(connection_direction::outbound, remote, local_endpoint, remote_endpoint);
          if (!cancel_current->finish()) {
-            quic->cancel();
+            pending->request_cancel();
             FORGE_THROW_EXCEPTION(exceptions::canceled, "P2P QUIC direct connect canceled");
          }
+         auto promoted = pending->take();
          co_return connection{
              .peer = remote,
-             .session = forge::net::quic::as_transport_session(std::move(*quic)),
+             .session = forge::net::quic::as_transport_session(std::move(promoted)),
              .local_endpoint = std::move(local_endpoint),
              .remote_endpoint = std::move(remote_endpoint),
              .authentication =
                  options_.allow_insecure_test_mode ? peer_authentication::unverified : peer_authentication::quic_tls,
          };
       } catch (const forge::exceptions::base& error) {
-         if (quic) {
-            try {
-               quic->cancel();
-            } catch (...) {
-            }
-         }
+         pending->request_cancel();
          static_cast<void>(cancel_current->finish());
          rethrow_quic_as_p2p(error);
       } catch (...) {
-         if (quic) {
-            try {
-               quic->cancel();
-            } catch (...) {
-            }
-         }
+         pending->request_cancel();
          static_cast<void>(cancel_current->finish());
          throw;
       }
@@ -427,10 +447,14 @@ class quic_profile final {
                FORGE_THROW_EXCEPTION(exceptions::internal, "P2P QUIC connection is missing inbound admission");
             }
             const auto remote = verified_peer_id_for(quic, std::nullopt, options_.allow_insecure_test_mode);
-            if (!admission->establish(resource_manager::session_scope{
-                    .peer = remote,
-                    .direction = resource_manager::session_direction::inbound,
-                })) {
+            const auto transition = admission->establish(resource_manager::session_scope{
+                .peer = remote,
+                .direction = resource_manager::session_direction::inbound,
+            });
+            if (transition != resource_manager::transition_result::accepted) {
+               if (transition != resource_manager::transition_result::policy_rejected) {
+                  FORGE_THROW_EXCEPTION(exceptions::internal, "P2P inbound QUIC session resource transition failed");
+               }
                FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected,
                                      "P2P established inbound session limit reached");
             }
@@ -446,10 +470,7 @@ class quic_profile final {
                     options_.allow_insecure_test_mode ? peer_authentication::unverified : peer_authentication::quic_tls,
             };
          } catch (...) {
-            try {
-               quic.cancel();
-            } catch (...) {
-            }
+            quic.request_cancel();
             throw;
          }
       } catch (const forge::exceptions::base& error) {

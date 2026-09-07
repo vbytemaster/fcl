@@ -144,6 +144,10 @@ class quic_session_concept final : public forge::net::transport::detail::session
       value_.cancel();
    }
 
+   void request_cancel() noexcept override {
+      value_.request_cancel();
+   }
+
  private:
    connection value_;
 };
@@ -420,7 +424,12 @@ forge::net::transport::stream as_transport_stream(stream value) {
 }
 
 forge::net::transport::session as_transport_session(connection value) {
-   return forge::net::transport::detail::session_access::make(std::make_shared<quic_session_concept>(std::move(value)));
+   auto model = std::make_shared<quic_session_concept>(std::move(value));
+   auto cancel_on_failure = std::unique_ptr<quic_session_concept, void (*)(quic_session_concept*)>{
+       model.get(), [](quic_session_concept* session) { session->request_cancel(); }};
+   auto result = forge::net::transport::detail::session_access::make(model);
+   static_cast<void>(cancel_on_failure.release());
+   return result;
 }
 
 forge::net::transport::session_connector make_session_connector(forge::asio::runtime& runtime, client_options options) {

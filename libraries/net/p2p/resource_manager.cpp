@@ -71,7 +71,7 @@ std::optional<resource_manager::dial_reservation> resource_manager::reserve_dial
 
 std::optional<resource_manager::dial_reservation> resource_manager::reserve_dial(peer_id peer) noexcept {
    auto reservation = reserve_dial();
-   if (!reservation || !reservation->bind(std::move(peer))) {
+   if (!reservation || reservation->bind(std::move(peer)) != transition_result::accepted) {
       return std::nullopt;
    }
    return reservation;
@@ -100,11 +100,11 @@ std::optional<resource_manager::relay_reservation> resource_manager::reserve_rel
    return reserve_relay(std::move(value.peer));
 }
 
-bool resource_manager::record_malformed(peer_id peer) noexcept {
-   return state_ && state_->record_malformed(peer);
+resource_manager::transition_result resource_manager::record_malformed(peer_id peer) noexcept {
+   return state_ ? state_->record_malformed(peer) : transition_result::invalid_transition;
 }
 
-bool resource_manager::record_malformed(scope value) noexcept {
+resource_manager::transition_result resource_manager::record_malformed(scope value) noexcept {
    return record_malformed(std::move(value.peer));
 }
 
@@ -190,8 +190,8 @@ bool resource_manager::session_reservation::established() const noexcept {
    return active() && owner_->session_established(ledger_);
 }
 
-bool resource_manager::session_reservation::establish(session_scope value) noexcept {
-   return active() && owner_->establish_session(ledger_, std::move(value));
+resource_manager::transition_result resource_manager::session_reservation::establish(session_scope value) noexcept {
+   return active() ? owner_->establish_session(ledger_, std::move(value)) : transition_result::invalid_transition;
 }
 
 std::optional<resource_manager::memory_reservation>
@@ -248,8 +248,8 @@ bool resource_manager::dial_reservation::bound() const noexcept {
    return owner_ && owner_->dial_bound(ledger_);
 }
 
-bool resource_manager::dial_reservation::bind(peer_id peer) noexcept {
-   return owner_ && owner_->bind_dial(ledger_, std::move(peer));
+resource_manager::transition_result resource_manager::dial_reservation::bind(peer_id peer) noexcept {
+   return owner_ ? owner_->bind_dial(ledger_, std::move(peer)) : transition_result::invalid_transition;
 }
 
 void resource_manager::dial_reservation::release() noexcept {

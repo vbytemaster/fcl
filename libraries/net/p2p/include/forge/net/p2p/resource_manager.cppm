@@ -177,6 +177,13 @@ class resource_manager {
    class memory_reservation;
    class file_descriptor_reservation;
 
+   enum class transition_result : std::uint8_t {
+      accepted,
+      policy_rejected,
+      invalid_transition,
+      runtime_failure,
+   };
+
    resource_manager();
    explicit resource_manager(limits value);
    ~resource_manager();
@@ -190,8 +197,8 @@ class resource_manager {
    [[nodiscard]] std::optional<stream_reservation> reserve_stream(peer_id peer, session_direction direction) noexcept;
    [[nodiscard]] std::optional<relay_reservation> reserve_relay(peer_id peer) noexcept;
    [[nodiscard]] std::optional<relay_reservation> reserve_relay(scope value) noexcept;
-   [[nodiscard]] bool record_malformed(peer_id peer) noexcept;
-   [[nodiscard]] bool record_malformed(scope value) noexcept;
+   [[nodiscard]] transition_result record_malformed(peer_id peer) noexcept;
+   [[nodiscard]] transition_result record_malformed(scope value) noexcept;
 
  private:
    struct state;
@@ -234,7 +241,7 @@ class resource_manager::session_reservation {
 
    [[nodiscard]] bool active() const noexcept;
    [[nodiscard]] bool established() const noexcept;
-   [[nodiscard]] bool establish(session_scope value) noexcept;
+   [[nodiscard]] transition_result establish(session_scope value) noexcept;
    [[nodiscard]] std::optional<memory_reservation>
    reserve_memory(std::uint64_t bytes, memory_priority priority = memory_priority::always) noexcept;
    [[nodiscard]] std::optional<file_descriptor_reservation> reserve_file_descriptors(std::size_t count) noexcept;
@@ -259,7 +266,7 @@ class resource_manager::dial_reservation {
 
    [[nodiscard]] bool active() const noexcept;
    [[nodiscard]] bool bound() const noexcept;
-   [[nodiscard]] bool bind(peer_id peer) noexcept;
+   [[nodiscard]] transition_result bind(peer_id peer) noexcept;
    void release() noexcept;
 
  private:
@@ -272,12 +279,7 @@ class resource_manager::dial_reservation {
 
 class resource_manager::stream_reservation {
  public:
-   enum class bind_result : std::uint8_t {
-      accepted,
-      policy_rejected,
-      invalid_transition,
-      runtime_failure,
-   };
+   using bind_result = transition_result;
 
    stream_reservation() noexcept;
    ~stream_reservation();

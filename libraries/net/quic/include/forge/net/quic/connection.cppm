@@ -40,6 +40,7 @@ class connection {
    boost::asio::awaitable<stream> async_accept_stream();
    boost::asio::awaitable<void> async_close();
    void cancel();
+   void request_cancel() noexcept;
 
  private:
    friend struct detail::connection_access;

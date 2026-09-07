@@ -337,15 +337,6 @@ class tcp_profile final {
              std::make_shared<std::optional<resource_manager::file_descriptor_reservation>>();
          auto tcp =
              std::make_shared<forge::net::tcp::connection>(co_await listener->async_accept_connection(native_lifetime));
-         auto admission = resources_.reserve_session(resource_manager::session_direction::inbound);
-         if (!admission) {
-            FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P inbound session limit reached");
-         }
-         auto descriptor = admission->reserve_file_descriptors(1);
-         if (!descriptor) {
-            FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P inbound TCP file descriptor limit reached");
-         }
-         native_lifetime->emplace(std::move(*descriptor));
          try {
             if (!listener_is_current(key, listener)) {
                FORGE_THROW_EXCEPTION(exceptions::closed, "P2P TCP direct listener stopped during accept");
@@ -353,6 +344,15 @@ class tcp_profile final {
             const auto local_endpoint = p2p_endpoint_for(tcp->local_endpoint());
             const auto remote_endpoint = p2p_endpoint_for(tcp->remote_endpoint());
             gate_->accept(local_endpoint, remote_endpoint);
+            auto admission = resources_.reserve_session(resource_manager::session_direction::inbound);
+            if (!admission) {
+               FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P inbound session limit reached");
+            }
+            auto descriptor = admission->reserve_file_descriptors(1);
+            if (!descriptor) {
+               FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P inbound TCP file descriptor limit reached");
+            }
+            native_lifetime->emplace(std::move(*descriptor));
             auto cancel_current = std::make_shared<cancellation_latch>();
             track(cancel_current);
             cancel_current->arm([tcp] noexcept { tcp->request_cancel(); });
@@ -374,10 +374,15 @@ class tcp_profile final {
                            },
                        .established =
                            [&admission](const peer_id& peer) {
-                              if (!admission->establish(resource_manager::session_scope{
-                                      .peer = peer,
-                                      .direction = resource_manager::session_direction::inbound,
-                                  })) {
+                              const auto transition = admission->establish(resource_manager::session_scope{
+                                  .peer = peer,
+                                  .direction = resource_manager::session_direction::inbound,
+                              });
+                              if (transition != resource_manager::transition_result::accepted) {
+                                 if (transition != resource_manager::transition_result::policy_rejected) {
+                                    FORGE_THROW_EXCEPTION(exceptions::internal,
+                                                          "P2P inbound TCP session resource transition failed");
+                                 }
                                  FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected,
                                                        "P2P established inbound session limit reached");
                               }
@@ -417,10 +422,7 @@ class tcp_profile final {
                 .authentication = upgraded.authentication,
             };
          } catch (...) {
-            try {
-               tcp->cancel();
-            } catch (...) {
-            }
+            tcp->request_cancel();
             throw;
          }
       } catch (const forge::exceptions::base& error) {

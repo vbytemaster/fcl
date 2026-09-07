@@ -677,10 +677,14 @@ node::impl::ensure_relay_session(const peer_id& peer, const peer_id& relay_peer,
    }
    auto upgraded = co_await open_relay_yamux(
        peer, relay_peer, timeout, [this, &reservation](const peer_id& authenticated_peer) {
-          if (!reservation->establish(resource_manager::session_scope{
-                  .peer = authenticated_peer,
-                  .direction = resource_manager::session_direction::outbound,
-              })) {
+          const auto transition = reservation->establish(resource_manager::session_scope{
+              .peer = authenticated_peer,
+              .direction = resource_manager::session_direction::outbound,
+          });
+          if (transition != resource_manager::transition_result::accepted) {
+             if (transition != resource_manager::transition_result::policy_rejected) {
+                FORGE_THROW_EXCEPTION(exceptions::internal, "P2P outbound relay session resource transition failed");
+             }
              {
                 auto lock = std::scoped_lock{mutex};
                 ++metrics_value.backpressure_rejections;
@@ -790,13 +794,18 @@ boost::asio::awaitable<void> node::impl::handle_relay_stop(std::shared_ptr<node:
            .secured =
                [gate = connection_gate, local_endpoint, remote_endpoint](const peer_id& authenticated_peer) {
                   gate->secured(connection_direction::inbound, authenticated_peer, local_endpoint, remote_endpoint);
-               },
+           },
            .established =
                [&reservation](const peer_id& authenticated_peer) {
-                  if (!reservation->establish(resource_manager::session_scope{
-                          .peer = authenticated_peer,
-                          .direction = resource_manager::session_direction::inbound,
-                      })) {
+                  const auto transition = reservation->establish(resource_manager::session_scope{
+                      .peer = authenticated_peer,
+                      .direction = resource_manager::session_direction::inbound,
+                  });
+                  if (transition != resource_manager::transition_result::accepted) {
+                     if (transition != resource_manager::transition_result::policy_rejected) {
+                        FORGE_THROW_EXCEPTION(exceptions::internal,
+                                              "P2P inbound relay session resource transition failed");
+                     }
                      FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected,
                                            "P2P established inbound relay session limit reached");
                   }

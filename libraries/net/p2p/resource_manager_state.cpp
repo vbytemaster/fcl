@@ -23,6 +23,9 @@ namespace forge::net::p2p {
 namespace {
 
 std::atomic_bool service_bind_prepare_failpoint = false;
+std::atomic_bool session_establish_prepare_failpoint = false;
+std::atomic_bool dial_bind_prepare_failpoint = false;
+std::atomic_bool malformed_record_prepare_failpoint = false;
 
 template <typename T> [[nodiscard]] bool can_add(T current, T delta, T limit) noexcept {
    return current <= limit && delta <= limit - current;
@@ -497,25 +500,33 @@ bool resource_manager::state::dial_bound(const std::shared_ptr<dial_ledger>& val
    return value && value->active && value->peer.has_value();
 }
 
-bool resource_manager::state::bind_dial(const std::shared_ptr<dial_ledger>& value, peer_id peer) noexcept {
+resource_manager::transition_result resource_manager::state::bind_dial(const std::shared_ptr<dial_ledger>& value,
+                                                                        peer_id peer) noexcept {
    auto lock = std::scoped_lock{mutex_};
    if (!value || !value->active || value->peer || peer.value.empty()) {
-      return reject_invalid_transition_locked();
+      static_cast<void>(reject_invalid_transition_locked());
+      return transition_result::invalid_transition;
    }
    const auto found = dial_attempts_by_peer_.find(peer);
    const auto attempts = found == dial_attempts_by_peer_.end() ? 0 : found->second;
    if (attempts >= limits_.max_dial_attempts_per_peer) {
-      return reject_limit_locked(snapshot_.denied_dials);
+      static_cast<void>(reject_limit_locked(snapshot_.denied_dials));
+      return transition_result::policy_rejected;
    }
    try {
-      auto [entry, inserted] = dial_attempts_by_peer_.try_emplace(peer);
+      if (dial_bind_prepare_failpoint.exchange(false, std::memory_order_relaxed)) {
+         throw std::bad_alloc{};
+      }
+      auto next_peer = std::optional<peer_id>{};
+      next_peer.emplace(std::move(peer));
+      auto [entry, inserted] = dial_attempts_by_peer_.try_emplace(*next_peer);
       static_cast<void>(inserted);
       ++entry->second;
-      value->peer.emplace(std::move(peer));
-      return true;
+      value->peer.swap(next_peer);
+      return transition_result::accepted;
    } catch (...) {
       record_runtime_failure_locked();
-      return false;
+      return transition_result::runtime_failure;
    }
 }
 
@@ -575,24 +586,29 @@ void resource_manager::state::release_relay(const peer_id& peer) noexcept {
    }
 }
 
-bool resource_manager::state::record_malformed(const peer_id& peer) noexcept {
+resource_manager::transition_result resource_manager::state::record_malformed(const peer_id& peer) noexcept {
    auto lock = std::scoped_lock{mutex_};
    if (peer.value.empty()) {
-      return reject_invalid_transition_locked();
+      static_cast<void>(reject_invalid_transition_locked());
+      return transition_result::invalid_transition;
    }
    const auto found = malformed_by_peer_.find(peer);
    const auto messages = found == malformed_by_peer_.end() ? 0 : found->second;
    if (messages >= limits_.max_malformed_messages_per_peer) {
-      return reject_limit_locked(snapshot_.denied_malformed);
+      static_cast<void>(reject_limit_locked(snapshot_.denied_malformed));
+      return transition_result::policy_rejected;
    }
    try {
+      if (malformed_record_prepare_failpoint.exchange(false, std::memory_order_relaxed)) {
+         throw std::bad_alloc{};
+      }
       auto [entry, inserted] = malformed_by_peer_.try_emplace(peer);
       static_cast<void>(inserted);
       ++entry->second;
-      return true;
+      return transition_result::accepted;
    } catch (...) {
       record_runtime_failure_locked();
-      return false;
+      return transition_result::runtime_failure;
    }
 }
 
@@ -611,15 +627,20 @@ bool resource_manager::state::stream_service_bound(const std::shared_ptr<ledger>
    return value && value->parent_active && value->value_kind == ledger::kind::stream && value->service.has_value();
 }
 
-bool resource_manager::state::establish_session(const std::shared_ptr<ledger>& value, session_scope scope) noexcept {
+resource_manager::transition_result resource_manager::state::establish_session(const std::shared_ptr<ledger>& value,
+                                                                                session_scope scope) noexcept {
    auto lock = std::scoped_lock{mutex_};
    if (!value || !value->parent_active || value->value_kind != ledger::kind::connection || value->peer ||
        !value->transient || scope.peer.value.empty() || scope.direction != value->direction) {
-      return reject_invalid_transition_locked();
+      static_cast<void>(reject_invalid_transition_locked());
+      return transition_result::invalid_transition;
    }
    auto peer = peers_.end();
    auto peer_inserted = false;
    try {
+      if (session_establish_prepare_failpoint.exchange(false, std::memory_order_relaxed)) {
+         throw std::bad_alloc{};
+      }
       auto next_peer = std::optional<peer_id>{};
       next_peer.emplace(std::move(scope.peer));
       std::tie(peer, peer_inserted) = peers_.try_emplace(*next_peer);
@@ -627,30 +648,31 @@ bool resource_manager::state::establish_session(const std::shared_ptr<ledger>& v
          if (peer_inserted && empty(peer->second.usage)) {
             peers_.erase(peer);
          }
-         return reject_limit_locked(snapshot_.denied_scope_migrations);
+         static_cast<void>(reject_limit_locked(snapshot_.denied_scope_migrations));
+         return transition_result::policy_rejected;
       }
       remove_locked(transient_, value->usage);
       add_locked(peer->second, value->usage);
       value->peer.swap(next_peer);
       value->transient = false;
-      return true;
+      return transition_result::accepted;
    } catch (...) {
       if (peer_inserted && peer != peers_.end() && empty(peer->second.usage)) {
          peers_.erase(peer);
       }
       record_runtime_failure_locked();
-      return false;
+      return transition_result::runtime_failure;
    }
 }
 
-resource_manager::stream_reservation::bind_result
+resource_manager::transition_result
 resource_manager::state::bind_protocol(const std::shared_ptr<ledger>& value, const protocol_id& protocol) noexcept {
-   using bind_result = stream_reservation::bind_result;
+   using transition_result = resource_manager::transition_result;
    auto lock = std::scoped_lock{mutex_};
    if (!value || !value->parent_active || value->value_kind != ledger::kind::stream || !value->peer ||
        value->protocol || !value->transient || protocol.value.empty()) {
       static_cast<void>(reject_invalid_transition_locked());
-      return bind_result::invalid_transition;
+      return transition_result::invalid_transition;
    }
    auto protocol_scope = protocols_.end();
    auto protocol_peer = protocol_peers_.end();
@@ -677,14 +699,14 @@ resource_manager::state::bind_protocol(const std::shared_ptr<ledger>& value, con
             protocols_.erase(protocol_scope);
          }
          static_cast<void>(reject_limit_locked(snapshot_.denied_scope_migrations));
-         return bind_result::policy_rejected;
+         return transition_result::policy_rejected;
       }
       remove_locked(transient_, value->usage);
       add_locked(protocol_scope->second, value->usage);
       add_locked(protocol_peer_scope->second, value->usage);
       value->protocol.swap(next_protocol);
       value->transient = false;
-      return bind_result::accepted;
+      return transition_result::accepted;
    } catch (...) {
       if (protocol_peer_scope_inserted && protocol_peer != protocol_peers_.end()) {
          protocol_peer->second.erase(protocol_peer_scope);
@@ -696,23 +718,23 @@ resource_manager::state::bind_protocol(const std::shared_ptr<ledger>& value, con
          protocols_.erase(protocol_scope);
       }
       record_runtime_failure_locked();
-      return bind_result::runtime_failure;
+      return transition_result::runtime_failure;
    }
 }
 
-resource_manager::stream_reservation::bind_result
+resource_manager::transition_result
 resource_manager::state::bind_service(const std::shared_ptr<ledger>& value, std::string_view service) noexcept {
    auto lock = std::scoped_lock{mutex_};
    return bind_service_locked(value, service);
 }
 
-resource_manager::stream_reservation::bind_result
+resource_manager::transition_result
 resource_manager::state::bind_service_locked(const std::shared_ptr<ledger>& value, std::string_view service) noexcept {
-   using bind_result = stream_reservation::bind_result;
+   using transition_result = resource_manager::transition_result;
    if (!value || !value->parent_active || value->value_kind != ledger::kind::stream || !value->peer ||
        !value->protocol || value->service || service.empty()) {
       static_cast<void>(reject_invalid_transition_locked());
-      return bind_result::invalid_transition;
+      return transition_result::invalid_transition;
    }
    auto service_scope = services_.end();
    auto service_peer = service_peers_.end();
@@ -741,12 +763,12 @@ resource_manager::state::bind_service_locked(const std::shared_ptr<ledger>& valu
             services_.erase(service_scope);
          }
          static_cast<void>(reject_limit_locked(snapshot_.denied_scope_migrations));
-         return bind_result::policy_rejected;
+         return transition_result::policy_rejected;
       }
       add_locked(service_scope->second, value->usage);
       add_locked(service_peer_scope->second, value->usage);
       value->service.swap(next_service);
-      return bind_result::accepted;
+      return transition_result::accepted;
    } catch (...) {
       if (service_peer_scope_inserted && service_peer != service_peers_.end()) {
          service_peer->second.erase(service_peer_scope);
@@ -758,7 +780,7 @@ resource_manager::state::bind_service_locked(const std::shared_ptr<ledger>& valu
          services_.erase(service_scope);
       }
       record_runtime_failure_locked();
-      return bind_result::runtime_failure;
+      return transition_result::runtime_failure;
    }
 }
 
@@ -842,6 +864,18 @@ namespace detail {
 
 void fail_next_service_bind_prepare_for_test() noexcept {
    service_bind_prepare_failpoint.store(true, std::memory_order_relaxed);
+}
+
+void fail_next_session_establish_prepare_for_test() noexcept {
+   session_establish_prepare_failpoint.store(true, std::memory_order_relaxed);
+}
+
+void fail_next_dial_bind_prepare_for_test() noexcept {
+   dial_bind_prepare_failpoint.store(true, std::memory_order_relaxed);
+}
+
+void fail_next_malformed_record_prepare_for_test() noexcept {
+   malformed_record_prepare_failpoint.store(true, std::memory_order_relaxed);
 }
 
 } // namespace detail

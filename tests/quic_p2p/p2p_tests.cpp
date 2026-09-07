@@ -781,6 +781,11 @@ node::options options_for(peer_id id, capability_set capabilities = capability_s
    return actual == expected;
 }
 
+[[nodiscard]] bool transition_matches(resource_manager::transition_result actual,
+                                      resource_manager::transition_result expected) noexcept {
+   return actual == expected;
+}
+
 enum class session_admission_headroom {
    none,
    one_session,
@@ -2488,6 +2493,12 @@ BOOST_AUTO_TEST_CASE(p2p_connection_gater_local_denials_are_typed_and_leave_no_c
          BOOST_TEST(client.diagnostics().resources.system.outbound_connections == 0U);
          BOOST_TEST(client.diagnostics().resources.denied_connections == 0U);
          BOOST_TEST(!client.peers().find(server.local_peer()).has_value());
+         const auto descriptor_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+         while (client.diagnostics().resources.system.file_descriptors != 0U &&
+                std::chrono::steady_clock::now() < descriptor_deadline) {
+            wait_on_runtime(runtime, std::chrono::milliseconds{1}, "P2P locally rejected session descriptor release");
+         }
+         BOOST_TEST(client.diagnostics().resources.system.file_descriptors == 0U);
 
          forge::asio::blocking::run(runtime, client.async_stop());
          forge::asio::blocking::run(runtime, server.async_stop());
@@ -2574,6 +2585,7 @@ BOOST_AUTO_TEST_CASE(p2p_connection_gater_inbound_denials_leave_no_server_state_
                                                                      ? make_tcp_endpoint(0)
                                                                      : make_quic_endpoint(0)));
          const auto server_endpoint = require_endpoint_for(server.local_endpoints(), transport);
+         const auto resources_before = server.diagnostics().resources;
          try {
             static_cast<void>(forge::asio::blocking::run(
                 runtime,
@@ -2595,6 +2607,13 @@ BOOST_AUTO_TEST_CASE(p2p_connection_gater_inbound_denials_leave_no_server_state_
          BOOST_TEST(server.metrics().active_sessions == 0U);
          BOOST_TEST(server.diagnostics().sessions.empty());
          BOOST_TEST(!server.peers().find(client.local_peer()).has_value());
+         if (transport == endpoint::protocol_kind::tcp && rejected == recorded_gater_stage::accept) {
+            const auto resources = server.diagnostics().resources;
+            BOOST_TEST(resources.transient.inbound_connections == resources_before.transient.inbound_connections);
+            BOOST_TEST(resources.system.inbound_connections == resources_before.system.inbound_connections);
+            BOOST_TEST(resources.transient.file_descriptors == resources_before.transient.file_descriptors);
+            BOOST_TEST(resources.system.file_descriptors == resources_before.system.file_descriptors);
+         }
 
          forge::asio::blocking::run(runtime, client.async_stop());
          forge::asio::blocking::run(runtime, server.async_stop());
@@ -5144,7 +5163,7 @@ BOOST_AUTO_TEST_CASE(p2p_session_lifecycle_ignores_stale_replaced_session) {
 
 BOOST_AUTO_TEST_CASE(p2p_session_lifecycle_cancels_rejected_new_session) {
    struct tracked_connection {
-      void cancel() {
+      void request_cancel() noexcept {
          canceled = true;
          ++cancel_count;
       }
@@ -7166,13 +7185,14 @@ BOOST_AUTO_TEST_CASE(p2p_resource_manager_enforces_peer_protocol_dial_and_reserv
 
    auto dial = manager.reserve_dial();
    BOOST_REQUIRE(dial);
-   BOOST_TEST(dial->bind(owner));
+   BOOST_TEST(transition_matches(dial->bind(owner), resource_manager::transition_result::accepted));
    BOOST_TEST(!manager.reserve_dial(owner));
    BOOST_TEST(manager.current().active_dials == 1U);
    dial.reset();
    BOOST_TEST(manager.current().active_dials == 0U);
-   BOOST_TEST(manager.record_malformed(owner));
-   BOOST_TEST(!manager.record_malformed(owner));
+   BOOST_TEST(transition_matches(manager.record_malformed(owner), resource_manager::transition_result::accepted));
+   BOOST_TEST(
+       transition_matches(manager.record_malformed(owner), resource_manager::transition_result::policy_rejected));
 
    const auto snapshot = manager.current();
    BOOST_TEST(snapshot.denied_streams >= 1U);
@@ -7218,14 +7238,17 @@ BOOST_AUTO_TEST_CASE(p2p_resource_manager_enforces_connection_session_scopes) {
 
    auto active_inbound = manager.reserve_session(resource_manager::session_direction::inbound);
    BOOST_REQUIRE(active_inbound);
-   BOOST_TEST(active_inbound->establish(inbound));
+   BOOST_TEST(transition_matches(active_inbound->establish(inbound),
+                                 resource_manager::transition_result::accepted));
    auto duplicate = manager.reserve_session(resource_manager::session_direction::inbound);
    BOOST_REQUIRE(duplicate);
-   BOOST_TEST(!duplicate->establish(inbound));
+   BOOST_TEST(transition_matches(duplicate->establish(inbound),
+                                 resource_manager::transition_result::policy_rejected));
    duplicate.reset();
    auto active_outbound = manager.reserve_session(resource_manager::session_direction::outbound);
    BOOST_REQUIRE(active_outbound);
-   BOOST_TEST(active_outbound->establish(outbound));
+   BOOST_TEST(transition_matches(active_outbound->establish(outbound),
+                                 resource_manager::transition_result::accepted));
    active_inbound.reset();
    active_outbound.reset();
 
@@ -7243,8 +7266,11 @@ BOOST_AUTO_TEST_CASE(p2p_resource_manager_enforces_connection_session_scopes) {
    }};
    auto saturated_session = saturated.reserve_session(resource_manager::session_direction::inbound);
    BOOST_REQUIRE(saturated_session);
-   BOOST_TEST(saturated_session->establish(
-       resource_manager::session_scope{.peer = peer(105), .direction = resource_manager::session_direction::inbound}));
+   BOOST_TEST(transition_matches(
+       saturated_session->establish(
+           resource_manager::session_scope{.peer = peer(105),
+                                           .direction = resource_manager::session_direction::inbound}),
+       resource_manager::transition_result::accepted));
    auto rejected_session = saturated.reserve_session(resource_manager::session_direction::inbound);
    BOOST_TEST(!rejected_session);
    auto saturated_snapshot = saturated.current();

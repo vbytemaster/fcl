@@ -17,6 +17,13 @@ struct session::impl {
    std::shared_ptr<detail::session_concept> model;
 };
 
+void detail::session_concept::request_cancel() noexcept {
+   try {
+      cancel();
+   } catch (...) {
+   }
+}
+
 session::session() = default;
 session::session(std::shared_ptr<detail::session_concept> model) : impl_(std::make_shared<impl>()) {
    impl_->model = std::move(model);
@@ -54,6 +61,12 @@ boost::asio::awaitable<void> session::async_close() {
 void session::cancel() {
    if (valid()) {
       impl_->model->cancel();
+   }
+}
+
+void session::request_cancel() noexcept {
+   if (impl_ && impl_->model) {
+      impl_->model->request_cancel();
    }
 }
 

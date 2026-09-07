@@ -79,6 +79,7 @@ add_library(
    host_addresses.cpp
    details/host_addresses.hxx
    direct_transport_quic.cpp
+   details/direct_transport_quic.hxx
    quic_client_options.cpp
    details/quic_client_options.hxx
    quic_client_token_cache.cpp

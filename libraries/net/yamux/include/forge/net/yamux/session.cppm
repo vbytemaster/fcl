@@ -30,6 +30,7 @@ class session {
    boost::asio::awaitable<transport::stream> async_accept_stream();
    boost::asio::awaitable<void> async_close();
    void cancel();
+   void request_cancel() noexcept;
 
    [[nodiscard]] transport::session as_transport() &&;
 

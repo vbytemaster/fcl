@@ -38,6 +38,7 @@ struct session::impl final : std::enable_shared_from_this<session::impl> {
    boost::asio::awaitable<transport::stream> async_accept_stream();
    boost::asio::awaitable<void> async_close();
    void cancel();
+   void request_cancel() noexcept;
 
    boost::asio::awaitable<void> write_stream(const std::shared_ptr<stream_state>& state, detail::bytes payload,
                                              std::shared_ptr<void> lifetime = {});

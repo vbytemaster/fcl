@@ -72,6 +72,12 @@ void session::cancel() {
    }
 }
 
+void session::request_cancel() noexcept {
+   if (impl_) {
+      impl_->request_cancel();
+   }
+}
+
 transport::session session::as_transport() && {
    return transport::detail::session_access::make(std::make_shared<session_model>(std::move(*this)));
 }

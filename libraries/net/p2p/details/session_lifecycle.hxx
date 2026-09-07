@@ -36,11 +36,7 @@ template <typename Session> void mark_rejected_session(const std::shared_ptr<Ses
 }
 
 template <typename Connection> void request_session_cancel(Connection& connection) noexcept {
-   try {
-      connection.cancel();
-   } catch (...) {
-      // Cancellation is a best-effort wakeup. The caller still owns graceful cleanup.
-   }
+   connection.request_cancel();
 }
 
 template <typename Session> void cancel_marked_session(const std::shared_ptr<Session>& session) noexcept {

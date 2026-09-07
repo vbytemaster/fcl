@@ -16,6 +16,9 @@ module forge.net.p2p.resource_manager;
 
 namespace forge::net::p2p::detail {
 void fail_next_service_bind_prepare_for_test() noexcept;
+void fail_next_session_establish_prepare_for_test() noexcept;
+void fail_next_dial_bind_prepare_for_test() noexcept;
+void fail_next_malformed_record_prepare_for_test() noexcept;
 }
 
 namespace forge::net::p2p {
@@ -35,6 +38,15 @@ namespace {
 
 [[nodiscard]] bool bind_matches(resource_manager::stream_reservation::bind_result actual,
                                 resource_manager::stream_reservation::bind_result expected) noexcept {
+   return actual == expected;
+}
+
+[[nodiscard]] bool transition_accepted(resource_manager::transition_result result) noexcept {
+   return result == resource_manager::transition_result::accepted;
+}
+
+[[nodiscard]] bool transition_matches(resource_manager::transition_result actual,
+                                      resource_manager::transition_result expected) noexcept {
    return actual == expected;
 }
 
@@ -119,8 +131,8 @@ BOOST_AUTO_TEST_CASE(resource_manager_migrates_session_children_from_transient_t
    auto descriptors = session->reserve_file_descriptors(1);
    BOOST_REQUIRE(memory);
    BOOST_REQUIRE(descriptors);
-   BOOST_REQUIRE(session->establish(
-       {.peer = test_peer("session-peer"), .direction = resource_manager::session_direction::outbound}));
+   BOOST_REQUIRE(transition_accepted(session->establish(
+       {.peer = test_peer("session-peer"), .direction = resource_manager::session_direction::outbound})));
    BOOST_TEST(session->established());
    const auto established = manager.current();
    BOOST_TEST(established.transient.memory == 0U);
@@ -422,6 +434,32 @@ BOOST_AUTO_TEST_CASE(resource_manager_separates_policy_rejection_from_invalid_an
    BOOST_TEST(after_invalid.denied == before_invalid.denied);
    BOOST_TEST(after_invalid.invalid_transitions == before_invalid.invalid_transitions + 1U);
    BOOST_TEST(after_invalid.runtime_failures == before_invalid.runtime_failures);
+
+   auto session = manager.reserve_session(resource_manager::session_direction::outbound);
+   BOOST_REQUIRE(session);
+   detail::fail_next_session_establish_prepare_for_test();
+   BOOST_TEST(transition_matches(
+       session->establish(
+           {.peer = test_peer("session-runtime"), .direction = resource_manager::session_direction::outbound}),
+       resource_manager::transition_result::runtime_failure));
+   BOOST_TEST(!session->established());
+
+   auto dial = manager.reserve_dial();
+   BOOST_REQUIRE(dial);
+   detail::fail_next_dial_bind_prepare_for_test();
+   BOOST_TEST(transition_matches(dial->bind(test_peer("dial-runtime")),
+                                 resource_manager::transition_result::runtime_failure));
+   BOOST_TEST(!dial->bound());
+
+   detail::fail_next_malformed_record_prepare_for_test();
+   BOOST_TEST(transition_matches(manager.record_malformed(test_peer("malformed-runtime")),
+                                 resource_manager::transition_result::runtime_failure));
+
+   const auto after_runtime = manager.current();
+   BOOST_TEST(after_runtime.denied == after_invalid.denied);
+   BOOST_TEST(after_runtime.runtime_failures == after_invalid.runtime_failures + 3U);
+   BOOST_TEST(after_runtime.transient.outbound_connections == 1U);
+   BOOST_TEST(after_runtime.peers.outbound_connections == 0U);
 }
 
 BOOST_AUTO_TEST_CASE(resource_manager_reports_service_bind_allocation_failure_without_policy_denial) {
@@ -463,11 +501,12 @@ BOOST_AUTO_TEST_CASE(resource_manager_preserves_independent_operational_budgets)
 
    auto first_dial = manager.reserve_dial();
    BOOST_REQUIRE(first_dial);
-   BOOST_REQUIRE(first_dial->bind(test_peer("dial-peer-a")));
+   BOOST_REQUIRE(transition_accepted(first_dial->bind(test_peer("dial-peer-a"))));
    auto second_dial = manager.reserve_dial();
    BOOST_REQUIRE(second_dial);
-   BOOST_TEST(!second_dial->bind(test_peer("dial-peer-a")));
-   BOOST_REQUIRE(second_dial->bind(test_peer("dial-peer-b")));
+   BOOST_TEST(transition_matches(second_dial->bind(test_peer("dial-peer-a")),
+                                 resource_manager::transition_result::policy_rejected));
+   BOOST_REQUIRE(transition_accepted(second_dial->bind(test_peer("dial-peer-b"))));
    BOOST_TEST(!manager.reserve_dial());
    const auto dials = manager.current();
    BOOST_TEST(dials.active_dials == 2U);
@@ -488,12 +527,13 @@ BOOST_AUTO_TEST_CASE(resource_manager_preserves_independent_operational_budgets)
    auto retried_relay = manager.reserve_relay(test_peer("relay-peer-b"));
    BOOST_REQUIRE(retried_relay);
 
-   BOOST_REQUIRE(manager.record_malformed(resource_manager::scope{
+   BOOST_REQUIRE(transition_accepted(manager.record_malformed(resource_manager::scope{
        .peer = test_peer("malformed-peer-a"),
        .protocol = test_protocol("/malformed/1"),
-   }));
-   BOOST_TEST(!manager.record_malformed(test_peer("malformed-peer-a")));
-   BOOST_REQUIRE(manager.record_malformed(test_peer("malformed-peer-b")));
+   })));
+   BOOST_TEST(transition_matches(manager.record_malformed(test_peer("malformed-peer-a")),
+                                 resource_manager::transition_result::policy_rejected));
+   BOOST_REQUIRE(transition_accepted(manager.record_malformed(test_peer("malformed-peer-b"))));
    const auto malformed = manager.current();
    BOOST_TEST(malformed.malformed_scopes == 2U);
    BOOST_TEST(malformed.denied_malformed == 1U);
@@ -505,7 +545,8 @@ BOOST_AUTO_TEST_CASE(resource_manager_preserves_independent_operational_budgets)
    }};
    BOOST_TEST(!zero.reserve_dial());
    BOOST_TEST(!zero.reserve_relay(test_peer("zero-relay")));
-   BOOST_TEST(!zero.record_malformed(test_peer("zero-malformed")));
+   BOOST_TEST(transition_matches(zero.record_malformed(test_peer("zero-malformed")),
+                                 resource_manager::transition_result::policy_rejected));
    const auto zero_limits = zero.current();
    BOOST_TEST(zero_limits.denied == 3U);
    BOOST_TEST(zero_limits.denied_dials == 1U);
@@ -519,7 +560,8 @@ BOOST_AUTO_TEST_CASE(resource_manager_preserves_independent_operational_budgets)
    }};
    auto zero_per_peer_dial = zero_per_peer.reserve_dial();
    BOOST_REQUIRE(zero_per_peer_dial);
-   BOOST_TEST(!zero_per_peer_dial->bind(test_peer("zero-dial-peer")));
+   BOOST_TEST(transition_matches(zero_per_peer_dial->bind(test_peer("zero-dial-peer")),
+                                 resource_manager::transition_result::policy_rejected));
    const auto zero_per_peer_limits = zero_per_peer.current();
    BOOST_TEST(zero_per_peer_limits.denied == 1U);
    BOOST_TEST(zero_per_peer_limits.denied_dials == 1U);
@@ -528,9 +570,11 @@ BOOST_AUTO_TEST_CASE(resource_manager_preserves_independent_operational_budgets)
    auto invalid = resource_manager{};
    auto invalid_dial = invalid.reserve_dial();
    BOOST_REQUIRE(invalid_dial);
-   BOOST_TEST(!invalid_dial->bind(test_peer("")));
+   BOOST_TEST(transition_matches(invalid_dial->bind(test_peer("")),
+                                 resource_manager::transition_result::invalid_transition));
    BOOST_TEST(!invalid.reserve_relay(test_peer("")));
-   BOOST_TEST(!invalid.record_malformed(test_peer("")));
+   BOOST_TEST(transition_matches(invalid.record_malformed(test_peer("")),
+                                 resource_manager::transition_result::invalid_transition));
    const auto invalid_operations = invalid.current();
    BOOST_TEST(invalid_operations.denied == 0U);
    BOOST_TEST(invalid_operations.invalid_transitions == 3U);
@@ -550,7 +594,8 @@ BOOST_AUTO_TEST_CASE(resource_manager_serializes_concurrent_dial_binding) {
    auto bind = [&](std::atomic_bool& result, std::string peer) {
       while (!start.load(std::memory_order_acquire)) {
       }
-      result.store(dial->bind(test_peer(std::move(peer))), std::memory_order_release);
+      result.store(dial->bind(test_peer(std::move(peer))) == resource_manager::transition_result::accepted,
+                   std::memory_order_release);
    };
    auto first_thread = std::thread{bind, std::ref(first), "dial-race-a"};
    auto second_thread = std::thread{bind, std::ref(second), "dial-race-b"};

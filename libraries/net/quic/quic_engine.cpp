@@ -721,9 +721,13 @@ struct engine_connection::impl {
    bool handshake_done = false;
    bool closing = false;
    bool canceled = false;
+   std::atomic_bool cancellation_requested{false};
+   std::atomic_bool terminal_signaled{false};
+   forge::asio::notification termination_changed;
    bool closed_hook_called = false;
    bool closed_hook_delivered = false;
    bool receive_loop_started = false;
+   bool cancel_request_worker_started = false;
    std::atomic_size_t background_jobs{0};
    bool drain_active = false;
    bool drain_requested = false;
@@ -988,8 +992,14 @@ struct engine_connection::impl {
       }
    }
 
+   void signal_terminal() noexcept {
+      terminal_signaled.store(true, std::memory_order_release);
+      termination_changed.notify();
+   }
+
    void fail_all() noexcept {
       assert(strand.running_in_this_thread());
+      signal_terminal();
       canceled = true;
       closing = true;
       pending_client_token.reset();
@@ -1009,6 +1019,7 @@ struct engine_connection::impl {
 
    void close_transport(bool cancel_socket) {
       assert(strand.running_in_this_thread());
+      signal_terminal();
       closing = true;
       pending_client_token.reset();
       metrics.closed.store(true, std::memory_order_relaxed);
@@ -1480,6 +1491,7 @@ struct engine_connection::impl {
    boost::asio::awaitable<void> handle_packet(std::vector<std::uint8_t> packet, udp::endpoint from) {
       assert(strand.running_in_this_thread());
       co_await asio::dispatch(strand, asio::use_awaitable);
+      start_cancel_request_worker();
       if (closing || canceled) {
          co_return;
       }
@@ -1574,6 +1586,25 @@ struct engine_connection::impl {
                value->fail_all();
             }
             co_return;
+         }
+      });
+   }
+
+   void start_cancel_request_worker() {
+      if (cancel_request_worker_started || self.expired()) {
+         return;
+      }
+      cancel_request_worker_started = true;
+      spawn_background([](const std::shared_ptr<impl>& value) -> asio::awaitable<void> {
+         auto observed = value->termination_changed.epoch();
+         while (!value->cancellation_requested.load(std::memory_order_acquire) &&
+                !value->terminal_signaled.load(std::memory_order_acquire)) {
+            observed = co_await value->termination_changed.async_wait(observed);
+         }
+         if (!value->terminal_signaled.load(std::memory_order_acquire) &&
+             value->cancellation_requested.load(std::memory_order_acquire) && !value->closing && !value->canceled) {
+            value->metrics.cancellations.fetch_add(1, std::memory_order_relaxed);
+            value->fail_all();
          }
       });
    }
@@ -2329,11 +2360,13 @@ boost::asio::awaitable<void> engine_connection::async_close() {
        impl_->strand,
        [connection = impl_]() -> asio::awaitable<void> {
           if (connection->closing) {
+             connection->signal_terminal();
              co_await connection->wait_background_idle();
              co_return;
           }
           connection->metrics.connections_closed.fetch_add(1, std::memory_order_relaxed);
           connection->closing = true;
+          connection->signal_terminal();
           if (connection->conn != nullptr) {
              auto packet = std::array<std::uint8_t, max_udp_payload_size>{};
              auto path = ngtcp2_path_storage{};
@@ -2377,6 +2410,13 @@ void engine_connection::cancel() {
       impl->metrics.cancellations.fetch_add(1, std::memory_order_relaxed);
       impl->fail_all();
    });
+}
+
+void engine_connection::request_cancel() noexcept {
+   if (impl_) {
+      impl_->cancellation_requested.store(true, std::memory_order_release);
+      impl_->termination_changed.notify();
+   }
 }
 
 struct engine_connector::impl {
