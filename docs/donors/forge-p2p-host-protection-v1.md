@@ -15,6 +15,7 @@ wire extension.
 | Default limits | Go libp2p `9cfe2cc0`, `p2p/host/resource-manager/limit_defaults.go` | Use the donor base values for transient and peer scopes. Keep Forge system concurrency explicit until donor-style host-memory auto-scaling exists. | `resource_manager::limits` |
 | Memory priority | Go libp2p `9cfe2cc0`, `p2p/host/resource-manager/scope.go` | Admit memory at `floor((priority + 1) * limit / 256)` using the donor low, medium, high and always priorities. | `memory_priority`, scoped memory reservations |
 | Native descriptors | Go libp2p `9cfe2cc0`, resource-manager connection scopes | Charge one descriptor for each TCP listener/connection and one shared UDP descriptor for a QUIC listener. Do not double-charge accepted QUIC connections sharing that socket. | direct TCP/QUIC profiles and transport-owned lifetime guards |
+| QUIC handle lifetime | Go libp2p `9cfe2cc0`, `p2p/transport/quic/conn.go` | Preserve the donor requirement that explicit close is the primary lifecycle. Forge additionally provides a C++ RAII fallback: streams retain their connection, while the last facade/stream drop permits already accepted writes to drain for a fixed bound without making write buffers strong connection owners. | QUIC connection, stream and acknowledged-write ownership |
 
 Canonical source links:
 
@@ -22,6 +23,7 @@ Canonical source links:
 - <https://github.com/libp2p/go-libp2p/blob/9cfe2cc00be5b20a0be737f002c99f81b92255c5/core/network/rcmgr.go>
 - <https://github.com/libp2p/go-libp2p/blob/9cfe2cc00be5b20a0be737f002c99f81b92255c5/p2p/host/resource-manager/limit_defaults.go>
 - <https://github.com/libp2p/go-libp2p/blob/9cfe2cc00be5b20a0be737f002c99f81b92255c5/p2p/test/transport/gating_test.go>
+- <https://github.com/libp2p/go-libp2p/blob/9cfe2cc00be5b20a0be737f002c99f81b92255c5/p2p/transport/quic/conn.go>
 
 ## Accepted Rules
 
@@ -43,6 +45,14 @@ Canonical source links:
   destroyed and release exactly once when their owning buffer or native lifetime
   is destroyed. Queued outbound chunks retain their explicit memory child through
   drain, acknowledgement or reset.
+- QUIC callers should still use `async_close()` for deterministic protocol close.
+  As a C++ safety fallback, a live stream retains the native connection after its
+  connection facade is dropped. Once the last facade/stream owner disappears,
+  accepted writes may drain until acknowledged for at most five seconds. The
+  connection then cancels and releases its native reservation even if a peer keeps
+  the connection active while withholding the stream acknowledgement. Pending and
+  retained writes never own the connection strongly, so this fallback cannot form
+  a connection/write ownership cycle.
 - `resource_manager::limits` and `snapshot` bound only dimensions explicitly
   reserved through `resource_manager`: scoped memory, file descriptors,
   connections, streams and the listed operational budgets. They do not claim a
@@ -66,6 +76,8 @@ Canonical source links:
 - Counting QUIC accepted connections as independent UDP file descriptors.
 - Releasing queued write memory when a coroutine merely hands bytes to the
   transport rather than when the transport drains, acknowledges or resets it.
+- Retaining a connection strongly from its own unacknowledged write queue, or
+  allowing facade-drop cleanup to depend only on the peer-controlled idle timer.
 - Presenting scoped reservation totals as a process-wide or native-transport
   heap limit.
 
@@ -74,6 +86,7 @@ Canonical source links:
 The implementation is not considered complete until the focused exact-head
 tests prove all five gater phases on TCP and QUIC, scope migration and rollback,
 concurrent reservation arbitration, explicitly reserved memory/descriptor
-exhaustion, cancellation, transport handoff and deterministic release. The
+exhaustion, cancellation, transport handoff, stream lifetime after facade drop,
+acknowledged detached-write drain and bounded no-ack release. The
 standard Go/Rust interop suite must remain wire-clean because this PR changes host
 policy only.

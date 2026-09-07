@@ -65,13 +65,6 @@ namespace {
    FORGE_THROW_CODE(map_error(error.kind()), error.what());
 }
 
-[[nodiscard]] std::shared_ptr<void>
-retain_write_lifetime(std::shared_ptr<void> payload, std::shared_ptr<detail::engine_connection> connection) {
-   return std::make_shared<
-       std::pair<std::shared_ptr<void>, std::shared_ptr<detail::engine_connection>>>(std::move(payload),
-                                                                                   std::move(connection));
-}
-
 } // namespace
 
 struct stream::impl {
@@ -103,7 +96,7 @@ boost::asio::awaitable<void> stream::async_write(std::span<const std::uint8_t> b
       FORGE_THROW_EXCEPTION(exceptions::stream_closed, "invalid QUIC stream");
    }
    try {
-      co_await impl_->engine->async_write(bytes, impl_->connection);
+      co_await impl_->engine->async_write(bytes);
    } catch (const detail::engine_failure& error) {
       raise_engine_failure(error);
    }
@@ -154,9 +147,8 @@ boost::asio::awaitable<void> detail::stream_access::async_write_chunk(stream& va
       FORGE_THROW_EXCEPTION(exceptions::stream_closed, "invalid QUIC stream");
    }
    auto [owned, lifetime] = forge::net::transport::detail::chunk_access::consume(std::move(bytes));
-   auto retained = retain_write_lifetime(std::move(lifetime), value.impl_->connection);
    try {
-      co_await value.impl_->engine->async_write(std::move(owned), std::move(retained));
+      co_await value.impl_->engine->async_write(std::move(owned), std::move(lifetime));
    } catch (const detail::engine_failure& error) {
       raise_engine_failure(error);
    }
