@@ -105,10 +105,18 @@ connection::connection() = default;
 connection::connection(detail::connection_handle handle)
     : impl_(std::make_shared<impl>(impl{.engine = std::move(handle.engine)})) {}
 
-connection::~connection() = default;
+connection::~connection() {
+   request_cancel();
+}
 
 connection::connection(connection&&) noexcept = default;
-connection& connection::operator=(connection&&) noexcept = default;
+connection& connection::operator=(connection&& other) noexcept {
+   if (this != &other) {
+      request_cancel();
+      impl_ = std::move(other.impl_);
+   }
+   return *this;
+}
 
 bool connection::valid() const noexcept {
    return impl_ != nullptr;

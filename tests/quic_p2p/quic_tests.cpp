@@ -2187,6 +2187,37 @@ BOOST_AUTO_TEST_CASE(quic_connection_cancel_rejects_new_streams) {
    server.stop();
 }
 
+BOOST_AUTO_TEST_CASE(quic_connection_drop_releases_native_lifetime_without_explicit_close) {
+   auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
+   auto server = listener{runtime, endpoint{.host = "127.0.0.1", .port = 0}, loopback_server_options()};
+   auto client = connector{runtime};
+   auto lifetime = std::make_shared<int>(1);
+   auto released = std::weak_ptr<void>{lifetime};
+   auto options = loopback_client_options();
+   options.connection_lifetime = std::move(lifetime);
+
+   {
+      auto accepted = boost::asio::co_spawn(runtime.context(), server.async_accept(), boost::asio::use_future);
+      auto connection = run_with_deadline(runtime, client.async_connect(server.local_endpoint(), std::move(options)),
+                                          std::chrono::milliseconds{5'000}, "connect disposable QUIC session");
+      auto inbound = get_with_deadline(accepted, std::chrono::milliseconds{5'000}, "accept disposable QUIC session");
+      BOOST_TEST(!released.expired());
+   }
+
+   run_with_deadline(
+       runtime,
+       [released]() -> boost::asio::awaitable<void> {
+          auto timer = boost::asio::steady_timer{co_await boost::asio::this_coro::executor};
+          while (!released.expired()) {
+             timer.expires_after(std::chrono::milliseconds{1});
+             co_await timer.async_wait(boost::asio::use_awaitable);
+          }
+       }(),
+       std::chrono::milliseconds{5'000}, "release dropped QUIC native lifetime");
+   BOOST_TEST(released.expired());
+   server.stop();
+}
+
 BOOST_AUTO_TEST_CASE(quic_loopback_verifies_pinned_peer_fingerprint) {
    const auto expected = sha256_fingerprint(test_certificate_der());
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
