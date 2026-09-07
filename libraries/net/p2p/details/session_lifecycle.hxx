@@ -35,14 +35,18 @@ template <typename Session> void mark_rejected_session(const std::shared_ptr<Ses
    mark_rejected_session(session->closed);
 }
 
-template <typename Session> void cancel_marked_session(const std::shared_ptr<Session>& session) {
+template <typename Connection> void request_session_cancel(Connection& connection) noexcept {
+   connection.request_cancel();
+}
+
+template <typename Session> void cancel_marked_session(const std::shared_ptr<Session>& session) noexcept {
    if (!session) {
       return;
    }
-   session->connection.cancel();
+   request_session_cancel(session->connection);
 }
 
-template <typename Session> void cancel_rejected_session(const std::shared_ptr<Session>& session) {
+template <typename Session> void cancel_rejected_session(const std::shared_ptr<Session>& session) noexcept {
    mark_rejected_session(session);
    cancel_marked_session(session);
 }

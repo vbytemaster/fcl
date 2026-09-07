@@ -32,6 +32,7 @@ class session {
    boost::asio::awaitable<stream> async_accept_stream();
    boost::asio::awaitable<void> async_close();
    void cancel();
+   void request_cancel() noexcept;
 
  private:
    friend struct detail::session_access;
@@ -53,6 +54,7 @@ class session_concept {
    virtual boost::asio::awaitable<stream> async_accept_stream() = 0;
    virtual boost::asio::awaitable<void> async_close() = 0;
    virtual void cancel() = 0;
+   virtual void request_cancel() noexcept;
 };
 
 struct session_access {

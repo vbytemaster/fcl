@@ -27,10 +27,10 @@ import forge.net.p2p.stream;
 namespace forge::net::p2p::detail {
 
 relay_pair::relay_pair(peer_id owner_value, forge::net::p2p::stream left_value, forge::net::p2p::stream right_value,
-                       resource_manager::stream_reservation resource_value, boost::asio::any_io_executor executor,
+                       resource_manager::relay_reservation circuit_value, boost::asio::any_io_executor executor,
                        std::chrono::milliseconds duration, std::uint64_t byte_limit)
     : owner(std::move(owner_value)), left(std::move(left_value)), right(std::move(right_value)),
-      resource(std::move(resource_value)), left_to_right(byte_limit), right_to_left(byte_limit),
+      circuit(std::move(circuit_value)), left_to_right(byte_limit), right_to_left(byte_limit),
       deadline_(std::make_shared<boost::asio::steady_timer>(boost::asio::make_strand(std::move(executor)), duration)) {}
 
 bool relay_pair::mark_finished() noexcept {
@@ -51,19 +51,19 @@ bool relay_pair::mark_finished() noexcept {
 boost::asio::awaitable<bool> relay_pair::async_wait_deadline() {
    auto deadline = deadline_;
    co_return co_await boost::asio::co_spawn(
-      deadline->get_executor(),
-      [this, deadline]() -> boost::asio::awaitable<bool> {
-         {
-            auto lock = std::scoped_lock{mutex_};
-            if (deadline_cancelled_) {
-               co_return false;
-            }
-         }
-         auto error = boost::system::error_code{};
-         co_await deadline->async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, error));
-         co_return !error;
-      },
-      boost::asio::use_awaitable);
+       deadline->get_executor(),
+       [this, deadline]() -> boost::asio::awaitable<bool> {
+          {
+             auto lock = std::scoped_lock{mutex_};
+             if (deadline_cancelled_) {
+                co_return false;
+             }
+          }
+          auto error = boost::system::error_code{};
+          co_await deadline->async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, error));
+          co_return !error;
+       },
+       boost::asio::use_awaitable);
 }
 
 void relay_pair::cancel_streams() noexcept {

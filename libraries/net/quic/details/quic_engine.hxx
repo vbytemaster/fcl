@@ -29,6 +29,7 @@ enum class engine_error_kind {
    frame_too_large,
    malformed_frame,
    backpressure_rejected,
+   connection_rejected,
    connection_closed,
    stream_closed,
    stream_reset,
@@ -161,6 +162,7 @@ class engine_connection : public std::enable_shared_from_this<engine_connection>
    boost::asio::awaitable<std::shared_ptr<engine_stream>> async_accept_stream();
    boost::asio::awaitable<void> async_close();
    void cancel();
+   void request_cancel() noexcept;
 
  private:
    friend class engine_connector;

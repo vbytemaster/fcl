@@ -56,6 +56,45 @@ bool wait_for_count(const std::atomic_size_t& value, std::size_t expected,
    return value.load(std::memory_order_acquire) == expected;
 }
 
+class throwing_cancel_session final : public forge::net::transport::detail::session_concept {
+ public:
+   [[nodiscard]] bool valid() const noexcept override {
+      return open_.load(std::memory_order_acquire);
+   }
+
+   boost::asio::awaitable<forge::net::transport::stream> async_open_stream() override {
+      co_return forge::net::transport::stream{};
+   }
+
+   boost::asio::awaitable<forge::net::transport::stream> async_accept_stream() override {
+      co_return forge::net::transport::stream{};
+   }
+
+   boost::asio::awaitable<void> async_close() override {
+      close_calls_.fetch_add(1, std::memory_order_release);
+      open_.store(false, std::memory_order_release);
+      co_return;
+   }
+
+   void cancel() override {
+      cancel_calls_.fetch_add(1, std::memory_order_release);
+      throw std::runtime_error{"expected throwing session cancel"};
+   }
+
+   [[nodiscard]] std::size_t cancel_calls() const noexcept {
+      return cancel_calls_.load(std::memory_order_acquire);
+   }
+
+   [[nodiscard]] std::size_t close_calls() const noexcept {
+      return close_calls_.load(std::memory_order_acquire);
+   }
+
+ private:
+   std::atomic_bool open_{true};
+   std::atomic_size_t cancel_calls_{0};
+   std::atomic_size_t close_calls_{0};
+};
+
 BOOST_AUTO_TEST_CASE(p2p_session_rejection_stages_transport_cancel_after_owner_unlock) {
    auto owner_mutex = std::mutex{};
    auto cancel_calls = std::atomic_size_t{0};
@@ -104,7 +143,8 @@ BOOST_AUTO_TEST_CASE(p2p_cancellation_latch_stop_before_throwing_arm_propagates_
    BOOST_CHECK_THROW(latch.arm([&] {
       invoked.fetch_add(1, std::memory_order_release);
       throw std::runtime_error{"injected cancellation failure"};
-   }), std::runtime_error);
+   }),
+                     std::runtime_error);
 
    BOOST_TEST(invoked.load(std::memory_order_acquire) == 1U);
    BOOST_TEST(!latch.finish());
@@ -405,6 +445,37 @@ BOOST_AUTO_TEST_CASE(p2p_session_teardown_cancels_tracked_background_operation) 
    BOOST_TEST(cancel_called.load(std::memory_order_acquire) == 1U);
 }
 
+BOOST_AUTO_TEST_CASE(p2p_noexcept_cancel_request_preserves_session_until_graceful_teardown) {
+   auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
+   auto model = std::make_shared<throwing_cancel_session>();
+   auto candidate = forge::net::transport::detail::session_access::make(model);
+   auto teardown = detail::session_teardown{runtime.context().get_executor()};
+   BOOST_CHECK_NO_THROW(detail::request_session_cancel(candidate));
+   BOOST_TEST(model->cancel_calls() == 1U);
+   BOOST_TEST(candidate.valid());
+
+   auto ticket = teardown.track([&candidate] { detail::request_session_cancel(candidate); });
+   BOOST_REQUIRE(ticket.active());
+
+   teardown.start({});
+   BOOST_TEST(model->cancel_calls() == 2U);
+   BOOST_TEST(candidate.valid());
+
+   auto stopped = boost::asio::co_spawn(runtime.context(), teardown.wait(), boost::asio::use_future);
+   BOOST_CHECK(stopped.wait_for(std::chrono::milliseconds{50}) == std::future_status::timeout);
+
+   forge::asio::blocking::run(runtime, candidate.async_close());
+   BOOST_TEST(model->close_calls() == 1U);
+   BOOST_TEST(!candidate.valid());
+   ticket.release();
+
+   const auto stopped_ready = stopped.wait_for(std::chrono::seconds{2}) == std::future_status::ready;
+   BOOST_CHECK(stopped_ready);
+   if (stopped_ready) {
+      stopped.get();
+   }
+}
+
 BOOST_AUTO_TEST_CASE(p2p_session_teardown_handles_concurrent_track_release_and_start) {
    auto runtime = forge::asio::runtime{forge::asio::runtime_options{.worker_threads = 2}};
    for (auto iteration = 0U; iteration < 1'000U; ++iteration) {
@@ -579,8 +650,11 @@ BOOST_AUTO_TEST_CASE(p2p_direct_transport_teardown_continues_after_profile_failu
           .listen = [](endpoint value) { return value; },
           .stop = std::move(stop),
           .async_stop = std::move(async_stop),
-          .async_connect = [](endpoint, const node::connect_options&, std::shared_ptr<cancellation_latch>)
-              -> boost::asio::awaitable<direct::connection> { co_return direct::connection{}; },
+          .async_connect = [](endpoint, const node::connect_options&, std::shared_ptr<cancellation_latch>,
+                              std::shared_ptr<void>, direct::authenticated_admission_handler)
+              -> boost::asio::awaitable<direct::connection> {
+             co_return direct::connection{};
+          },
           .async_accept = [](endpoint) -> boost::asio::awaitable<direct::connection> {
              co_return direct::connection{};
           },

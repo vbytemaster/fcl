@@ -28,7 +28,7 @@ class listener {
    [[nodiscard]] bool valid() const noexcept;
    [[nodiscard]] transport::endpoint local_endpoint() const;
 
-   boost::asio::awaitable<connection> async_accept_connection();
+   boost::asio::awaitable<connection> async_accept_connection(std::shared_ptr<void> lifetime = {});
    boost::asio::awaitable<transport::stream_connection> async_accept();
    boost::asio::awaitable<void> async_close();
    void close();

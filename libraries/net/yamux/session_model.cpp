@@ -52,4 +52,8 @@ void session_model::cancel() {
    value_.cancel();
 }
 
+void session_model::request_cancel() noexcept {
+   value_.request_cancel();
+}
+
 } // namespace forge::net::yamux

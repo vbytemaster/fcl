@@ -16,7 +16,7 @@ namespace forge::net::p2p::detail {
 class relay_pair {
  public:
    relay_pair(peer_id owner_value, forge::net::p2p::stream left_value, forge::net::p2p::stream right_value,
-              resource_manager::stream_reservation resource_value, boost::asio::any_io_executor executor,
+              resource_manager::relay_reservation circuit_value, boost::asio::any_io_executor executor,
               std::chrono::milliseconds duration, std::uint64_t byte_limit);
 
    [[nodiscard]] bool mark_finished() noexcept;
@@ -26,7 +26,8 @@ class relay_pair {
    peer_id owner;
    forge::net::p2p::stream left;
    forge::net::p2p::stream right;
-   resource_manager::stream_reservation resource;
+   // HOP and STOP retain their own stream scopes; this owns the circuit span.
+   resource_manager::relay_reservation circuit;
    relay_budget left_to_right;
    relay_budget right_to_left;
 

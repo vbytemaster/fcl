@@ -45,6 +45,8 @@ namespace {
       return exceptions::code::malformed_frame;
    case detail::engine_error_kind::backpressure_rejected:
       return exceptions::code::backpressure_rejected;
+   case detail::engine_error_kind::connection_rejected:
+      return exceptions::code::connection_rejected;
    case detail::engine_error_kind::connection_closed:
       return exceptions::code::connection_closed;
    case detail::engine_error_kind::stream_closed:
@@ -67,12 +69,14 @@ namespace {
 
 struct stream::impl {
    std::shared_ptr<detail::engine_stream> engine;
+   std::shared_ptr<detail::engine_connection> connection;
 };
 
 stream::stream() = default;
 
 stream::stream(detail::stream_handle handle)
-    : impl_(std::make_shared<impl>(impl{.engine = std::move(handle.engine)})) {}
+    : impl_(std::make_shared<impl>(
+          impl{.engine = std::move(handle.engine), .connection = std::move(handle.connection)})) {}
 
 stream::~stream() = default;
 

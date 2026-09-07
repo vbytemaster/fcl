@@ -457,12 +457,12 @@ class secure_stream_concept final : public forge::net::transport::detail::stream
 [[nodiscard]] forge::net::transport::stream secure_transport_stream(std::shared_ptr<secure_io> secure) {
    auto model = std::make_shared<secure_stream_concept>(std::move(secure));
    auto weak = std::weak_ptr<secure_stream_concept>{model};
-   return forge::net::transport::detail::stream_access::make_cancelable(
-       std::move(model), [weak = std::move(weak)]() noexcept {
-          if (auto stream = weak.lock()) {
-             stream->request_cancel();
-          }
-       });
+   return forge::net::transport::detail::stream_access::make_cancelable(std::move(model),
+                                                                        [weak = std::move(weak)]() noexcept {
+                                                                           if (auto stream = weak.lock()) {
+                                                                              stream->request_cancel();
+                                                                           }
+                                                                        });
 }
 
 struct noise_result {
@@ -720,23 +720,36 @@ struct cancel_cleanup {
    return deadline.timeout.count() > 0;
 }
 
-boost::asio::awaitable<upgraded_session> finish_noise_outbound(forge::net::p2p::stream stream,
-                                                               const node::options& options,
-                                                               const libp2p_identity_material& identity,
-                                                               std::optional<peer_id> expected_peer,
-                                                               tcp_upgrade_deadline deadline = {}) {
+boost::asio::awaitable<upgraded_session>
+finish_noise_outbound(forge::net::p2p::stream stream, const node::options& options,
+                      const libp2p_identity_material& identity, std::optional<peer_id> expected_peer,
+                      tcp_upgrade_deadline deadline = {}, upgrade_callbacks callbacks = {}) {
    auto cleanup = cancel_cleanup{&deadline};
    auto secure = co_await noise_initiator(std::move(stream), identity,
                                           options.allow_insecure_test_mode ? std::nullopt : std::move(expected_peer),
                                           deadline.cancel_current);
+   if (callbacks.secured) {
+      callbacks.secured(secure.peer);
+   }
+   if (callbacks.established) {
+      try {
+         callbacks.established(secure.peer);
+      } catch (...) {
+         secure.secure->request_cancel();
+         throw;
+      }
+   }
    auto muxer_stream = secure_transport_stream(std::move(secure.secure));
    if (!secure.early_yamux) {
-      auto negotiated = co_await protocol_negotiation::async_select(
-          std::move(muxer_stream), protocol_id{.value = "/yamux/1.0.0"});
+      auto negotiated =
+          co_await protocol_negotiation::async_select(std::move(muxer_stream), protocol_id{.value = "/yamux/1.0.0"});
       muxer_stream = std::move(negotiated).into_transport_stream();
    }
-   auto yamux = std::make_shared<forge::net::yamux::session>(std::move(muxer_stream),
-                                                             forge::net::yamux::side::initiator);
+   auto yamux =
+       std::make_shared<forge::net::yamux::session>(std::move(muxer_stream), forge::net::yamux::side::initiator);
+   if (callbacks.upgraded) {
+      callbacks.upgraded(secure.peer);
+   }
    set_cancel(deadline, [yamux] { yamux->cancel(); });
    co_return upgraded_session{
        .peer = std::move(secure.peer),
@@ -745,23 +758,36 @@ boost::asio::awaitable<upgraded_session> finish_noise_outbound(forge::net::p2p::
    };
 }
 
-boost::asio::awaitable<upgraded_session> finish_noise_inbound(forge::net::p2p::stream stream,
-                                                              const node::options& options,
-                                                              const libp2p_identity_material& identity,
-                                                              std::optional<peer_id> expected_peer,
-                                                              tcp_upgrade_deadline deadline = {}) {
+boost::asio::awaitable<upgraded_session>
+finish_noise_inbound(forge::net::p2p::stream stream, const node::options& options,
+                     const libp2p_identity_material& identity, std::optional<peer_id> expected_peer,
+                     tcp_upgrade_deadline deadline = {}, upgrade_callbacks callbacks = {}) {
    auto cleanup = cancel_cleanup{&deadline};
    auto secure = co_await noise_responder(std::move(stream), identity,
                                           options.allow_insecure_test_mode ? std::nullopt : std::move(expected_peer),
                                           deadline.cancel_current);
+   if (callbacks.secured) {
+      callbacks.secured(secure.peer);
+   }
+   if (callbacks.established) {
+      try {
+         callbacks.established(secure.peer);
+      } catch (...) {
+         secure.secure->request_cancel();
+         throw;
+      }
+   }
    auto muxer_stream = secure_transport_stream(std::move(secure.secure));
    if (!secure.early_yamux) {
-      auto negotiated = co_await protocol_negotiation::async_accept(
-          std::move(muxer_stream), {protocol_id{.value = "/yamux/1.0.0"}});
+      auto negotiated =
+          co_await protocol_negotiation::async_accept(std::move(muxer_stream), {protocol_id{.value = "/yamux/1.0.0"}});
       muxer_stream = std::move(negotiated.stream).into_transport_stream();
    }
-   auto yamux = std::make_shared<forge::net::yamux::session>(std::move(muxer_stream),
-                                                             forge::net::yamux::side::responder);
+   auto yamux =
+       std::make_shared<forge::net::yamux::session>(std::move(muxer_stream), forge::net::yamux::side::responder);
+   if (callbacks.upgraded) {
+      callbacks.upgraded(secure.peer);
+   }
    set_cancel(deadline, [yamux] { yamux->cancel(); });
    co_return upgraded_session{
        .peer = std::move(secure.peer),
@@ -770,26 +796,30 @@ boost::asio::awaitable<upgraded_session> finish_noise_inbound(forge::net::p2p::s
    };
 }
 
-boost::asio::awaitable<upgraded_session> finish_tls_outbound(forge::net::tcp::connection connection,
-                                                             const node::options& options,
-                                                             const libp2p_identity_material& identity,
-                                                             std::optional<peer_id> expected_peer,
-                                                             tcp_upgrade_deadline deadline = {}) {
+boost::asio::awaitable<upgraded_session>
+finish_tls_outbound(forge::net::tcp::connection connection, const node::options& options,
+                    const libp2p_identity_material& identity, std::optional<peer_id> expected_peer,
+                    tcp_upgrade_deadline deadline = {}, upgrade_callbacks callbacks = {}) {
    auto cleanup = cancel_cleanup{&deadline};
    try {
       auto stop = std::make_shared<std::stop_source>();
       set_cancel(deadline, [stop] { static_cast<void>(stop->request_stop()); });
       auto tls = std::make_shared<forge::net::stcp::connection>(
           has_timeout(deadline)
-              ? co_await forge::net::stcp::async_upgrade_client(
-                    std::move(connection), make_libp2p_tls_client_options(identity), deadline.timeout,
-                    stop->get_token())
-              : co_await forge::net::stcp::async_upgrade_client(std::move(connection),
+              ? co_await forge::net::stcp::async_upgrade_client(std::move(connection),
                                                                 make_libp2p_tls_client_options(identity),
-                                                                stop->get_token()));
+                                                                deadline.timeout, stop->get_token())
+              : co_await forge::net::stcp::async_upgrade_client(
+                    std::move(connection), make_libp2p_tls_client_options(identity), stop->get_token()));
       set_cancel(deadline, [tls] { tls->cancel(); });
       const auto peer = verify_libp2p_tls_chain(tls->peer_certificate_chain(),
                                                 options.allow_insecure_test_mode ? std::nullopt : expected_peer);
+      if (callbacks.secured) {
+         callbacks.secured(peer);
+      }
+      if (callbacks.established) {
+         callbacks.established(peer);
+      }
       const auto selected_alpn = tls->selected_alpn();
       if (selected_alpn.empty() || selected_alpn == "libp2p") {
          co_await negotiate_yamux(*tls, true);
@@ -800,6 +830,9 @@ boost::asio::awaitable<upgraded_session> finish_tls_outbound(forge::net::tcp::co
       auto stream = std::move(*tls).into_transport_stream();
       auto yamux =
           std::make_shared<forge::net::yamux::session>(std::move(stream.stream), forge::net::yamux::side::initiator);
+      if (callbacks.upgraded) {
+         callbacks.upgraded(peer);
+      }
       set_cancel(deadline, [yamux] { yamux->cancel(); });
       co_return upgraded_session{
           .peer = peer,
@@ -811,26 +844,30 @@ boost::asio::awaitable<upgraded_session> finish_tls_outbound(forge::net::tcp::co
    }
 }
 
-boost::asio::awaitable<upgraded_session> finish_tls_inbound(forge::net::tcp::connection connection,
-                                                            const node::options& options,
-                                                            const libp2p_identity_material& identity,
-                                                            std::optional<peer_id> expected_peer,
-                                                            tcp_upgrade_deadline deadline = {}) {
+boost::asio::awaitable<upgraded_session>
+finish_tls_inbound(forge::net::tcp::connection connection, const node::options& options,
+                   const libp2p_identity_material& identity, std::optional<peer_id> expected_peer,
+                   tcp_upgrade_deadline deadline = {}, upgrade_callbacks callbacks = {}) {
    auto cleanup = cancel_cleanup{&deadline};
    try {
       auto stop = std::make_shared<std::stop_source>();
       set_cancel(deadline, [stop] { static_cast<void>(stop->request_stop()); });
       auto tls = std::make_shared<forge::net::stcp::connection>(
           has_timeout(deadline)
-              ? co_await forge::net::stcp::async_upgrade_server(
-                    std::move(connection), make_libp2p_tls_server_options(identity), deadline.timeout,
-                    stop->get_token())
-              : co_await forge::net::stcp::async_upgrade_server(std::move(connection),
+              ? co_await forge::net::stcp::async_upgrade_server(std::move(connection),
                                                                 make_libp2p_tls_server_options(identity),
-                                                                stop->get_token()));
+                                                                deadline.timeout, stop->get_token())
+              : co_await forge::net::stcp::async_upgrade_server(
+                    std::move(connection), make_libp2p_tls_server_options(identity), stop->get_token()));
       set_cancel(deadline, [tls] { tls->cancel(); });
       const auto peer = verify_libp2p_tls_chain(tls->peer_certificate_chain(),
                                                 options.allow_insecure_test_mode ? std::nullopt : expected_peer);
+      if (callbacks.secured) {
+         callbacks.secured(peer);
+      }
+      if (callbacks.established) {
+         callbacks.established(peer);
+      }
       const auto selected_alpn = tls->selected_alpn();
       if (selected_alpn.empty() || selected_alpn == "libp2p") {
          co_await negotiate_yamux(*tls, false);
@@ -841,6 +878,9 @@ boost::asio::awaitable<upgraded_session> finish_tls_inbound(forge::net::tcp::con
       auto stream = std::move(*tls).into_transport_stream();
       auto yamux =
           std::make_shared<forge::net::yamux::session>(std::move(stream.stream), forge::net::yamux::side::responder);
+      if (callbacks.upgraded) {
+         callbacks.upgraded(peer);
+      }
       set_cancel(deadline, [yamux] { yamux->cancel(); });
       co_return upgraded_session{
           .peer = peer,
@@ -857,19 +897,23 @@ boost::asio::awaitable<upgraded_session> finish_tls_inbound(forge::net::tcp::con
 boost::asio::awaitable<upgraded_session> upgrade_outbound_stream(forge::net::p2p::stream stream,
                                                                  const node::options& options,
                                                                  const libp2p_identity_material& identity,
-                                                                 std::optional<peer_id> expected_peer) {
+                                                                 std::optional<peer_id> expected_peer,
+                                                                 upgrade_callbacks callbacks) {
    const auto noise_protocol = protocol_id{.value = "/noise"};
    auto noise_stream = co_await protocol_negotiation::async_select(std::move(stream), noise_protocol);
-   co_return co_await finish_noise_outbound(std::move(noise_stream), options, identity, std::move(expected_peer));
+   co_return co_await finish_noise_outbound(std::move(noise_stream), options, identity, std::move(expected_peer), {},
+                                            std::move(callbacks));
 }
 
 boost::asio::awaitable<upgraded_session> upgrade_inbound_stream(forge::net::p2p::stream stream,
                                                                 const node::options& options,
                                                                 const libp2p_identity_material& identity,
-                                                                std::optional<peer_id> expected_peer) {
+                                                                std::optional<peer_id> expected_peer,
+                                                                upgrade_callbacks callbacks) {
    const auto noise_protocol = protocol_id{.value = "/noise"};
    auto noise_stream = co_await protocol_negotiation::async_accept(std::move(stream), {noise_protocol});
-   co_return co_await finish_noise_inbound(std::move(noise_stream.stream), options, identity, std::move(expected_peer));
+   co_return co_await finish_noise_inbound(std::move(noise_stream.stream), options, identity, std::move(expected_peer),
+                                           {}, std::move(callbacks));
 }
 
 boost::asio::awaitable<upgraded_session> upgrade_outbound_tcp(forge::net::tcp::connection connection,
@@ -879,11 +923,10 @@ boost::asio::awaitable<upgraded_session> upgrade_outbound_tcp(forge::net::tcp::c
    co_return co_await upgrade_outbound_tcp(std::move(connection), options, identity, std::move(expected_peer), {});
 }
 
-boost::asio::awaitable<upgraded_session> upgrade_outbound_tcp(forge::net::tcp::connection connection,
-                                                              const node::options& options,
-                                                              const libp2p_identity_material& identity,
-                                                              std::optional<peer_id> expected_peer,
-                                                              tcp_upgrade_deadline deadline) {
+boost::asio::awaitable<upgraded_session>
+upgrade_outbound_tcp(forge::net::tcp::connection connection, const node::options& options,
+                     const libp2p_identity_material& identity, std::optional<peer_id> expected_peer,
+                     tcp_upgrade_deadline deadline, upgrade_callbacks callbacks) {
    auto cleanup = cancel_cleanup{&deadline};
    set_cancel(deadline, [&connection] { connection.cancel(); });
    const auto protocols = std::array{
@@ -894,11 +937,11 @@ boost::asio::awaitable<upgraded_session> upgrade_outbound_tcp(forge::net::tcp::c
    clear_cancel(deadline);
    if (selected.value == "/tls/1.0.0") {
       co_return co_await finish_tls_outbound(std::move(connection), options, identity, std::move(expected_peer),
-                                             deadline);
+                                             deadline, std::move(callbacks));
    }
    auto stream = std::move(connection).into_transport_stream();
    co_return co_await finish_noise_outbound(forge::net::p2p::stream{std::move(stream.stream)}, options, identity,
-                                            std::move(expected_peer), deadline);
+                                            std::move(expected_peer), deadline, std::move(callbacks));
 }
 
 boost::asio::awaitable<upgraded_session> upgrade_inbound_tcp(forge::net::tcp::connection connection,
@@ -908,11 +951,10 @@ boost::asio::awaitable<upgraded_session> upgrade_inbound_tcp(forge::net::tcp::co
    co_return co_await upgrade_inbound_tcp(std::move(connection), options, identity, std::move(expected_peer), {});
 }
 
-boost::asio::awaitable<upgraded_session> upgrade_inbound_tcp(forge::net::tcp::connection connection,
-                                                             const node::options& options,
-                                                             const libp2p_identity_material& identity,
-                                                             std::optional<peer_id> expected_peer,
-                                                             tcp_upgrade_deadline deadline) {
+boost::asio::awaitable<upgraded_session>
+upgrade_inbound_tcp(forge::net::tcp::connection connection, const node::options& options,
+                    const libp2p_identity_material& identity, std::optional<peer_id> expected_peer,
+                    tcp_upgrade_deadline deadline, upgrade_callbacks callbacks) {
    auto cleanup = cancel_cleanup{&deadline};
    set_cancel(deadline, [&connection] { connection.cancel(); });
    const auto protocols = std::array{
@@ -923,11 +965,11 @@ boost::asio::awaitable<upgraded_session> upgrade_inbound_tcp(forge::net::tcp::co
    clear_cancel(deadline);
    if (selected.value == "/tls/1.0.0") {
       co_return co_await finish_tls_inbound(std::move(connection), options, identity, std::move(expected_peer),
-                                            deadline);
+                                            deadline, std::move(callbacks));
    }
    auto stream = std::move(connection).into_transport_stream();
    co_return co_await finish_noise_inbound(forge::net::p2p::stream{std::move(stream.stream)}, options, identity,
-                                           std::move(expected_peer), deadline);
+                                           std::move(expected_peer), deadline, std::move(callbacks));
 }
 
 } // namespace forge::net::p2p

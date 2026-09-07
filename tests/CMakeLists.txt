@@ -996,6 +996,8 @@ add_executable(
    quic_p2p/dht_time_tests.cpp
    quic_p2p/ipns_tests.cpp
    quic_p2p/quic_tests.cpp
+   quic_p2p/connection_gater_tests.cpp
+   quic_p2p/resource_manager_tests.cpp
    quic_p2p/p2p_lifecycle_tests.cpp
    quic_p2p/p2p_tests.cpp
    quic_p2p/session_teardown_tests.cpp
@@ -1007,7 +1009,13 @@ target_sources(
       FILE_SET CXX_MODULES
       FILES quic_p2p/dht_record_store_fixture.cppm
 )
-target_link_libraries(test_forge_quic_p2p forge Boost::included_unit_test_framework)
+target_link_libraries(
+   test_forge_quic_p2p
+   forge_api_p2p
+   forge_api_transport
+   forge_net_p2p
+   Boost::included_unit_test_framework
+)
 target_compile_definitions(test_forge_quic_p2p PRIVATE FORGE_HAS_ROCKSDB=$<BOOL:${FORGE_HAS_ROCKSDB}>)
 add_test(NAME test_forge_quic_p2p COMMAND test_forge_quic_p2p WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 set_tests_properties(test_forge_quic_p2p PROPERTIES TIMEOUT 300)
@@ -1195,7 +1203,25 @@ add_executable(
    plugins/log_otlp_tests.cpp
    plugins/details/resolver_publication_race.hxx
 )
-target_link_libraries(test_forge_plugins forge Boost::included_unit_test_framework)
+target_link_libraries(
+   test_forge_plugins
+   forge_app
+   forge_api_http
+   forge_api_p2p
+   forge_api_transport
+   forge_config_env
+   forge_config_program_options
+   forge_crypto_bls
+   forge_plugins_crypto_secrets
+   forge_plugins_crypto_signer
+   forge_plugins_http_server
+   forge_plugins_log_otlp
+   forge_plugins_p2p_diagnostics
+   forge_plugins_p2p_node
+   forge_plugins_p2p_pubsub
+   forge_plugins_p2p_resolver
+   Boost::included_unit_test_framework
+)
 add_test(NAME test_forge_plugins COMMAND test_forge_plugins WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 add_executable(

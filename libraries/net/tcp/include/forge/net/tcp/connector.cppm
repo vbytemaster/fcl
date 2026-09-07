@@ -29,9 +29,10 @@ class connector {
    [[nodiscard]] bool valid() const noexcept;
 
    boost::asio::awaitable<connection> async_connect_connection(transport::endpoint remote,
-                                                               transport::connect_options connect_options = {});
-   boost::asio::awaitable<transport::stream_connection>
-   async_connect(transport::endpoint remote, transport::connect_options connect_options = {});
+                                                               transport::connect_options connect_options = {},
+                                                               std::shared_ptr<void> lifetime = {});
+   boost::asio::awaitable<transport::stream_connection> async_connect(transport::endpoint remote,
+                                                                      transport::connect_options connect_options = {});
    void cancel();
    void request_cancel() noexcept;
 

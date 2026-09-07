@@ -54,9 +54,10 @@
   "public_surface_snapshots": {
     "net.p2p.node": {
       "owner": "net.p2p.node",
-      "module_count": 26,
+      "module_count": 27,
       "modules": [
-        "forge.net.p2p.dht",        "forge.net.p2p.dht.record_store", "forge.net.p2p.diagnostics",
+        "forge.net.p2p.connection_gater", "forge.net.p2p.dht",        "forge.net.p2p.dht.record_store",
+        "forge.net.p2p.diagnostics",
         "forge.net.p2p.discovery",  "forge.net.p2p.endpoint",         "forge.net.p2p.envelope",
         "forge.net.p2p.exceptions", "forge.net.p2p.hole_punch",       "forge.net.p2p.identify",
         "forge.net.p2p.identity",   "forge.net.p2p.ipns",             "forge.net.p2p.lifecycle",
@@ -68,6 +69,7 @@
       ],
       "headers": [],
       "module_features": {
+        "forge.net.p2p.connection_gater": [ "security.connection_gater" ],
         "forge.net.p2p.dht": [ "protocol.kademlia", "state.kademlia_routing_table" ],
         "forge.net.p2p.dht.record_store": [ "protocol.kademlia" ],
         "forge.net.p2p.diagnostics": [
@@ -147,8 +149,10 @@
         "forge.net.p2p.reachability": [ "protocol.autonat" ],
         "forge.net.p2p.relay": [ "protocol.relay" ],
         "forge.net.p2p.rendezvous": [ "protocol.rendezvous" ],
-        "forge.net.p2p.resource_manager":
-            [ "resource.sessions", "resource.streams", "resource.dials", "resource.queued_bytes" ],
+        "forge.net.p2p.resource_manager": [
+          "resource.sessions", "resource.streams", "resource.dials", "resource.queued_bytes",
+          "resource.host_scopes"
+        ],
         "forge.net.p2p.scoring": [ "topology.connection_manager", "state.peer_store" ],
         "forge.net.p2p.stream": [
           "identity.secure_transport_authentication", "resource.streams", "resource.queued_bytes"
@@ -159,10 +163,11 @@
         ]
       },
       "header_features": {},
-      "sha256": "f14649702198c781e07e3ab3eff0c047d79cf24eb4ed3b6ea79b0c8dfc84117b",
+      "sha256": "8c2e0a12e8f9a0e63aa13c008dca47a6dcb19a569b912781a46ae802821d6adb",
       "feature_ids": [
         "transport.direct_quic",
         "transport.tcp_yamux",
+        "security.connection_gater",
         "protocol.multistream_select",
         "identity.secure_transport_authentication",
         "protocol.echo",
@@ -184,6 +189,7 @@
         "resource.streams",
         "resource.dials",
         "resource.queued_bytes",
+        "resource.host_scopes",
         "topology.connection_manager"
       ]
     },
@@ -360,6 +366,32 @@
         "tests": [ "test_forge_stcp", "test_forge_quic_p2p" ],
         "donor_sources": [ "docs/donors/fcl-p2p-libp2p-foundation-v1.md" ],
         "donor_cases": [ "interop.live_ping_identify_autonat_relay" ]
+      }
+    },
+    {
+      "id": "security.connection_gater",
+      "state": "partial",
+      "owner": "net.p2p.node",
+      "normal_activation": "every_direct_or_relay_connection_attempt",
+      "configuration": "optional programmatic connection_gater on node options",
+      "resource_ownership": "staged policy callbacks run before dial, accept, secured identity and upgraded connection admission",
+      "persistence": "none",
+      "maintenance": "none",
+      "diagnostics": "typed connection rejection without peer-failure attribution",
+      "intended_disposition": "preserve_and_expose_through_stage7_plugin_configuration",
+      "builtin_protocols": [],
+      "capabilities": [],
+      "evidence": {
+        "layers": [ "state_machine", "raw_node", "adversarial" ],
+        "source_paths": [
+          "libraries/net/p2p/connection_gate.cpp",
+          "libraries/net/p2p/direct_transport_tcp.cpp",
+          "libraries/net/p2p/direct_transport_quic.cpp",
+          "libraries/net/p2p/node_impl_relay.cpp"
+        ],
+        "tests": [ "test_forge_quic_p2p" ],
+        "donor_sources": [ "docs/donors/forge-p2p-host-protection-v1.md" ],
+        "donor_cases": [ "p2p.host_multi_transport_orchestration" ]
       }
     },
     {
@@ -829,7 +861,7 @@
       "intended_disposition": "preserve_and_extend_live_transport_profiles",
       "builtin_protocols": [],
       "capabilities": [],
-      "public_components": [ "resource_manager::queued_bytes_reservation" ],
+      "public_components": [],
       "evidence": {
         "layers": [ "state_machine", "raw_node", "official_plugin", "adversarial" ],
         "source_paths": [
@@ -838,6 +870,37 @@
         ],
         "tests": [ "test_forge_quic_p2p", "test_forge_yamux", "test_forge_plugins" ],
         "donor_sources": [ "docs/donors/forge-p2p-node-lifecycle-v1.md" ],
+        "donor_cases": [ "resource.peer_protocol_dial_scopes" ]
+      }
+    },
+    {
+      "id": "resource.host_scopes",
+      "state": "partial",
+      "owner": "net.p2p.node",
+      "normal_activation": "node_lifecycle_and_every_transport_resource_scope",
+      "configuration": "system, transient, service, protocol, peer, connection and stream limits",
+      "resource_ownership": "move-only lifecycle, memory and file-descriptor reservations compose with session and stream scopes",
+      "persistence": "none",
+      "maintenance": "reservations release exactly once on completion, cancellation, timeout, transport conversion and shutdown",
+      "diagnostics": "active scope, memory and file-descriptor counters with policy and runtime rejection reasons",
+      "intended_disposition": "preserve_and_extend_across_stage6_services",
+      "builtin_protocols": [],
+      "capabilities": [],
+      "public_components": [
+        "resource_manager::lifecycle_reservation",
+        "resource_manager::memory_reservation",
+        "resource_manager::file_descriptor_reservation"
+      ],
+      "evidence": {
+        "layers": [ "state_machine", "raw_node", "official_plugin", "adversarial" ],
+        "source_paths": [
+          "libraries/net/p2p/resource_manager.cpp",
+          "libraries/net/p2p/resource_manager_state.cpp",
+          "libraries/net/p2p/resource_service.cpp",
+          "plugins/p2p/node/plugin.cpp"
+        ],
+        "tests": [ "test_forge_quic_p2p", "test_forge_plugins" ],
+        "donor_sources": [ "docs/donors/forge-p2p-host-protection-v1.md" ],
         "donor_cases": [ "resource.peer_protocol_dial_scopes" ]
       }
     },

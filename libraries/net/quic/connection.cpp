@@ -46,6 +46,8 @@ namespace {
       return exceptions::code::malformed_frame;
    case detail::engine_error_kind::backpressure_rejected:
       return exceptions::code::backpressure_rejected;
+   case detail::engine_error_kind::connection_rejected:
+      return exceptions::code::connection_rejected;
    case detail::engine_error_kind::connection_closed:
       return exceptions::code::connection_closed;
    case detail::engine_error_kind::stream_closed:
@@ -152,7 +154,8 @@ boost::asio::awaitable<stream> connection::async_open_stream() {
    }
    try {
       auto engine_stream = co_await impl_->engine->async_open_stream();
-      co_return detail::stream_access::make(detail::stream_handle{.engine = std::move(engine_stream)});
+      co_return detail::stream_access::make(
+          detail::stream_handle{.engine = std::move(engine_stream), .connection = impl_->engine});
    } catch (const detail::engine_failure& error) {
       raise_engine_failure(error);
    }
@@ -164,7 +167,8 @@ boost::asio::awaitable<stream> connection::async_accept_stream() {
    }
    try {
       auto engine_stream = co_await impl_->engine->async_accept_stream();
-      co_return detail::stream_access::make(detail::stream_handle{.engine = std::move(engine_stream)});
+      co_return detail::stream_access::make(
+          detail::stream_handle{.engine = std::move(engine_stream), .connection = impl_->engine});
    } catch (const detail::engine_failure& error) {
       raise_engine_failure(error);
    }
@@ -184,6 +188,12 @@ boost::asio::awaitable<void> connection::async_close() {
 void connection::cancel() {
    if (impl_ && impl_->engine) {
       impl_->engine->cancel();
+   }
+}
+
+void connection::request_cancel() noexcept {
+   if (impl_ && impl_->engine) {
+      impl_->engine->request_cancel();
    }
 }
 

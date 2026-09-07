@@ -76,18 +76,31 @@ import forge.net.yamux.session;
 
 namespace forge::net::p2p {
 
+namespace {
+
+[[nodiscard]] resource_manager::stream_reservation::bind_result
+bind_stream_resource(const std::shared_ptr<detail::resource_stream>& resource, const protocol_id& protocol,
+                     bool dht_profile) noexcept {
+   const auto protocol_result = resource->bind_protocol(protocol);
+   return protocol_result == resource_manager::stream_reservation::bind_result::accepted
+              ? resource->bind_service_for_protocol(protocol, dht_profile)
+              : protocol_result;
+}
+
+} // namespace
+
 boost::asio::awaitable<forge::net::p2p::stream>
 node::impl::open_session_stream(const std::shared_ptr<session_state>& session, const protocol_id& protocol, bool relay,
                                 detail::stream_admission_handler admitted) {
-   const auto relayed = relay || session->info.path == path::kind::relay;
-   auto reservation = relayed ? resources.reserve_relay_stream() : resources.reserve_stream();
+   const auto direction = resource_manager::session_direction::outbound;
+   auto reservation = resources.reserve_stream(session->info.remote_peer, direction);
    if (!reservation) {
       auto lock = std::scoped_lock{mutex};
       ++metrics_value.backpressure_rejections;
       ++metrics_value.protocol_rejections;
       FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P stream limit reached");
    }
-   auto [guarded, resource] = detail::prepare_resource_stream(resources, std::move(*reservation));
+   auto [guarded, resource] = detail::prepare_resource_stream(std::move(*reservation));
    auto raw = co_await session->connection.async_open_stream();
    resource->attach(std::move(raw));
    if (admitted) {
@@ -100,12 +113,17 @@ node::impl::open_session_stream(const std::shared_ptr<session_state>& session, c
       resource->cancel();
       throw;
    }
-   if (!resource->bind(resource_manager::scope{.peer = session->info.remote_peer, .protocol = protocol})) {
+   const auto binding = bind_stream_resource(resource, protocol, dht_profiles.contains(protocol));
+   if (binding != resource_manager::stream_reservation::bind_result::accepted) {
       selected.cancel();
-      auto lock = std::scoped_lock{mutex};
-      ++metrics_value.backpressure_rejections;
-      ++metrics_value.protocol_rejections;
-      FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P scoped stream limit reached");
+      resource->cancel();
+      if (binding == resource_manager::stream_reservation::bind_result::policy_rejected) {
+         auto lock = std::scoped_lock{mutex};
+         ++metrics_value.backpressure_rejections;
+         ++metrics_value.protocol_rejections;
+         FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P scoped stream limit reached");
+      }
+      FORGE_THROW_EXCEPTION(exceptions::internal, "P2P scoped stream binding failed at runtime");
    }
    try {
       admitted.commit();
@@ -120,11 +138,11 @@ node::impl::open_session_stream(const std::shared_ptr<session_state>& session, c
 boost::asio::awaitable<forge::net::p2p::stream>
 node::impl::open_yamux_stream(const peer_id& peer, const std::shared_ptr<forge::net::yamux::session>& yamux,
                               const protocol_id& protocol, bool relay) {
-   auto reservation = relay ? resources.reserve_relay_stream() : resources.reserve_stream();
+   auto reservation = resources.reserve_stream(peer, resource_manager::session_direction::outbound);
    if (!reservation) {
       FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P relayed stream limit reached");
    }
-   auto [guarded, resource] = detail::prepare_resource_stream(resources, std::move(*reservation));
+   auto [guarded, resource] = detail::prepare_resource_stream(std::move(*reservation));
    auto raw = co_await yamux->async_open_stream();
    resource->attach(std::move(raw));
    auto selected = forge::net::p2p::stream{};
@@ -134,9 +152,14 @@ node::impl::open_yamux_stream(const peer_id& peer, const std::shared_ptr<forge::
       resource->cancel();
       throw;
    }
-   if (!resource->bind(resource_manager::scope{.peer = peer, .protocol = protocol})) {
+   const auto binding = bind_stream_resource(resource, protocol, dht_profiles.contains(protocol));
+   if (binding != resource_manager::stream_reservation::bind_result::accepted) {
       selected.cancel();
-      FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P scoped relayed stream limit reached");
+      resource->cancel();
+      if (binding == resource_manager::stream_reservation::bind_result::policy_rejected) {
+         FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P scoped relayed stream limit reached");
+      }
+      FORGE_THROW_EXCEPTION(exceptions::internal, "P2P scoped relayed stream binding failed at runtime");
    }
    co_return selected;
 }
@@ -147,7 +170,7 @@ node::impl::accept_resource_stream(const peer_id& peer, forge::net::transport::s
    auto guarded = forge::net::transport::stream{};
    auto resource = std::shared_ptr<detail::resource_stream>{};
    try {
-      auto prepared = detail::prepare_resource_stream(resources, std::move(reservation));
+      auto prepared = detail::prepare_resource_stream(std::move(reservation));
       guarded = std::move(prepared.first);
       resource = std::move(prepared.second);
    } catch (...) {
@@ -162,9 +185,14 @@ node::impl::accept_resource_stream(const peer_id& peer, forge::net::transport::s
       resource->cancel();
       throw;
    }
-   if (!resource->bind(resource_manager::scope{.peer = peer, .protocol = negotiated.protocol})) {
+   const auto binding = bind_stream_resource(resource, negotiated.protocol, dht_profiles.contains(negotiated.protocol));
+   if (binding != resource_manager::stream_reservation::bind_result::accepted) {
       negotiated.stream.cancel();
-      FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P scoped inbound stream limit reached");
+      resource->cancel();
+      if (binding == resource_manager::stream_reservation::bind_result::policy_rejected) {
+         FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P scoped inbound stream limit reached");
+      }
+      FORGE_THROW_EXCEPTION(exceptions::internal, "P2P scoped inbound stream binding failed at runtime");
    }
    co_return admitted_stream{
        .protocol = std::move(negotiated.protocol),

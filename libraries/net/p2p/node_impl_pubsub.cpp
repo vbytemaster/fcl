@@ -61,6 +61,7 @@ import forge.net.yamux.session;
 
 #include "details/node_impl.hxx"
 #include "details/peer_failure.hxx"
+#include "details/session_lifecycle.hxx"
 
 namespace forge::net::p2p {
 
@@ -75,7 +76,7 @@ boost::asio::awaitable<std::vector<std::uint8_t>> async_read_length_delimited(fo
 
 void node::impl::invalidate_pubsub_outbound_locked(const peer_id& peer, std::optional<std::uint64_t> owner_session_id,
                                                    const std::shared_ptr<forge::asio::gate>& owner_write_gate,
-                                                   const std::shared_ptr<forge::net::p2p::stream>& owner_stream) {
+                                                   const std::shared_ptr<forge::net::p2p::stream>& owner_stream) noexcept {
    const auto found = pubsub_value.outbound.find(peer);
    if (found == pubsub_value.outbound.end() || (owner_session_id && found->second.session_id != *owner_session_id) ||
        (owner_write_gate && found->second.write_gate != owner_write_gate) ||
@@ -166,12 +167,14 @@ void node::impl::increment_pubsub_duplicate() {
 void node::impl::increment_pubsub_invalid(const peer_id& peer) {
    auto offender = std::shared_ptr<session_state>{};
    auto endpoint = std::optional<forge::net::p2p::endpoint>{};
+   const auto malformed_transition =
+       resources.record_malformed(resource_manager::scope{.peer = peer, .protocol = builtins::meshsub_v11});
    {
       auto lock = std::scoped_lock{mutex};
       ++metrics_value.pubsub_invalid_messages;
       pubsub_value.scores[peer].invalid_messages += 1;
       pubsub_value.scores[peer].value -= 1.0;
-      if (!resources.record_malformed(resource_manager::scope{.peer = peer, .protocol = builtins::meshsub_v11})) {
+      if (malformed_transition == resource_manager::transition_result::policy_rejected) {
          ++metrics_value.connection_rejections;
          for (const auto& [_, session] : sessions) {
             if (session->info.remote_peer == peer && !session->closed) {
@@ -183,13 +186,17 @@ void node::impl::increment_pubsub_invalid(const peer_id& peer) {
          }
       }
    }
+   if (malformed_transition != resource_manager::transition_result::accepted &&
+       malformed_transition != resource_manager::transition_result::policy_rejected) {
+      FORGE_THROW_EXCEPTION(exceptions::internal, "P2P malformed-message resource transition failed");
+   }
    if (offender) {
       if (endpoint) {
          store.mark_endpoint_failure(peer, *endpoint, path::kind::direct,
                                      endpoint_backoff_until(peer, *endpoint, path::kind::direct));
       }
       forget_session(offender);
-      offender->connection.cancel();
+      detail::request_session_cancel(offender->connection);
    }
 }
 

@@ -4,6 +4,9 @@ add_library(
    identity_signature.cpp
    details/identity_signature.hxx
    endpoint.cpp
+   connection_gater.cpp
+   connection_gate.cpp
+   details/connection_gate.hxx
    envelope.cpp
    identify.cpp
    ipns.cpp
@@ -59,6 +62,8 @@ add_library(
    details/resource_manager_state.hxx
    resource_stream.cpp
    details/resource_stream.hxx
+   resource_service.cpp
+   details/resource_service.hxx
    stream.cpp
    negotiation.cpp
    peer_store.cpp
@@ -74,6 +79,7 @@ add_library(
    host_addresses.cpp
    details/host_addresses.hxx
    direct_transport_quic.cpp
+   details/direct_transport_quic.hxx
    quic_client_options.cpp
    details/quic_client_options.hxx
    quic_client_token_cache.cpp

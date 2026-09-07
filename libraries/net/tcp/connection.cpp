@@ -50,11 +50,12 @@ using asio_tcp = boost::asio::ip::tcp;
 [[noreturn]] void throw_read_write_error(const boost::system::error_code& error) {
    if (error == boost::asio::error::operation_aborted) {
       FORGE_THROW_EXCEPTION(exceptions::canceled, "tcp connection operation canceled",
-                          forge::exceptions::ctx("reason", error.message()));
+                            forge::exceptions::ctx("reason", error.message()));
    }
    if (error == boost::asio::error::eof || error == boost::asio::error::connection_reset ||
        error == boost::asio::error::broken_pipe) {
-      FORGE_THROW_EXCEPTION(exceptions::closed, "tcp connection closed", forge::exceptions::ctx("reason", error.message()));
+      FORGE_THROW_EXCEPTION(exceptions::closed, "tcp connection closed",
+                            forge::exceptions::ctx("reason", error.message()));
    }
    throw_io_error("tcp connection I/O failed", error);
 }
@@ -93,13 +94,12 @@ class socket_stream final : public transport::detail::stream_concept,
                             public std::enable_shared_from_this<socket_stream> {
  public:
    socket_stream(std::shared_ptr<asio_tcp::socket> socket, asio::strand<asio::any_io_executor> strand,
-                 options tcp_options, std::int64_t id,
-                 std::shared_ptr<std::atomic<socket_state>> state,
+                 options tcp_options, std::int64_t id, std::shared_ptr<std::atomic<socket_state>> state,
                  std::shared_ptr<forge::asio::notification> terminal_requested,
-                 std::shared_ptr<forge::asio::notification> terminal_completed)
+                 std::shared_ptr<forge::asio::notification> terminal_completed, std::shared_ptr<void> lifetime)
        : socket_(std::move(socket)), strand_(std::move(strand)), options_(tcp_options), id_(id),
          state_(std::move(state)), terminal_requested_(std::move(terminal_requested)),
-         terminal_completed_(std::move(terminal_completed)) {}
+         terminal_completed_(std::move(terminal_completed)), lifetime_(std::move(lifetime)) {}
 
    ~socket_stream() override {
       request_cancel();
@@ -203,8 +203,7 @@ class socket_stream final : public transport::detail::stream_concept,
          return false;
       }
       auto expected = socket_state::active;
-      return state_->compare_exchange_strong(expected, requested, std::memory_order_acq_rel,
-                                             std::memory_order_acquire);
+      return state_->compare_exchange_strong(expected, requested, std::memory_order_acq_rel, std::memory_order_acquire);
    }
 
    std::shared_ptr<asio_tcp::socket> socket_;
@@ -215,25 +214,24 @@ class socket_stream final : public transport::detail::stream_concept,
    std::shared_ptr<std::atomic<socket_state>> state_;
    std::shared_ptr<forge::asio::notification> terminal_requested_;
    std::shared_ptr<forge::asio::notification> terminal_completed_;
+   std::shared_ptr<void> lifetime_;
    std::atomic_bool ownership_active_ = false;
 };
 
 [[nodiscard]] std::pair<std::shared_ptr<socket_stream>, transport::stream>
 prepare_stream(std::shared_ptr<asio_tcp::socket> socket, asio::strand<asio::any_io_executor> strand,
-               options tcp_options, std::int64_t id,
-               std::shared_ptr<std::atomic<socket_state>> state,
+               options tcp_options, std::int64_t id, std::shared_ptr<std::atomic<socket_state>> state,
                std::shared_ptr<forge::asio::notification> terminal_requested,
-               std::shared_ptr<forge::asio::notification> terminal_completed) {
-   auto model = std::make_shared<socket_stream>(std::move(socket), std::move(strand), tcp_options, id,
-                                                std::move(state), std::move(terminal_requested),
-                                                std::move(terminal_completed));
+               std::shared_ptr<forge::asio::notification> terminal_completed, std::shared_ptr<void> lifetime) {
+   auto model = std::make_shared<socket_stream>(std::move(socket), std::move(strand), tcp_options, id, std::move(state),
+                                                std::move(terminal_requested), std::move(terminal_completed),
+                                                std::move(lifetime));
    auto weak = std::weak_ptr<socket_stream>{model};
-   auto stream = transport::detail::stream_access::make_cancelable(
-       model, [weak = std::move(weak)]() noexcept {
-          if (auto value = weak.lock()) {
-             value->request_cancel();
-          }
-       });
+   auto stream = transport::detail::stream_access::make_cancelable(model, [weak = std::move(weak)]() noexcept {
+      if (auto value = weak.lock()) {
+         value->request_cancel();
+      }
+   });
    return {std::move(model), std::move(stream)};
 }
 
@@ -246,12 +244,12 @@ struct connection::impl final : std::enable_shared_from_this<connection::impl> {
       stream_handed_off,
    };
 
-   impl(asio_tcp::socket socket_value, options tcp_options_value)
+   impl(asio_tcp::socket socket_value, options tcp_options_value, std::shared_ptr<void> lifetime_value)
        : socket(std::make_shared<asio_tcp::socket>(std::move(socket_value))), tcp_options(tcp_options_value),
          strand(asio::make_strand(socket->get_executor())), id(next_stream_id()),
          terminal_state(std::make_shared<std::atomic<socket_state>>(socket_state::active)),
          terminal_requested(std::make_shared<forge::asio::notification>()),
-         terminal_completed(std::make_shared<forge::asio::notification>()) {
+         terminal_completed(std::make_shared<forge::asio::notification>()), lifetime(std::move(lifetime_value)) {
       validate_options(tcp_options);
       auto error = boost::system::error_code{};
       local = from_asio_endpoint(socket->local_endpoint(error));
@@ -276,16 +274,18 @@ struct connection::impl final : std::enable_shared_from_this<connection::impl> {
       auto state = terminal_state;
       auto requested = terminal_requested;
       auto completed = terminal_completed;
+      auto lifetime_value = lifetime;
       asio::co_spawn(
           strand,
-          [current = std::move(current), state = std::move(state), requested = std::move(requested),
-           completed]() mutable -> asio::awaitable<void> {
+          [current = std::move(current), state = std::move(state), requested = std::move(requested), completed,
+           lifetime_value = std::move(lifetime_value)]() mutable -> asio::awaitable<void> {
+             static_cast<void>(lifetime_value);
              try {
                 static_cast<void>(co_await requested->async_wait(0));
              } catch (...) {
                 auto expected = socket_state::active;
-                state->compare_exchange_strong(expected, socket_state::cancel_requested,
-                                               std::memory_order_acq_rel, std::memory_order_acquire);
+                state->compare_exchange_strong(expected, socket_state::cancel_requested, std::memory_order_acq_rel,
+                                               std::memory_order_acquire);
              }
              close_on_owner(*current, *state);
              completed->notify();
@@ -343,8 +343,8 @@ struct connection::impl final : std::enable_shared_from_this<connection::impl> {
              auto error = boost::system::error_code{};
              auto size = std::size_t{};
              try {
-                size = co_await self->socket->async_read_some(
-                    asio::buffer(bytes), asio::redirect_error(asio::use_awaitable, error));
+                size = co_await self->socket->async_read_some(asio::buffer(bytes),
+                                                              asio::redirect_error(asio::use_awaitable, error));
              } catch (...) {
                 self->release_operation();
                 throw;
@@ -368,8 +368,8 @@ struct connection::impl final : std::enable_shared_from_this<connection::impl> {
              auto error = boost::system::error_code{};
              auto size = std::size_t{};
              try {
-                size = co_await self->socket->async_read_some(
-                    asio::buffer(writable), asio::redirect_error(asio::use_awaitable, error));
+                size = co_await self->socket->async_read_some(asio::buffer(writable),
+                                                              asio::redirect_error(asio::use_awaitable, error));
              } catch (...) {
                 self->release_operation();
                 throw;
@@ -408,21 +408,30 @@ struct connection::impl final : std::enable_shared_from_this<connection::impl> {
       if (!valid()) {
          FORGE_THROW_EXCEPTION(exceptions::closed, "invalid tcp connection");
       }
-      auto [model, stream] = prepare_stream(socket, strand, tcp_options, id, terminal_state,
-                                            terminal_requested, terminal_completed);
-      auto out = transport::stream_connection{.local_endpoint = local,
-                                              .remote_endpoint = remote,
-                                              .stream = std::move(stream)};
+      auto [model, stream] = prepare_stream(socket, strand, tcp_options, id, terminal_state, terminal_requested,
+                                            terminal_completed, std::move(lifetime));
+      auto out =
+          transport::stream_connection{.local_endpoint = local, .remote_endpoint = remote, .stream = std::move(stream)};
       commit_stream_handoff();
       model->activate();
       return out;
    }
 
-   [[nodiscard]] asio_tcp::socket release_socket() {
+   [[nodiscard]] asio_tcp::socket release_socket(std::shared_ptr<void>* lifetime_out) {
       if (!valid()) {
          FORGE_THROW_EXCEPTION(exceptions::closed, "invalid tcp connection");
       }
+      if (!lifetime_out && lifetime) {
+         FORGE_THROW_EXCEPTION(exceptions::invalid_options,
+                               "tcp socket handoff with an owner lifetime requires a lifetime destination");
+      }
       auto current = detach_socket();
+      if (lifetime_out) {
+         *lifetime_out = std::move(lifetime);
+      }
+      // A handoff is terminal for this owner. Wake the worker so it can drop
+      // its moved-from socket without retaining a descriptor reservation.
+      terminal_requested->notify();
       auto out = std::move(*current);
       return out;
    }
@@ -460,8 +469,8 @@ struct connection::impl final : std::enable_shared_from_this<connection::impl> {
          FORGE_THROW_EXCEPTION(exceptions::io_error, "tcp connection cannot hand off while I/O is active");
       }
       auto expected = socket_state::active;
-      if (!terminal_state->compare_exchange_strong(expected, socket_state::handed_off,
-                                                   std::memory_order_acq_rel, std::memory_order_acquire)) {
+      if (!terminal_state->compare_exchange_strong(expected, socket_state::handed_off, std::memory_order_acq_rel,
+                                                   std::memory_order_acquire)) {
          FORGE_THROW_EXCEPTION(exceptions::closed, "tcp connection cannot hand off a terminal socket");
       }
       return std::move(socket);
@@ -501,13 +510,14 @@ struct connection::impl final : std::enable_shared_from_this<connection::impl> {
    std::shared_ptr<std::atomic<socket_state>> terminal_state;
    std::shared_ptr<forge::asio::notification> terminal_requested;
    std::shared_ptr<forge::asio::notification> terminal_completed;
+   std::shared_ptr<void> lifetime;
    std::size_t active_operations = 0;
    bool stream_handed_off = false;
 };
 
 connection::connection() = default;
-connection::connection(boost::asio::ip::tcp::socket socket, options tcp_options)
-    : impl_(std::make_shared<impl>(std::move(socket), tcp_options)) {
+connection::connection(boost::asio::ip::tcp::socket socket, options tcp_options, std::shared_ptr<void> lifetime)
+    : impl_(std::make_shared<impl>(std::move(socket), tcp_options, std::move(lifetime))) {
    impl_->start_terminal_worker();
 }
 connection::~connection() = default;
@@ -585,7 +595,14 @@ boost::asio::ip::tcp::socket connection::release_socket() && {
    if (!impl_) {
       FORGE_THROW_EXCEPTION(exceptions::closed, "invalid tcp connection");
    }
-   return impl_->release_socket();
+   return impl_->release_socket(nullptr);
+}
+
+boost::asio::ip::tcp::socket connection::release_socket(std::shared_ptr<void>& lifetime) && {
+   if (!impl_) {
+      FORGE_THROW_EXCEPTION(exceptions::closed, "invalid tcp connection");
+   }
+   return impl_->release_socket(&lifetime);
 }
 
 } // namespace forge::net::tcp

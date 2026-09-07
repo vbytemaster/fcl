@@ -17,7 +17,13 @@ struct libp2p_identity_material;
 
 } // namespace forge::net::p2p
 
+namespace forge::net::p2p::detail {
+class connection_gate;
+}
+
 namespace forge::net::p2p::direct {
+
+using authenticated_admission_handler = std::function<void(const peer_id&)>;
 
 struct connection {
    peer_id peer;
@@ -25,6 +31,7 @@ struct connection {
    std::optional<forge::net::p2p::endpoint> local_endpoint;
    std::optional<forge::net::p2p::endpoint> remote_endpoint;
    std::optional<resource_manager::session_reservation> admission;
+   std::shared_ptr<void> native_lifetime;
    peer_authentication authentication = peer_authentication::unverified;
 };
 
@@ -36,7 +43,8 @@ struct profile {
    std::function<void()> stop;
    std::function<boost::asio::awaitable<void>()> async_stop;
    std::function<boost::asio::awaitable<connection>(forge::net::p2p::endpoint, const node::connect_options&,
-                                                    std::shared_ptr<forge::net::p2p::cancellation_latch>)>
+                                                    std::shared_ptr<forge::net::p2p::cancellation_latch>,
+                                                    std::shared_ptr<void>, authenticated_admission_handler)>
        async_connect;
    std::function<boost::asio::awaitable<connection>(forge::net::p2p::endpoint)> async_accept;
 };
@@ -44,7 +52,7 @@ struct profile {
 class registry {
  public:
    registry(forge::asio::runtime& runtime, const node::options& options, const libp2p_identity_material& identity,
-            resource_manager resources);
+            resource_manager resources, std::shared_ptr<forge::net::p2p::detail::connection_gate> gate = {});
    ~registry();
 
    registry(const registry&) = delete;
@@ -61,7 +69,8 @@ class registry {
 
    boost::asio::awaitable<connection>
    async_connect(forge::net::p2p::endpoint endpoint, const node::connect_options& options,
-                 std::shared_ptr<forge::net::p2p::cancellation_latch> cancellation = {});
+                 std::shared_ptr<forge::net::p2p::cancellation_latch> cancellation = {},
+                 std::shared_ptr<void> native_lifetime = {}, authenticated_admission_handler authenticated = {});
    boost::asio::awaitable<connection> async_accept(forge::net::p2p::endpoint endpoint);
 
  private:
@@ -70,8 +79,9 @@ class registry {
 };
 
 void register_quic_profile(registry& value, forge::asio::runtime& runtime, const node::options& options,
-                           resource_manager resources);
+                           resource_manager resources, std::shared_ptr<forge::net::p2p::detail::connection_gate> gate);
 void register_tcp_profile(registry& value, forge::asio::runtime& runtime, const node::options& options,
-                          const libp2p_identity_material& identity, resource_manager resources);
+                          const libp2p_identity_material& identity, resource_manager resources,
+                          std::shared_ptr<forge::net::p2p::detail::connection_gate> gate);
 
 } // namespace forge::net::p2p::direct

@@ -19,6 +19,7 @@ export module forge.net.p2p.node;
 import forge.asio.runtime;
 import forge.net.p2p.dht;
 import forge.net.p2p.dht.record_store;
+import forge.net.p2p.connection_gater;
 import forge.net.p2p.discovery;
 import forge.net.p2p.diagnostics;
 import forge.net.p2p.endpoint;
@@ -46,11 +47,6 @@ class node {
  public:
    struct limits {
       std::size_t max_sessions = 1024;
-      std::size_t max_pending_inbound_sessions = 1024;
-      std::size_t max_pending_outbound_sessions = 1024;
-      std::size_t max_inbound_sessions = 1024;
-      std::size_t max_outbound_sessions = 1024;
-      std::size_t max_sessions_per_peer = 4;
       std::size_t session_low_watermark = 1024;
       std::chrono::milliseconds session_grace_period{60'000};
       std::chrono::milliseconds session_prune_silence{10'000};
@@ -73,6 +69,9 @@ class node {
       std::string certificate_pem;
       std::string private_key_pem;
       std::optional<peer_id> explicit_peer_id;
+      // The gater may run on concurrent direct transport operations. Implementations
+      // must be synchronous, nonblocking and internally thread-safe.
+      std::shared_ptr<connection_gater> connection_gater;
       capability_set capabilities{.bits = capabilities::direct_quic | capabilities::peer_exchange};
       limits limits{};
       relay::policy relay_policy{.service_enabled = true, .client_enabled = true, .public_relay_allowed = false};

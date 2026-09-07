@@ -47,6 +47,11 @@ struct diagnostics {
       std::uint64_t sessions_closed = 0;
       std::uint64_t sessions_pruned = 0;
       std::uint64_t connection_rejections = 0;
+      std::uint64_t gater_peer_dial_rejections = 0;
+      std::uint64_t gater_address_dial_rejections = 0;
+      std::uint64_t gater_accept_rejections = 0;
+      std::uint64_t gater_secured_rejections = 0;
+      std::uint64_t gater_upgraded_rejections = 0;
       std::uint64_t handshakes_completed = 0;
       std::uint64_t handshakes_failed = 0;
       std::uint64_t protocol_streams_opened = 0;
@@ -243,19 +248,19 @@ struct diagnostics {
 BOOST_DESCRIBE_STRUCT(forge::net::p2p::diagnostics::options, (),
                       (max_peers, max_sessions, max_endpoints_per_peer, max_protocols_per_peer,
                        max_relay_reservations_per_peer, max_dht_profiles))
-BOOST_DESCRIBE_STRUCT(forge::net::p2p::diagnostics::metrics_snapshot, (),
-                      (sessions_opened, sessions_closed, sessions_pruned, connection_rejections, handshakes_completed,
-                       handshakes_failed, protocol_streams_opened, protocol_streams_accepted, protocol_rejections,
-                       peer_exchange_messages, reachability_checks, reachability_public, reachability_private,
-                       relays_opened, relay_rejections, relay_reservations, relay_reservation_rejections,
-                       relay_reservation_expirations, relay_discovery_refreshes, relay_discovery_attempts,
-                       relay_discovery_successes, relay_discovery_failures, relay_bytes, hole_punch_attempts,
-                       hole_punch_successes, hole_punch_failures, path_direct_opens, path_relay_opens,
-                       path_direct_attempts, path_relay_attempts, direct_failures, relay_failures, dht_queries,
-                       dht_responses, rendezvous_registrations, rendezvous_discovers, pubsub_messages_published,
-                       pubsub_messages_received, pubsub_messages_delivered, pubsub_duplicates, pubsub_invalid_messages,
-                       pubsub_control_messages, backpressure_rejections, active_sessions, active_relays,
-                       active_relay_reservations, stopped))
+BOOST_DESCRIBE_STRUCT(
+    forge::net::p2p::diagnostics::metrics_snapshot, (),
+    (sessions_opened, sessions_closed, sessions_pruned, connection_rejections, gater_peer_dial_rejections,
+     gater_address_dial_rejections, gater_accept_rejections, gater_secured_rejections, gater_upgraded_rejections,
+     handshakes_completed, handshakes_failed, protocol_streams_opened, protocol_streams_accepted, protocol_rejections,
+     peer_exchange_messages, reachability_checks, reachability_public, reachability_private, relays_opened,
+     relay_rejections, relay_reservations, relay_reservation_rejections, relay_reservation_expirations,
+     relay_discovery_refreshes, relay_discovery_attempts, relay_discovery_successes, relay_discovery_failures,
+     relay_bytes, hole_punch_attempts, hole_punch_successes, hole_punch_failures, path_direct_opens, path_relay_opens,
+     path_direct_attempts, path_relay_attempts, direct_failures, relay_failures, dht_queries, dht_responses,
+     rendezvous_registrations, rendezvous_discovers, pubsub_messages_published, pubsub_messages_received,
+     pubsub_messages_delivered, pubsub_duplicates, pubsub_invalid_messages, pubsub_control_messages,
+     backpressure_rejections, active_sessions, active_relays, active_relay_reservations, stopped))
 BOOST_DESCRIBE_STRUCT(forge::net::p2p::diagnostics::network_state, (), (local_peer, local_endpoints, stopped))
 BOOST_DESCRIBE_STRUCT(forge::net::p2p::diagnostics::endpoint_record, (),
                       (endpoint, kind, relay_peer, successes, failures, last_latency, backoff_until, score))

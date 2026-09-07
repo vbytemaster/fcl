@@ -54,7 +54,8 @@ class stream {
 
    struct impl;
    explicit stream(std::shared_ptr<detail::stream_concept> model,
-                   detail::stream_cancel_request request_cancel = {});
+                   detail::stream_cancel_request request_cancel = {},
+                   detail::stream_cancel_request abandon_cancel = {});
 
    std::shared_ptr<impl> impl_;
 };
@@ -82,6 +83,9 @@ struct stream_access {
    [[nodiscard]] static stream make(std::shared_ptr<stream_concept> model);
    [[nodiscard]] static stream make_cancelable(std::shared_ptr<stream_concept> model,
                                                stream_cancel_request request_cancel);
+   [[nodiscard]] static stream make_cancelable(std::shared_ptr<stream_concept> model,
+                                               stream_cancel_request request_cancel,
+                                               stream_cancel_request abandon_cancel);
    [[nodiscard]] static stream with_buffer(stream value, std::vector<std::uint8_t> buffered);
 };
 

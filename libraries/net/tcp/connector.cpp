@@ -35,9 +35,8 @@ using asio_tcp = boost::asio::ip::tcp;
 
 [[noreturn]] void throw_invalid_endpoint(const transport::endpoint& endpoint, std::string message) {
    FORGE_THROW_EXCEPTION(exceptions::invalid_endpoint, std::move(message),
-                       forge::exceptions::ctx("host", endpoint.host),
-                       forge::exceptions::ctx("port", endpoint.port),
-                       forge::exceptions::ctx("protocol", static_cast<int>(endpoint.protocol)));
+                         forge::exceptions::ctx("host", endpoint.host), forge::exceptions::ctx("port", endpoint.port),
+                         forge::exceptions::ctx("protocol", static_cast<int>(endpoint.protocol)));
 }
 
 [[noreturn]] void throw_invalid_options(std::string message) {
@@ -46,14 +45,12 @@ using asio_tcp = boost::asio::ip::tcp;
 
 [[noreturn]] void throw_connect_failed(const transport::endpoint& endpoint, const boost::system::error_code& error) {
    FORGE_THROW_EXCEPTION(exceptions::connect_failed, "tcp connect failed",
-                       forge::exceptions::ctx("host", endpoint.host),
-                       forge::exceptions::ctx("port", endpoint.port),
-                       forge::exceptions::ctx("reason", error.message()));
+                         forge::exceptions::ctx("host", endpoint.host), forge::exceptions::ctx("port", endpoint.port),
+                         forge::exceptions::ctx("reason", error.message()));
 }
 
 [[noreturn]] void throw_connect_canceled(const transport::endpoint& endpoint) {
-   FORGE_THROW_EXCEPTION(exceptions::canceled, "tcp connect canceled",
-                         forge::exceptions::ctx("host", endpoint.host),
+   FORGE_THROW_EXCEPTION(exceptions::canceled, "tcp connect canceled", forge::exceptions::ctx("host", endpoint.host),
                          forge::exceptions::ctx("port", endpoint.port));
 }
 
@@ -101,12 +98,12 @@ void configure_socket(asio_tcp::socket& socket, const options& tcp_options) {
    socket.set_option(asio_tcp::no_delay{tcp_options.no_delay}, error);
    if (error) {
       FORGE_THROW_EXCEPTION(exceptions::io_error, "failed to configure tcp no_delay",
-                          forge::exceptions::ctx("reason", error.message()));
+                            forge::exceptions::ctx("reason", error.message()));
    }
    socket.set_option(boost::asio::socket_base::keep_alive{tcp_options.keep_alive}, error);
    if (error) {
       FORGE_THROW_EXCEPTION(exceptions::io_error, "failed to configure tcp keep_alive",
-                          forge::exceptions::ctx("reason", error.message()));
+                            forge::exceptions::ctx("reason", error.message()));
    }
 }
 
@@ -180,11 +177,13 @@ struct connector::impl final : transport::detail::stream_connector_concept,
       return !canceled.load(std::memory_order_acquire);
    }
 
-   boost::asio::awaitable<connection> async_connect_connection(transport::endpoint remote) {
+   boost::asio::awaitable<connection> async_connect_connection(transport::endpoint remote,
+                                                               std::shared_ptr<void> lifetime) {
       auto self = shared_from_this();
       co_return co_await asio::co_spawn(
           strand,
-          [self = std::move(self), remote = std::move(remote)]() mutable -> asio::awaitable<connection> {
+          [self = std::move(self), remote = std::move(remote),
+           lifetime = std::move(lifetime)]() mutable -> asio::awaitable<connection> {
              if (!self->valid()) {
                 FORGE_THROW_EXCEPTION(exceptions::closed, "invalid tcp connector");
              }
@@ -213,8 +212,8 @@ struct connector::impl final : transport::detail::stream_connector_concept,
                    auto resolver = std::make_shared<asio_tcp::resolver>(self->strand);
                    self->resolvers->emplace(generation, resolver);
                    const auto service = std::to_string(remote.port);
-                   auto results = co_await resolver->async_resolve(
-                       remote.host, service, asio::redirect_error(asio::use_awaitable, error));
+                   auto results = co_await resolver->async_resolve(remote.host, service,
+                                                                   asio::redirect_error(asio::use_awaitable, error));
                    self->resolvers->erase(generation);
                    if (!error) {
                       auto filtered = filter_results(std::move(results), remote.host_type);
@@ -239,7 +238,7 @@ struct connector::impl final : transport::detail::stream_connector_concept,
 
                 configure_socket(*socket, self->tcp_options);
                 self->sockets->erase(generation);
-                co_return connection{std::move(*socket), self->tcp_options};
+                co_return connection{std::move(*socket), self->tcp_options, std::move(lifetime)};
              } catch (...) {
                 self->resolvers->erase(generation);
                 self->sockets->erase(generation);
@@ -251,7 +250,7 @@ struct connector::impl final : transport::detail::stream_connector_concept,
 
    boost::asio::awaitable<transport::stream_connection> async_connect(transport::endpoint remote,
                                                                       transport::connect_options) override {
-      auto tcp_connection = co_await async_connect_connection(std::move(remote));
+      auto tcp_connection = co_await async_connect_connection(std::move(remote), {});
       co_return std::move(tcp_connection).into_transport_stream();
    }
 
@@ -261,8 +260,7 @@ struct connector::impl final : transport::detail::stream_connector_concept,
 
    void request_cancel() noexcept {
       auto expected = false;
-      if (!canceled.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
-                                            std::memory_order_acquire)) {
+      if (!canceled.compare_exchange_strong(expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
          return;
       }
       terminal_requested->notify();
@@ -292,12 +290,13 @@ bool connector::valid() const noexcept {
 }
 
 boost::asio::awaitable<connection> connector::async_connect_connection(transport::endpoint remote,
-                                                                       transport::connect_options) {
+                                                                       transport::connect_options,
+                                                                       std::shared_ptr<void> lifetime) {
    if (!impl_) {
       FORGE_THROW_EXCEPTION(exceptions::closed, "invalid tcp connector");
    }
    auto state = impl_;
-   co_return co_await state->async_connect_connection(std::move(remote));
+   co_return co_await state->async_connect_connection(std::move(remote), std::move(lifetime));
 }
 
 boost::asio::awaitable<transport::stream_connection> connector::async_connect(transport::endpoint remote,

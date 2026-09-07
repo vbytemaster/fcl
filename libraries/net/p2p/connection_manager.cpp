@@ -3,12 +3,14 @@ module;
 #include <forge/exceptions/macros.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <new>
 #include <optional>
 #include <set>
 #include <string>
@@ -25,6 +27,9 @@ import forge.net.p2p.identity;
 
 namespace forge::net::p2p {
 namespace {
+
+std::atomic_bool fail_next_prepare_for_test = false;
+std::atomic_bool fail_next_peer_session_prepare_for_test = false;
 
 [[nodiscard]] std::int64_t checked_tag_sum(std::int64_t left, std::int64_t right) {
    if ((right > 0 && left > (std::numeric_limits<std::int64_t>::max)() - right) ||
@@ -186,22 +191,22 @@ connection_manager::plan_peer_prune(std::size_t target_peers, std::size_t max_vi
       });
    }
 
-   std::sort(candidates.begin(), candidates.end(), [](const peer_prune_candidate& left,
-                                                       const peer_prune_candidate& right) {
-      if (left.tag_value != right.tag_value) {
-         return left.tag_value < right.tag_value;
-      }
-      if (left.network_score != right.network_score) {
-         return left.network_score < right.network_score;
-      }
-      if (left.last_used_at != right.last_used_at) {
-         return left.last_used_at < right.last_used_at;
-      }
-      if (left.opened_at != right.opened_at) {
-         return left.opened_at < right.opened_at;
-      }
-      return left.peer.to_string() < right.peer.to_string();
-   });
+   std::sort(candidates.begin(), candidates.end(),
+             [](const peer_prune_candidate& left, const peer_prune_candidate& right) {
+                if (left.tag_value != right.tag_value) {
+                   return left.tag_value < right.tag_value;
+                }
+                if (left.network_score != right.network_score) {
+                   return left.network_score < right.network_score;
+                }
+                if (left.last_used_at != right.last_used_at) {
+                   return left.last_used_at < right.last_used_at;
+                }
+                if (left.opened_at != right.opened_at) {
+                   return left.opened_at < right.opened_at;
+                }
+                return left.peer.to_string() < right.peer.to_string();
+             });
 
    const auto required_victims = result.connected_peers - target_peers;
    const auto selected = std::min(required_victims, max_victims);
@@ -255,10 +260,14 @@ bool connection_manager::should_prune_before(const session_record& left, const s
    return left.id < right.id;
 }
 
-bool connection_manager::prune_one(std::vector<std::uint64_t>& pruned, std::chrono::steady_clock::time_point now,
-                                   std::optional<direction> required_direction) {
+std::optional<std::uint64_t> connection_manager::select_prune_one(const std::vector<std::uint64_t>& selected,
+                                                                  std::chrono::steady_clock::time_point now,
+                                                                  std::optional<direction> required_direction) const {
    auto victim = sessions_.end();
    for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
+      if (std::ranges::find(selected, it->first) != selected.end()) {
+         continue;
+      }
       if (required_direction && it->second.direction != *required_direction) {
          continue;
       }
@@ -270,27 +279,9 @@ bool connection_manager::prune_one(std::vector<std::uint64_t>& pruned, std::chro
       }
    }
    if (victim == sessions_.end()) {
-      return false;
+      return std::nullopt;
    }
-   const auto id = victim->first;
-   pruned.push_back(id);
-   erase_record(id);
-   return true;
-}
-
-std::size_t connection_manager::count_peer_sessions(const peer_id& peer) const {
-   const auto found = sessions_by_peer_.find(peer);
-   return found == sessions_by_peer_.end() ? 0 : found->second.size();
-}
-
-std::size_t connection_manager::count_direction_sessions(direction value) const {
-   auto count = std::size_t{};
-   for (const auto& [_, session] : sessions_) {
-      if (session.direction == value) {
-         ++count;
-      }
-   }
-   return count;
+   return victim->first;
 }
 
 connection_manager::admission connection_manager::remember(session_record record,
@@ -311,41 +302,79 @@ connection_manager::admission connection_manager::remember(session_record record
       record.last_used_at = record.opened_at;
    }
 
-   const auto direction_limit =
-       record.direction == direction::inbound ? policy_.max_inbound_sessions : policy_.max_outbound_sessions;
-   if (count_peer_sessions(record.peer) >= policy_.max_sessions_per_peer) {
-      return admission{.accepted = false, .reason = "P2P session resource limit reached"};
-   }
-
    auto result = admission{};
    const auto may_prune = !last_prune_ || now - *last_prune_ >= policy_.prune_silence;
-   const auto direction_saturated = count_direction_sessions(record.direction) >= direction_limit;
    const auto global_saturated = sessions_.size() >= policy_.max_sessions;
-   if (direction_saturated) {
-      if (!may_prune || !prune_one(result.pruned, now, record.direction)) {
-         return admission{.accepted = false, .reason = "P2P session resource limit reached"};
-      }
-   }
 
    if (global_saturated) {
-      while (may_prune && sessions_.size() > policy_.low_watermark && prune_one(result.pruned, now)) {
+      // The candidate itself needs a slot. Keep the public low watermark valid
+      // at one, while still allowing a max_sessions == 1 replacement.
+      const auto target =
+          policy_.max_sessions == 0 ? std::size_t{0} : std::min(policy_.low_watermark, policy_.max_sessions - 1);
+      result.pruned.reserve(sessions_.size() - target);
+      while (may_prune && sessions_.size() - result.pruned.size() > target) {
+         const auto victim = select_prune_one(result.pruned, now);
+         if (!victim) {
+            break;
+         }
+         result.pruned.push_back(*victim);
       }
-      if (!result.pruned.empty()) {
-         last_prune_ = now;
+      if (sessions_.size() - result.pruned.size() >= policy_.max_sessions) {
+         return admission{.accepted = false, .reason = "P2P max sessions reached"};
       }
-      if (sessions_.size() >= policy_.max_sessions) {
-         return admission{.accepted = false, .pruned = std::move(result.pruned),
-                          .reason = "P2P max sessions reached"};
-      }
-   } else if (!result.pruned.empty()) {
-      last_prune_ = now;
    }
 
    const auto id = record.id;
    const auto peer = record.peer;
-   sessions_.emplace(id, std::move(record));
-   sessions_by_peer_[peer].insert(id);
-   network_scores_[peer] = normalized_network_score(sessions_.at(id).network_score);
+   const auto score = normalized_network_score(record.network_score);
+   auto session_inserted = false;
+   auto peer_inserted = false;
+   auto peer_session_inserted = false;
+   auto score_inserted = false;
+   try {
+      if (fail_next_prepare_for_test.exchange(false, std::memory_order_relaxed)) {
+         throw std::bad_alloc{};
+      }
+      const auto [session, inserted] = sessions_.emplace(id, std::move(record));
+      static_cast<void>(session);
+      if (!inserted) {
+         return admission{.accepted = false, .reason = "P2P duplicate session id"};
+      }
+      session_inserted = inserted;
+      auto [peer_sessions, inserted_peer] = sessions_by_peer_.try_emplace(peer);
+      peer_inserted = inserted_peer;
+      if (fail_next_peer_session_prepare_for_test.exchange(false, std::memory_order_relaxed)) {
+         throw std::bad_alloc{};
+      }
+      peer_session_inserted = peer_sessions->second.insert(id).second;
+      auto [network_score, inserted_score] = network_scores_.try_emplace(peer, score);
+      score_inserted = inserted_score;
+      if (!inserted_score) {
+         network_score->second = score;
+      }
+   } catch (...) {
+      if (score_inserted) {
+         network_scores_.erase(peer);
+      }
+      if (auto found = sessions_by_peer_.find(peer); found != sessions_by_peer_.end()) {
+         if (peer_session_inserted) {
+            found->second.erase(id);
+         }
+         if (peer_inserted && found->second.empty()) {
+            sessions_by_peer_.erase(found);
+         }
+      }
+      if (session_inserted) {
+         sessions_.erase(id);
+      }
+      throw;
+   }
+   for (const auto victim : result.pruned) {
+      erase_record(victim);
+   }
+   if (!result.pruned.empty()) {
+      last_prune_ = now;
+   }
    result.accepted = true;
    return result;
 }
@@ -379,8 +408,8 @@ void connection_manager::clear() {
 
 connection_manager::snapshot connection_manager::current(std::size_t max_sessions) const {
    auto out = snapshot{
-      .active_sessions = sessions_.size(),
-      .active_peers = sessions_by_peer_.size(),
+       .active_sessions = sessions_.size(),
+       .active_peers = sessions_by_peer_.size(),
    };
    out.protected_peers.reserve(protected_.size());
    for (const auto& [peer, tags] : protected_) {
@@ -406,9 +435,6 @@ connection_manager::policy connection_policy_for(const node::limits& limits) {
    return connection_manager::policy{
        .max_sessions = limits.max_sessions,
        .low_watermark = limits.session_low_watermark,
-       .max_inbound_sessions = limits.max_inbound_sessions,
-       .max_outbound_sessions = limits.max_outbound_sessions,
-       .max_sessions_per_peer = limits.max_sessions_per_peer,
        .max_tagged_peers = limits.topology.max_tagged_peers,
        .max_tags_per_peer = limits.topology.max_tags_per_peer,
        .max_tag_size = limits.topology.max_tag_size,
@@ -416,5 +442,17 @@ connection_manager::policy connection_policy_for(const node::limits& limits) {
        .prune_silence = limits.session_prune_silence,
    };
 }
+
+namespace detail {
+
+void fail_next_connection_manager_prepare_for_test() noexcept {
+   fail_next_prepare_for_test.store(true, std::memory_order_relaxed);
+}
+
+void fail_next_connection_manager_peer_session_prepare_for_test() noexcept {
+   fail_next_peer_session_prepare_for_test.store(true, std::memory_order_relaxed);
+}
+
+} // namespace detail
 
 } // namespace forge::net::p2p

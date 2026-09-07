@@ -3,6 +3,10 @@ module;
 #include <forge/exceptions/macros.hpp>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <iterator>
 #include <memory>
 #include <ranges>
@@ -20,6 +24,7 @@ import forge.net.p2p.resource_manager;
 import forge.net.transport.session;
 
 #include "details/direct_transport.hxx"
+#include "details/connection_gate.hxx"
 
 namespace forge::net::p2p::direct {
 namespace {
@@ -40,10 +45,14 @@ struct registry::state {
 };
 
 registry::registry(forge::asio::runtime& runtime, const node::options& options,
-                   const libp2p_identity_material& identity, resource_manager resources)
+                   const libp2p_identity_material& identity, resource_manager resources,
+                   std::shared_ptr<forge::net::p2p::detail::connection_gate> gate)
     : state_(std::make_unique<state>()) {
-   register_quic_profile(*this, runtime, options, resources);
-   register_tcp_profile(*this, runtime, options, identity, std::move(resources));
+   if (!gate) {
+      gate = std::make_shared<forge::net::p2p::detail::connection_gate>(nullptr);
+   }
+   register_quic_profile(*this, runtime, options, resources, gate);
+   register_tcp_profile(*this, runtime, options, identity, std::move(resources), std::move(gate));
 }
 
 registry::~registry() = default;
@@ -130,9 +139,12 @@ detail::session_teardown::operation registry::teardown_operation() const {
 
 boost::asio::awaitable<connection> registry::async_connect(forge::net::p2p::endpoint endpoint,
                                                            const node::connect_options& options,
-                                                           std::shared_ptr<cancellation_latch> cancellation) {
+                                                           std::shared_ptr<cancellation_latch> cancellation,
+                                                           std::shared_ptr<void> native_lifetime,
+                                                           authenticated_admission_handler authenticated) {
    auto& selected = profile_for(state_->profiles, endpoint);
-   co_return co_await selected.async_connect(std::move(endpoint), options, std::move(cancellation));
+   co_return co_await selected.async_connect(std::move(endpoint), options, std::move(cancellation),
+                                             std::move(native_lifetime), std::move(authenticated));
 }
 
 boost::asio::awaitable<connection> registry::async_accept(forge::net::p2p::endpoint endpoint) {

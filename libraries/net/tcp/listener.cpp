@@ -30,9 +30,8 @@ using asio_tcp = boost::asio::ip::tcp;
 
 [[noreturn]] void throw_invalid_endpoint(const transport::endpoint& endpoint, std::string message) {
    FORGE_THROW_EXCEPTION(exceptions::invalid_endpoint, std::move(message),
-                       forge::exceptions::ctx("host", endpoint.host),
-                       forge::exceptions::ctx("port", endpoint.port),
-                       forge::exceptions::ctx("protocol", static_cast<int>(endpoint.protocol)));
+                         forge::exceptions::ctx("host", endpoint.host), forge::exceptions::ctx("port", endpoint.port),
+                         forge::exceptions::ctx("protocol", static_cast<int>(endpoint.protocol)));
 }
 
 [[noreturn]] void throw_invalid_options(std::string message) {
@@ -40,10 +39,9 @@ using asio_tcp = boost::asio::ip::tcp;
 }
 
 [[noreturn]] void throw_listen_failed(const transport::endpoint& endpoint, const boost::system::error_code& error) {
-   FORGE_THROW_EXCEPTION(exceptions::listen_failed, "tcp listen failed",
-                       forge::exceptions::ctx("host", endpoint.host),
-                       forge::exceptions::ctx("port", endpoint.port),
-                       forge::exceptions::ctx("reason", error.message()));
+   FORGE_THROW_EXCEPTION(exceptions::listen_failed, "tcp listen failed", forge::exceptions::ctx("host", endpoint.host),
+                         forge::exceptions::ctx("port", endpoint.port),
+                         forge::exceptions::ctx("reason", error.message()));
 }
 
 void validate_options(const options& value) {
@@ -98,12 +96,12 @@ void configure_socket(asio_tcp::socket& socket, const options& tcp_options) {
    socket.set_option(asio_tcp::no_delay{tcp_options.no_delay}, error);
    if (error) {
       FORGE_THROW_EXCEPTION(exceptions::io_error, "failed to configure tcp no_delay",
-                          forge::exceptions::ctx("reason", error.message()));
+                            forge::exceptions::ctx("reason", error.message()));
    }
    socket.set_option(boost::asio::socket_base::keep_alive{tcp_options.keep_alive}, error);
    if (error) {
       FORGE_THROW_EXCEPTION(exceptions::io_error, "failed to configure tcp keep_alive",
-                          forge::exceptions::ctx("reason", error.message()));
+                            forge::exceptions::ctx("reason", error.message()));
    }
 }
 
@@ -115,8 +113,7 @@ enum class listener_state : std::uint8_t {
 
 } // namespace
 
-struct listener::impl final : transport::detail::stream_listener_concept,
-                              std::enable_shared_from_this<listener::impl> {
+struct listener::impl final : transport::detail::stream_listener_concept, std::enable_shared_from_this<listener::impl> {
    impl(boost::asio::any_io_executor executor, transport::endpoint requested, transport::listen_options listen_options,
         options tcp_options_value)
        : strand(asio::make_strand(std::move(executor))), acceptor(strand), tcp_options(tcp_options_value) {
@@ -163,18 +160,17 @@ struct listener::impl final : transport::detail::stream_listener_concept,
       return local;
    }
 
-   boost::asio::awaitable<connection> async_accept_connection() {
+   boost::asio::awaitable<connection> async_accept_connection(std::shared_ptr<void> lifetime) {
       auto self = shared_from_this();
       co_return co_await asio::co_spawn(
           strand,
-          [self = std::move(self)]() -> asio::awaitable<connection> {
+          [self = std::move(self), lifetime = std::move(lifetime)]() mutable -> asio::awaitable<connection> {
              if (!self->valid()) {
                 FORGE_THROW_EXCEPTION(exceptions::closed, "invalid tcp listener");
              }
              auto socket = asio_tcp::socket{self->acceptor.get_executor()};
              auto error = boost::system::error_code{};
-             co_await self->acceptor.async_accept(socket,
-                                                  asio::redirect_error(asio::use_awaitable, error));
+             co_await self->acceptor.async_accept(socket, asio::redirect_error(asio::use_awaitable, error));
              if (error) {
                 if (error == asio::error::operation_aborted) {
                    if (self->state.load(std::memory_order_acquire) != listener_state::open) {
@@ -187,13 +183,13 @@ struct listener::impl final : transport::detail::stream_listener_concept,
              }
 
              configure_socket(socket, self->tcp_options);
-             co_return connection{std::move(socket), self->tcp_options};
+             co_return connection{std::move(socket), self->tcp_options, std::move(lifetime)};
           },
           asio::use_awaitable);
    }
 
    boost::asio::awaitable<transport::stream_connection> async_accept() override {
-      auto tcp_connection = co_await async_accept_connection();
+      auto tcp_connection = co_await async_accept_connection({});
       co_return std::move(tcp_connection).into_transport_stream();
    }
 
@@ -251,8 +247,8 @@ struct listener::impl final : transport::detail::stream_listener_concept,
 };
 
 listener::listener() = default;
-listener::listener(boost::asio::any_io_executor executor, transport::endpoint local, transport::listen_options listen_options,
-                   options tcp_options)
+listener::listener(boost::asio::any_io_executor executor, transport::endpoint local,
+                   transport::listen_options listen_options, options tcp_options)
     : impl_(std::make_shared<impl>(std::move(executor), std::move(local), listen_options, tcp_options)) {}
 listener::~listener() = default;
 listener::listener(listener&&) noexcept = default;
@@ -269,12 +265,12 @@ transport::endpoint listener::local_endpoint() const {
    return impl_->local_endpoint();
 }
 
-boost::asio::awaitable<connection> listener::async_accept_connection() {
+boost::asio::awaitable<connection> listener::async_accept_connection(std::shared_ptr<void> lifetime) {
    if (!impl_) {
       FORGE_THROW_EXCEPTION(exceptions::closed, "invalid tcp listener");
    }
    auto state = impl_;
-   co_return co_await state->async_accept_connection();
+   co_return co_await state->async_accept_connection(std::move(lifetime));
 }
 
 boost::asio::awaitable<transport::stream_connection> listener::async_accept() {

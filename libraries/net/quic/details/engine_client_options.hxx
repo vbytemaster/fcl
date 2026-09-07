@@ -19,6 +19,7 @@ struct engine_client_options {
    forge::crypto::core::secret_string private_key_pem;
    std::optional<token_callbacks> client_tokens;
    std::function<bool(std::string_view)> test_failpoint;
+   std::shared_ptr<void> connection_lifetime;
 };
 
 } // namespace forge::net::quic::detail

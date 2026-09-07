@@ -306,8 +306,8 @@ boost::asio::awaitable<void> async_handshake(std::shared_ptr<native_stream> stre
              FORGE_THROW_EXCEPTION(exceptions::canceled, "stcp handshake canceled");
           }
 
-          auto cancellation = std::make_shared<std::atomic<handshake_cancellation_state>>(
-              handshake_cancellation_state::active);
+          auto cancellation =
+              std::make_shared<std::atomic<handshake_cancellation_state>>(handshake_cancellation_state::active);
           auto cancel_requested = std::make_shared<forge::asio::notification>();
           auto cancel_completed = std::make_shared<forge::asio::notification>();
           auto cancel_worker_error = std::make_shared<std::exception_ptr>();
@@ -419,17 +419,18 @@ boost::asio::awaitable<void> async_handshake(std::shared_ptr<native_stream> stre
 class stream_model final : public transport::detail::stream_concept {
  public:
    stream_model(tls::context_snapshot_ptr context, asio::strand<asio::any_io_executor> strand,
-                std::shared_ptr<io_gates> gates,
-                std::shared_ptr<forge::asio::notification> terminal_completed, std::size_t read_chunk_size,
-                std::int64_t id)
+                std::shared_ptr<io_gates> gates, std::shared_ptr<forge::asio::notification> terminal_completed,
+                std::size_t read_chunk_size, std::int64_t id, std::shared_ptr<void> lifetime)
        : context_(std::move(context)), strand_(std::move(strand)), gates_(std::move(gates)),
-         read_chunk_size_(read_chunk_size), id_(id), terminal_completed_(std::move(terminal_completed)) {}
+         read_chunk_size_(read_chunk_size), id_(id), terminal_completed_(std::move(terminal_completed)),
+         lifetime_(std::move(lifetime)) {}
 
    ~stream_model() override {
       request_cancel();
    }
 
    [[nodiscard]] bool valid() const noexcept override {
+      static_cast<void>(lifetime_);
       return stream_ && !gates_->stopped();
    }
 
@@ -545,17 +546,18 @@ class stream_model final : public transport::detail::stream_concept {
    transport::buffer_pool pool_;
    std::int64_t id_ = -1;
    std::shared_ptr<forge::asio::notification> terminal_completed_;
+   std::shared_ptr<void> lifetime_;
 };
 
 } // namespace
 
 struct connection::impl final : std::enable_shared_from_this<connection::impl> {
    impl(std::shared_ptr<native_stream> stream_value, tls::context_snapshot_ptr context_value,
-        std::size_t read_chunk_size_value)
+        std::size_t read_chunk_size_value, std::shared_ptr<void> lifetime_value)
        : stream(std::move(stream_value)), context(std::move(context_value)),
          strand(asio::make_strand(stream->lowest_layer().get_executor())), gates(std::make_shared<io_gates>()),
          terminal_completed(std::make_shared<forge::asio::notification>()), read_chunk_size(read_chunk_size_value),
-         id(next_stream_id()) {
+         id(next_stream_id()), lifetime(std::move(lifetime_value)) {
       auto error = boost::system::error_code{};
       local_value = from_asio_endpoint(stream->lowest_layer().local_endpoint(error));
       if (error) {
@@ -579,9 +581,12 @@ struct connection::impl final : std::enable_shared_from_this<connection::impl> {
       auto current = stream;
       auto current_gates = gates;
       auto completed = terminal_completed;
+      auto lifetime_value = lifetime;
       asio::co_spawn(
           strand,
-          [current = std::move(current), current_gates = std::move(current_gates)]() -> asio::awaitable<void> {
+          [current = std::move(current), current_gates = std::move(current_gates),
+           lifetime_value = std::move(lifetime_value)]() -> asio::awaitable<void> {
+             static_cast<void>(lifetime_value);
              try {
                 static_cast<void>(co_await current_gates->terminal_requested.async_wait(0));
              } catch (...) {
@@ -725,17 +730,18 @@ struct connection::impl final : std::enable_shared_from_this<connection::impl> {
 
    [[nodiscard]] transport::stream_connection into_transport_stream() {
       static_assert(std::is_nothrow_move_constructible_v<transport::stream_connection>);
-      auto model = std::make_shared<stream_model>(context, strand, gates, terminal_completed, read_chunk_size, id);
+      auto model =
+          std::make_shared<stream_model>(context, strand, gates, terminal_completed, read_chunk_size, id, lifetime);
       auto weak = std::weak_ptr<stream_model>{model};
       auto result = transport::stream_connection{
           .local_endpoint = local_value,
           .remote_endpoint = remote_value,
-          .stream = transport::detail::stream_access::make_cancelable(
-              model, [weak = std::move(weak)]() noexcept {
-                 if (auto value = weak.lock()) {
-                    value->request_cancel();
-                 }
-              }),
+          .stream = transport::detail::stream_access::make_cancelable(model,
+                                                                      [weak = std::move(weak)]() noexcept {
+                                                                         if (auto value = weak.lock()) {
+                                                                            value->request_cancel();
+                                                                         }
+                                                                      }),
       };
       commit_handoff(model);
       return result;
@@ -803,12 +809,13 @@ struct connection::impl final : std::enable_shared_from_this<connection::impl> {
    mutable std::mutex state_mutex;
    connection_state state = connection_state::active;
    std::size_t active_operations = 0;
+   std::shared_ptr<void> lifetime;
 };
 
 connection::connection() = default;
 connection::connection(native_token, std::shared_ptr<native_stream> stream, tls::context_snapshot_ptr context,
-                       std::size_t read_chunk_size)
-    : impl_(std::make_shared<impl>(std::move(stream), std::move(context), read_chunk_size)) {
+                       std::size_t read_chunk_size, std::shared_ptr<void> lifetime)
+    : impl_(std::make_shared<impl>(std::move(stream), std::move(context), read_chunk_size, std::move(lifetime))) {
    impl_->start_terminal_worker();
 }
 connection::~connection() {
@@ -945,7 +952,8 @@ boost::asio::awaitable<connection> async_upgrade_client(tcp::connection source, 
    }
    const auto remote = source.remote_endpoint();
    auto context = make_client_context(options);
-   auto stream = tls::make_asio_stream(context, std::move(source).release_socket());
+   auto lifetime = std::shared_ptr<void>{};
+   auto stream = tls::make_asio_stream(context, std::move(source).release_socket(lifetime));
    configure_tls_client_stream(*stream, options, remote.host, *context);
 
    try {
@@ -956,7 +964,8 @@ boost::asio::awaitable<connection> async_upgrade_client(tcp::connection source, 
    }
    const auto expected_host = options.server_name.empty() ? remote.host : options.server_name;
    validate_tls_peer(*stream, *context, options.security, expected_host);
-   co_return connection{connection::native_token{}, std::move(stream), std::move(context), options.read_chunk_size};
+   co_return connection{connection::native_token{}, std::move(stream), std::move(context), options.read_chunk_size,
+                        std::move(lifetime)};
 }
 
 boost::asio::awaitable<connection> async_upgrade_server(tcp::connection source, server_options options) {
@@ -985,10 +994,12 @@ boost::asio::awaitable<connection> async_upgrade_server(tcp::connection source, 
       FORGE_THROW_EXCEPTION(exceptions::closed, "invalid source tcp connection");
    }
    auto context = make_server_context(options);
-   auto stream = tls::make_asio_stream(context, std::move(source).release_socket());
+   auto lifetime = std::shared_ptr<void>{};
+   auto stream = tls::make_asio_stream(context, std::move(source).release_socket(lifetime));
    co_await async_handshake(stream, asio::ssl::stream_base::server, timeout, stop);
    validate_tls_peer(*stream, *context, options.security, {});
-   co_return connection{connection::native_token{}, std::move(stream), std::move(context), options.read_chunk_size};
+   co_return connection{connection::native_token{}, std::move(stream), std::move(context), options.read_chunk_size,
+                        std::move(lifetime)};
 }
 
 } // namespace forge::net::stcp

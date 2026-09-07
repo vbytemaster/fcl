@@ -20,12 +20,13 @@ import forge.net.transport.frame;
 import forge.net.transport.stream;
 
 #include "details/resource_stream.hxx"
+#include "details/resource_service.hxx"
 
 namespace forge::net::p2p::detail {
 namespace {
 
-[[nodiscard]] std::shared_ptr<void> queued_lifetime(resource_manager::queued_bytes_reservation reservation) {
-   return std::make_shared<resource_manager::queued_bytes_reservation>(std::move(reservation));
+[[nodiscard]] std::shared_ptr<void> memory_lifetime(resource_manager::memory_reservation reservation) {
+   return std::make_shared<resource_manager::memory_reservation>(std::move(reservation));
 }
 
 [[nodiscard]] std::uint64_t framed_size(std::size_t payload_size) noexcept {
@@ -57,8 +58,8 @@ void stream_admission_handler::commit() const {
    }
 }
 
-resource_stream::resource_stream(resource_manager manager, resource_manager::stream_reservation reservation)
-    : manager_(std::move(manager)), reservation_(std::move(reservation)) {}
+resource_stream::resource_stream(resource_manager::stream_reservation reservation)
+    : reservation_(std::move(reservation)) {}
 
 resource_stream::~resource_stream() noexcept {
    if (claim_terminal_owner()) {
@@ -79,48 +80,63 @@ std::int64_t resource_stream::id() const noexcept {
    return stream_.id();
 }
 
-bool resource_stream::bind(resource_manager::scope value) noexcept {
-   return reservation_.bind(std::move(value));
+resource_manager::stream_reservation::bind_result resource_stream::bind_protocol(const protocol_id& value) noexcept {
+   return reservation_.bind_protocol(value);
+}
+
+resource_manager::stream_reservation::bind_result
+resource_stream::bind_service_for_protocol(const protocol_id& value, bool dht_profile) noexcept {
+   try {
+      const auto service = resource_service_id(value, dht_profile);
+      return reservation_.bind_service(service);
+   } catch (...) {
+      return resource_manager::stream_reservation::bind_result::runtime_failure;
+   }
+}
+
+std::optional<resource_manager::memory_reservation>
+resource_stream::reserve_memory(std::uint64_t bytes, resource_manager::memory_priority priority) noexcept {
+   return reservation_.reserve_memory(bytes, priority);
 }
 
 boost::asio::awaitable<void> resource_stream::async_write(std::span<const std::uint8_t> bytes) {
-   auto admitted = manager_.reserve_queued_bytes(bytes.size());
+   auto admitted = reservation_.reserve_memory(bytes.size(), resource_manager::memory_priority::high);
    if (!admitted) {
       FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P node queued-byte budget exhausted");
    }
    auto owned = forge::net::transport::chunk{bytes};
-   forge::net::transport::detail::chunk_access::attach_lifetime(owned, queued_lifetime(std::move(*admitted)));
+   forge::net::transport::detail::chunk_access::attach_lifetime(owned, memory_lifetime(std::move(*admitted)));
    co_await stream_.async_write(std::move(owned));
 }
 
 boost::asio::awaitable<void> resource_stream::async_write_chunk(forge::net::transport::chunk bytes) {
-   auto admitted = manager_.reserve_queued_bytes(bytes.size());
+   auto admitted = reservation_.reserve_memory(bytes.size(), resource_manager::memory_priority::high);
    if (!admitted) {
       FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P node queued-byte budget exhausted");
    }
-   forge::net::transport::detail::chunk_access::attach_lifetime(bytes, queued_lifetime(std::move(*admitted)));
+   forge::net::transport::detail::chunk_access::attach_lifetime(bytes, memory_lifetime(std::move(*admitted)));
    co_await stream_.async_write(std::move(bytes));
 }
 
 boost::asio::awaitable<void> resource_stream::async_write_frame(std::span<const std::uint8_t> bytes) {
-   auto admitted = manager_.reserve_queued_bytes(framed_size(bytes.size()));
+   auto admitted = reservation_.reserve_memory(framed_size(bytes.size()), resource_manager::memory_priority::always);
    if (!admitted) {
       FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P node queued-byte budget exhausted");
    }
    auto encoded = forge::net::transport::chunk{forge::net::transport::encode_frame(bytes)};
-   forge::net::transport::detail::chunk_access::attach_lifetime(encoded, queued_lifetime(std::move(*admitted)));
+   forge::net::transport::detail::chunk_access::attach_lifetime(encoded, memory_lifetime(std::move(*admitted)));
    co_await stream_.async_write(std::move(encoded));
 }
 
 boost::asio::awaitable<void> resource_stream::async_write_frame_chunk(forge::net::transport::chunk bytes) {
-   auto admitted = manager_.reserve_queued_bytes(framed_size(bytes.size()));
+   auto admitted = reservation_.reserve_memory(framed_size(bytes.size()), resource_manager::memory_priority::always);
    if (!admitted) {
       FORGE_THROW_EXCEPTION(exceptions::backpressure_rejected, "P2P node queued-byte budget exhausted");
    }
    auto [payload, source_lifetime] = forge::net::transport::detail::chunk_access::consume(std::move(bytes));
    auto encoded = forge::net::transport::chunk{forge::net::transport::encode_frame(payload)};
    forge::net::transport::detail::chunk_access::attach_lifetime(encoded, std::move(source_lifetime));
-   forge::net::transport::detail::chunk_access::attach_lifetime(encoded, queued_lifetime(std::move(*admitted)));
+   forge::net::transport::detail::chunk_access::attach_lifetime(encoded, memory_lifetime(std::move(*admitted)));
    co_await stream_.async_write(std::move(encoded));
 }
 
@@ -187,14 +203,19 @@ void resource_stream::release_terminal_owner() noexcept {
 }
 
 std::pair<forge::net::transport::stream, std::shared_ptr<resource_stream>>
-prepare_resource_stream(resource_manager manager, resource_manager::stream_reservation reservation) {
-   auto resource = std::make_shared<resource_stream>(std::move(manager), std::move(reservation));
+prepare_resource_stream(resource_manager::stream_reservation reservation) {
+   auto resource = std::make_shared<resource_stream>(std::move(reservation));
    auto weak = std::weak_ptr<resource_stream>{resource};
-   auto stream =
-       forge::net::transport::detail::stream_access::make_cancelable(resource, [weak = std::move(weak)]() noexcept {
+   auto stream = forge::net::transport::detail::stream_access::make_cancelable(
+       resource,
+       [weak = std::move(weak)]() noexcept {
           if (auto value = weak.lock()) {
              value->request_cancel();
           }
+       },
+       []() noexcept {
+          // The dispatcher still owns resource and performs graceful close.
+          // An escaped facade remains protected by resource_stream's destructor.
        });
    return {std::move(stream), std::move(resource)};
 }

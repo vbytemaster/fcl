@@ -69,6 +69,7 @@ import forge.net.yamux.session;
 #include "details/owner_cancellation.hxx"
 #include "details/lifecycle_wakeup.hxx"
 #include "details/node_impl.hxx"
+#include "details/session_lifecycle.hxx"
 #include "details/topology_dht_fanout.hxx"
 #include "details/topology_peer_exchange_claims.hxx"
 #include "details/worker_stop_bridge.hxx"
@@ -330,20 +331,17 @@ boost::asio::awaitable<void> node::impl::async_close_topology_sessions(std::vect
 
    for (const auto& session : removed) {
       identify_service.forget(session->id);
-      session->connection.cancel();
+      detail::request_session_cancel(session->connection);
    }
    co_await boost::asio::this_coro::reset_cancellation_state(boost::asio::disable_cancellation{});
    for (const auto& session : removed) {
-      auto ticket = teardown.track([session] { session->connection.cancel(); });
-      if (!ticket.active()) {
-         session->resource.release();
-         continue;
-      }
+      auto ticket = teardown.track([session] { detail::request_session_cancel(session->connection); });
       try {
          co_await session->connection.async_close();
       } catch (...) {
-         session->connection.cancel();
+         detail::request_session_cancel(session->connection);
       }
+      session->native_lifetime.reset();
       session->resource.release();
       ticket.release();
    }

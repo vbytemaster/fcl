@@ -12,6 +12,7 @@ module;
 
 export module forge.net.quic.options;
 
+import forge.net.quic.endpoint;
 import forge.net.quic.security;
 
 export namespace forge::net::quic {
@@ -44,6 +45,9 @@ struct client_options {
    std::function<bool(std::string_view)> test_failpoint;
    // Absent uses connector-owned caching. Both empty explicitly disables it.
    std::optional<client_token_callbacks> client_tokens;
+   // Opaque owner lifetime for the native client UDP socket. QUIC never
+   // interprets this value and releases it when the connection closes.
+   std::shared_ptr<void> connection_lifetime;
 };
 
 struct server_options {
@@ -54,6 +58,10 @@ struct server_options {
    security_options security{.verify_peer = false};
    std::string certificate_pem;
    std::string private_key_pem;
+   // Runs after a new UDP peer is accepted and before any TLS/QUIC state is
+   // allocated. A false result rejects that connection independently of
+   // resource admission.
+   std::function<bool(const endpoint& local, const endpoint& remote)> inbound_connection_filter;
    std::function<std::shared_ptr<void>()> inbound_admission;
 };
 

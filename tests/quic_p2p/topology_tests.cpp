@@ -78,9 +78,6 @@ namespace {
    return connection_manager{connection_manager::policy{
        .max_sessions = 8,
        .low_watermark = 2,
-       .max_inbound_sessions = 8,
-       .max_outbound_sessions = 8,
-       .max_sessions_per_peer = 4,
        .grace_period = std::chrono::milliseconds{0},
        .prune_silence = std::chrono::milliseconds{1},
    }};
@@ -114,12 +111,11 @@ namespace {
    };
 }
 
-boost::asio::awaitable<bool>
-wait_for_dial_cancellation(std::shared_ptr<forge::asio::notification> canceled, std::promise<void>* started,
-                           std::shared_ptr<cancellation_latch> cancellation) {
+boost::asio::awaitable<bool> wait_for_dial_cancellation(std::shared_ptr<forge::asio::notification> canceled,
+                                                        std::promise<void>* started,
+                                                        std::shared_ptr<cancellation_latch> cancellation) {
    const auto observed = canceled->epoch();
-   auto subscription =
-       cancellation_latch::subscribe(cancellation, [canceled] noexcept { canceled->notify(); });
+   auto subscription = cancellation_latch::subscribe(cancellation, [canceled] noexcept { canceled->notify(); });
    static_cast<void>(subscription);
    started->set_value();
    static_cast<void>(co_await canceled->async_wait(observed));
@@ -333,26 +329,29 @@ BOOST_AUTO_TEST_CASE(p2p_topology_manager_completion_publication_survives_failpo
    auto fail_refresh_completion = std::atomic_bool{true};
    auto fail_parent_completion = std::atomic_bool{true};
    auto callbacks = topology_callbacks();
-   callbacks.discover = [release, &started](std::shared_ptr<cancellation_latch>)
-       -> boost::asio::awaitable<std::vector<discovery::result>> {
+   callbacks.discover =
+       [release,
+        &started](std::shared_ptr<cancellation_latch>) -> boost::asio::awaitable<std::vector<discovery::result>> {
       const auto observed = release->epoch();
       started.set_value();
       static_cast<void>(co_await release->async_wait(observed));
       co_return std::vector<discovery::result>{};
    };
-   auto manager = std::make_shared<detail::topology_manager>(
-       test_topology_policy(), std::move(callbacks), detail::topology_manager::clocks{
-                                                       .before_refresh_completion = [&] {
-                                                          if (fail_refresh_completion.exchange(false)) {
-                                                             throw std::bad_alloc{};
-                                                          }
-                                                       },
-                                                       .before_parent_completion = [&] {
-                                                          if (fail_parent_completion.exchange(false)) {
-                                                             throw std::bad_alloc{};
-                                                          }
-                                                       },
-                                                   });
+   auto manager = std::make_shared<detail::topology_manager>(test_topology_policy(), std::move(callbacks),
+                                                             detail::topology_manager::clocks{
+                                                                 .before_refresh_completion =
+                                                                     [&] {
+                                                                        if (fail_refresh_completion.exchange(false)) {
+                                                                           throw std::bad_alloc{};
+                                                                        }
+                                                                     },
+                                                                 .before_parent_completion =
+                                                                     [&] {
+                                                                        if (fail_parent_completion.exchange(false)) {
+                                                                           throw std::bad_alloc{};
+                                                                        }
+                                                                     },
+                                                             });
    manager->start(lifecycle);
    started.get_future().wait();
 
@@ -548,8 +547,8 @@ BOOST_AUTO_TEST_CASE(p2p_topology_manager_keeps_jittered_periodic_deadline_acros
    auto first_deadline = std::chrono::steady_clock::time_point{};
    auto manager_value = static_cast<detail::topology_manager*>(nullptr);
    auto callbacks = topology_callbacks();
-   callbacks.discover = [&refreshes](std::shared_ptr<cancellation_latch>)
-       -> boost::asio::awaitable<std::vector<discovery::result>> {
+   callbacks.discover =
+       [&refreshes](std::shared_ptr<cancellation_latch>) -> boost::asio::awaitable<std::vector<discovery::result>> {
       ++refreshes;
       co_return std::vector<discovery::result>{};
    };
@@ -679,7 +678,8 @@ BOOST_AUTO_TEST_CASE(p2p_topology_manager_saturates_dial_retry_deadline_near_ste
    auto dials = std::size_t{};
    auto deadline = std::chrono::steady_clock::time_point{};
    auto callbacks = topology_callbacks();
-   callbacks.discover = [](std::shared_ptr<cancellation_latch>) -> boost::asio::awaitable<std::vector<discovery::result>> {
+   callbacks.discover =
+       [](std::shared_ptr<cancellation_latch>) -> boost::asio::awaitable<std::vector<discovery::result>> {
       co_return std::vector<discovery::result>{
           discovery::result{
               .peer = test_peer(98),
@@ -923,9 +923,9 @@ BOOST_AUTO_TEST_CASE(p2p_topology_manager_all_enabled_source_failures_fail_manua
    auto release = std::make_shared<forge::asio::notification>();
    auto started = std::promise<void>{};
    auto callbacks = topology_callbacks();
-   callbacks.discover = [release,
-                         &started](std::shared_ptr<cancellation_latch>)
-       -> boost::asio::awaitable<std::vector<discovery::result>> {
+   callbacks.discover =
+       [release,
+        &started](std::shared_ptr<cancellation_latch>) -> boost::asio::awaitable<std::vector<discovery::result>> {
       const auto observed = release->epoch();
       started.set_value();
       static_cast<void>(co_await release->async_wait(observed));
@@ -947,8 +947,8 @@ BOOST_AUTO_TEST_CASE(p2p_topology_manager_all_enabled_source_failures_fail_manua
        -> boost::asio::awaitable<detail::topology_manager::callbacks::rendezvous_discover_result> {
       throw exceptions::internal{"Rendezvous discovery failed"};
    };
-   callbacks.peer_exchange = [](std::shared_ptr<cancellation_latch>, std::size_t)
-       -> boost::asio::awaitable<std::vector<discovery::result>> {
+   callbacks.peer_exchange = [](std::shared_ptr<cancellation_latch>,
+                                std::size_t) -> boost::asio::awaitable<std::vector<discovery::result>> {
       throw exceptions::internal{"peer exchange discovery failed"};
    };
    auto policy = test_topology_policy();
@@ -1182,8 +1182,8 @@ BOOST_AUTO_TEST_CASE(p2p_topology_manager_reserves_target_slots_across_parallel_
    auto dial_calls = std::atomic_size_t{0};
    auto connected = std::atomic_size_t{0};
    auto callbacks = topology_callbacks();
-   callbacks.discover = [](std::shared_ptr<cancellation_latch>)
-       -> boost::asio::awaitable<std::vector<discovery::result>> {
+   callbacks.discover =
+       [](std::shared_ptr<cancellation_latch>) -> boost::asio::awaitable<std::vector<discovery::result>> {
       co_return std::vector<discovery::result>{
           discovery::result{.peer = test_peer(61),
                             .endpoints = {configured_rendezvous_endpoint(test_peer(61), 4061)},
@@ -1202,9 +1202,8 @@ BOOST_AUTO_TEST_CASE(p2p_topology_manager_reserves_target_slots_across_parallel_
    callbacks.sessions = [&connected] {
       return connection_manager::snapshot{.active_peers = connected.load(std::memory_order_acquire)};
    };
-   callbacks.dial = [release_slow, &slow_started, &third_started, &dial_calls,
-                     &connected](discovery::result, std::shared_ptr<cancellation_latch>)
-       -> boost::asio::awaitable<bool> {
+   callbacks.dial = [release_slow, &slow_started, &third_started, &dial_calls, &connected](
+                        discovery::result, std::shared_ptr<cancellation_latch>) -> boost::asio::awaitable<bool> {
       const auto call = dial_calls.fetch_add(1, std::memory_order_acq_rel);
       if (call == 0) {
          const auto observed = release_slow->epoch();
@@ -1217,14 +1216,15 @@ BOOST_AUTO_TEST_CASE(p2p_topology_manager_reserves_target_slots_across_parallel_
       co_return true;
    };
    auto manager = std::make_shared<detail::topology_manager>(
-       test_topology_policy(), std::move(callbacks), detail::topology_manager::clocks{
-                                                        .before_dial_worker_completion = [&] {
-                                                           if (!completion_reported.exchange(
-                                                                   true, std::memory_order_acq_rel)) {
-                                                              fast_worker_completed.set_value();
-                                                           }
-                                                        },
-                                                    });
+       test_topology_policy(), std::move(callbacks),
+       detail::topology_manager::clocks{
+           .before_dial_worker_completion =
+               [&] {
+                  if (!completion_reported.exchange(true, std::memory_order_acq_rel)) {
+                     fast_worker_completed.set_value();
+                  }
+               },
+       });
    manager->start(lifecycle);
    auto refreshed = boost::asio::co_spawn(runtime.context(), manager->async_refresh(), boost::asio::use_future);
    BOOST_REQUIRE(slow_started.get_future().wait_for(std::chrono::seconds{2}) == std::future_status::ready);
@@ -1250,8 +1250,8 @@ BOOST_AUTO_TEST_CASE(p2p_topology_manager_closes_admission_after_synchronous_dia
    auto blocked_started_future = blocked_started.get_future().share();
    auto blocked_canceled = std::make_shared<forge::asio::notification>();
    auto callbacks = topology_callbacks();
-   callbacks.discover = [](std::shared_ptr<cancellation_latch>)
-       -> boost::asio::awaitable<std::vector<discovery::result>> {
+   callbacks.discover =
+       [](std::shared_ptr<cancellation_latch>) -> boost::asio::awaitable<std::vector<discovery::result>> {
       co_return std::vector<discovery::result>{
           discovery::result{.peer = test_peer(64),
                             .endpoints = {configured_rendezvous_endpoint(test_peer(64), 4064)},
@@ -1267,10 +1267,10 @@ BOOST_AUTO_TEST_CASE(p2p_topology_manager_closes_admission_after_synchronous_dia
                             .expires_at = std::chrono::system_clock::now() + std::chrono::hours{1}},
       };
    };
-   callbacks.dial = [blocked_canceled, blocked_started_future, &blocked_started, &first_round,
-                     &first_round_calls, &unexpected_admission](discovery::result,
-                                                                std::shared_ptr<cancellation_latch> cancellation)
-      -> boost::asio::awaitable<bool> {
+   callbacks.dial =
+       [blocked_canceled, blocked_started_future, &blocked_started, &first_round, &first_round_calls,
+        &unexpected_admission](discovery::result,
+                               std::shared_ptr<cancellation_latch> cancellation) -> boost::asio::awaitable<bool> {
       if (!first_round.load(std::memory_order_acquire)) {
          return successful_topology_dial();
       }
@@ -1315,8 +1315,8 @@ BOOST_AUTO_TEST_CASE(p2p_topology_manager_dial_join_failure_cancels_and_drains_b
    auto active_dials = std::atomic_size_t{0};
    auto maximum_active_dials = std::atomic_size_t{0};
    auto callbacks = topology_callbacks();
-   callbacks.discover = [](std::shared_ptr<cancellation_latch>)
-       -> boost::asio::awaitable<std::vector<discovery::result>> {
+   callbacks.discover =
+       [](std::shared_ptr<cancellation_latch>) -> boost::asio::awaitable<std::vector<discovery::result>> {
       co_return std::vector<discovery::result>{
           discovery::result{.peer = test_peer(44),
                             .endpoints = {configured_rendezvous_endpoint(test_peer(44), 4144)},
@@ -1330,20 +1330,21 @@ BOOST_AUTO_TEST_CASE(p2p_topology_manager_dial_join_failure_cancels_and_drains_b
                             .score = 1.0},
       };
    };
-   callbacks.dial = [release, cancellation_seen, first_worker_finished, &dial_started, &dial_calls, &active_dials,
-                     &maximum_active_dials](discovery::result, std::shared_ptr<cancellation_latch> cancellation)
-       -> boost::asio::awaitable<bool> {
+   callbacks.dial =
+       [release, cancellation_seen, first_worker_finished, &dial_started, &dial_calls, &active_dials,
+        &maximum_active_dials](discovery::result,
+                               std::shared_ptr<cancellation_latch> cancellation) -> boost::asio::awaitable<bool> {
       const auto call = dial_calls.fetch_add(1, std::memory_order_acq_rel);
       const auto active = active_dials.fetch_add(1, std::memory_order_acq_rel) + 1;
       auto maximum = maximum_active_dials.load(std::memory_order_acquire);
-      while (maximum < active && !maximum_active_dials.compare_exchange_weak(
-                                     maximum, active, std::memory_order_acq_rel, std::memory_order_acquire)) {
+      while (maximum < active && !maximum_active_dials.compare_exchange_weak(maximum, active, std::memory_order_acq_rel,
+                                                                             std::memory_order_acquire)) {
       }
       if (call == 0) {
          const auto release_epoch = release->epoch();
          const auto cancellation_epoch = cancellation_seen->epoch();
-         auto subscription = cancellation_latch::subscribe(
-             cancellation, [cancellation_seen] noexcept { cancellation_seen->notify(); });
+         auto subscription =
+             cancellation_latch::subscribe(cancellation, [cancellation_seen] noexcept { cancellation_seen->notify(); });
          static_cast<void>(subscription);
          dial_started.set_value();
          static_cast<void>(co_await cancellation_seen->async_wait(cancellation_epoch));
@@ -1358,19 +1359,20 @@ BOOST_AUTO_TEST_CASE(p2p_topology_manager_dial_join_failure_cancels_and_drains_b
    auto policy = test_topology_policy();
    policy.max_parallel_dials = 1;
    policy.peer_exchange_enabled = false;
-   auto manager = std::make_shared<detail::topology_manager>(
-       std::move(policy), std::move(callbacks),
-       detail::topology_manager::clocks{
-           .before_dial_join_wait = [&] {
-              if (fail_join.exchange(false, std::memory_order_acq_rel)) {
-                 dial_started_future.wait();
-                 throw std::bad_alloc{};
-              }
-           },
-       });
+   auto manager =
+       std::make_shared<detail::topology_manager>(std::move(policy), std::move(callbacks),
+                                                  detail::topology_manager::clocks{
+                                                      .before_dial_join_wait =
+                                                          [&] {
+                                                             if (fail_join.exchange(false, std::memory_order_acq_rel)) {
+                                                                dial_started_future.wait();
+                                                                throw std::bad_alloc{};
+                                                             }
+                                                          },
+                                                  });
    const auto cancellation_epoch = cancellation_seen->epoch();
    auto canceled = boost::asio::co_spawn(runtime.context(), cancellation_seen->async_wait(cancellation_epoch),
-                                          boost::asio::use_future);
+                                         boost::asio::use_future);
    const auto finished_epoch = first_worker_finished->epoch();
    auto finished = boost::asio::co_spawn(runtime.context(), first_worker_finished->async_wait(finished_epoch),
                                          boost::asio::use_future);
@@ -1715,9 +1717,6 @@ BOOST_AUTO_TEST_CASE(p2p_connection_manager_soft_tag_limits_are_failure_atomic) 
    auto manager = connection_manager{connection_manager::policy{
        .max_sessions = 8,
        .low_watermark = 2,
-       .max_inbound_sessions = 8,
-       .max_outbound_sessions = 8,
-       .max_sessions_per_peer = 4,
        .max_tagged_peers = 1,
        .max_tags_per_peer = 1,
        .max_tag_size = 3,
@@ -1776,9 +1775,6 @@ BOOST_AUTO_TEST_CASE(p2p_connection_manager_hard_admission_uses_tag_score_grace_
    auto manager = connection_manager{connection_manager::policy{
        .max_sessions = 2,
        .low_watermark = 1,
-       .max_inbound_sessions = 2,
-       .max_outbound_sessions = 2,
-       .max_sessions_per_peer = 2,
        .grace_period = std::chrono::seconds{10},
        .prune_silence = std::chrono::milliseconds{1},
    }};
@@ -1805,9 +1801,6 @@ BOOST_AUTO_TEST_CASE(p2p_connection_manager_hard_admission_uses_tag_score_grace_
    auto grace_manager = connection_manager{connection_manager::policy{
        .max_sessions = 4,
        .low_watermark = 1,
-       .max_inbound_sessions = 4,
-       .max_outbound_sessions = 4,
-       .max_sessions_per_peer = 2,
        .grace_period = std::chrono::seconds{10},
        .prune_silence = std::chrono::milliseconds{1},
    }};

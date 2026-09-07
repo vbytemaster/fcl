@@ -14,6 +14,7 @@ namespace forge::net::p2p::detail {
    case exceptions::code::invalid_identity:
    case exceptions::code::duplicate_protocol:
    case exceptions::code::backpressure_rejected:
+   case exceptions::code::connection_rejected:
    case exceptions::code::canceled:
    case exceptions::code::internal:
    case exceptions::code::sequence_exhausted:

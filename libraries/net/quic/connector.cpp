@@ -64,6 +64,8 @@ namespace {
       return exceptions::code::malformed_frame;
    case detail::engine_error_kind::backpressure_rejected:
       return exceptions::code::backpressure_rejected;
+   case detail::engine_error_kind::connection_rejected:
+      return exceptions::code::connection_rejected;
    case detail::engine_error_kind::connection_closed:
       return exceptions::code::connection_closed;
    case detail::engine_error_kind::stream_closed:
@@ -140,6 +142,7 @@ namespace {
        .certificate_pem = options.certificate_pem,
        .private_key_pem = options.private_key_pem,
        .test_failpoint = options.test_failpoint,
+       .connection_lifetime = options.connection_lifetime,
    };
    if (options.client_tokens && options.client_tokens->take && options.client_tokens->store) {
       out.client_tokens = detail::engine_client_options::token_callbacks{

@@ -299,8 +299,12 @@ boost::asio::awaitable<void> session::impl::async_close() {
 }
 
 void session::impl::cancel() {
+   request_cancel();
+}
+
+void session::impl::request_cancel() noexcept {
    fail_session(exceptions::code::canceled, "yamux session canceled");
-   stream_.cancel();
+   stream_.request_cancel();
 }
 
 std::shared_ptr<session::impl::stream_state> session::impl::make_stream_locked(std::uint32_t id,
