@@ -12,6 +12,7 @@ struct connection_handle {
 
 struct stream_handle {
    std::shared_ptr<engine_stream> engine;
+   std::shared_ptr<engine_connection> connection;
 };
 
 } // namespace forge::net::quic::detail

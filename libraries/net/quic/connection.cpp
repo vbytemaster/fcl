@@ -105,18 +105,10 @@ connection::connection() = default;
 connection::connection(detail::connection_handle handle)
     : impl_(std::make_shared<impl>(impl{.engine = std::move(handle.engine)})) {}
 
-connection::~connection() {
-   request_cancel();
-}
+connection::~connection() = default;
 
 connection::connection(connection&&) noexcept = default;
-connection& connection::operator=(connection&& other) noexcept {
-   if (this != &other) {
-      request_cancel();
-      impl_ = std::move(other.impl_);
-   }
-   return *this;
-}
+connection& connection::operator=(connection&&) noexcept = default;
 
 bool connection::valid() const noexcept {
    return impl_ != nullptr;
@@ -162,7 +154,8 @@ boost::asio::awaitable<stream> connection::async_open_stream() {
    }
    try {
       auto engine_stream = co_await impl_->engine->async_open_stream();
-      co_return detail::stream_access::make(detail::stream_handle{.engine = std::move(engine_stream)});
+      co_return detail::stream_access::make(
+          detail::stream_handle{.engine = std::move(engine_stream), .connection = impl_->engine});
    } catch (const detail::engine_failure& error) {
       raise_engine_failure(error);
    }
@@ -174,7 +167,8 @@ boost::asio::awaitable<stream> connection::async_accept_stream() {
    }
    try {
       auto engine_stream = co_await impl_->engine->async_accept_stream();
-      co_return detail::stream_access::make(detail::stream_handle{.engine = std::move(engine_stream)});
+      co_return detail::stream_access::make(
+          detail::stream_handle{.engine = std::move(engine_stream), .connection = impl_->engine});
    } catch (const detail::engine_failure& error) {
       raise_engine_failure(error);
    }

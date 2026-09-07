@@ -2208,7 +2208,9 @@ void engine_stream::request_cancel() noexcept {
 
 engine_connection::engine_connection(std::shared_ptr<impl> impl_value) : impl_(std::move(impl_value)) {}
 
-engine_connection::~engine_connection() = default;
+engine_connection::~engine_connection() {
+   request_cancel();
+}
 
 engine_connection_metrics engine_connection::metrics() const {
    return impl_ ? impl_->metrics.snapshot() : engine_connection_metrics{};
